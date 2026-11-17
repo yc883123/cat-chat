@@ -8,9 +8,12 @@
     .venv/Scripts/python.exe verify\\studio_catalog_build.py --sources-dir <目录> [--out-dir public\\studio]
     .venv/Scripts/python.exe verify\\studio_catalog_build.py --append-manju [--out-dir public\\studio]
     .venv/Scripts/python.exe verify\\studio_catalog_build.py --append-gslh [--out-dir public\\studio]
+    .venv/Scripts/python.exe verify\\studio_catalog_build.py --append-moss [--out-dir public\\studio]
+    .venv/Scripts/python.exe verify\\studio_catalog_build.py --append-creative [--out-dir public\\studio]
 
-漫剧始终读取仓库 skills/ai-manju-skills；古手梨花合集读取 presets/gushoulihua-skills。
---manju-dir / --gslh-dir 可指定包根目录做离线校验。增补只写索引、对应正文分片与JSON报告；
+漫剧始终读取仓库 skills/ai-manju-skills；古手梨花合集读取 presets/gushoulihua-skills；
+MOSS 提示词套件读取 presets/moss-prompt-kit。
+--manju-dir / --gslh-dir / --moss-dir 可指定包根目录做离线校验。增补只写索引、对应正文分片与JSON报告；
 Markdown报告仅完整构建显式 --report-md 时生成。
 
 sources 目录约定文件名（`--sources-dir` 由运行者传语义路径，本脚本不内嵌真实路径）：
@@ -35,10 +38,16 @@ import sys
 from collections import Counter, OrderedDict
 from pathlib import Path
 
+if __package__:
+    from . import studio_creative_presets as creative_presets
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import studio_creative_presets as creative_presets
+
 # 模块/类型枚举与《_studio_plan_v2.md》§3 数据契约一致；越界即拒收。
-MODULES_ALLOWED = ("vs", "h3", "vi", "ec", "global", "script", "game", "style")
+MODULES_ALLOWED = ("vs", "h3", "vi", "ec", "global", "script", "prose", "game", "style")
 TYPES_ALLOWED = ("template", "rule", "lexicon", "example")
-MODULE_ORDER = ("vs", "h3", "vi", "ec", "global", "script", "game", "style")
+MODULE_ORDER = ("vs", "h3", "vi", "ec", "global", "script", "prose", "game", "style")
 
 SNIPPET_N = 700
 BUILD_STAMP = "2026-10-22"
@@ -187,7 +196,7 @@ VAR_PATTERN = re.compile(r"\{\{([^{}]+)\}\}")
 # 产物分片：模块 -> 正文分片文件标签（按需懒加载的最小单位）。
 BODIES_TAG_BY_MODULE = {
     "vs": "prompt", "h3": "prompt", "vi": "prompt", "ec": "prompt", "global": "prompt",
-    "script": "script", "game": "game", "style": "style",
+    "script": "script", "prose": "script", "game": "game", "style": "style",
 }
 
 
@@ -903,6 +912,172 @@ def gslh_family(source_dir: Path | None = None):
     return items, bodies, rejects, stats, descriptive
 
 
+# ---- MOSS-Image 提示词套件：规则 / 引擎 / 官方增强器（--append-moss 幂等增补） ----
+
+MOSS_SOURCE = "moss-prompt-kit"
+MOSS_COLLECTION = "MOSS-Image 提示词套件"
+
+# 官方增强器的 Layout 方向依赖捆绑脚本算坐标，脚本不入库，正文必须交代替代做法。
+MOSS_OFFICIAL_NOTE = (
+    GSLH_SINGLE_FILE_NOTE
+    + "\n> 官方 `scripts/compile_prompt.py` 未随预设内置：Layout 草稿按末尾《references/layout.md》的规则手写，"
+      "不要用「把包围框手工居中」一类改写绕过校验。"
+)
+
+MOSS_PRESETS = (
+    {
+        "id": "vs-221-moss-t2i-rules",
+        "title": "MOSS · 文生图提示词扩写规则",
+        "summary": "中文扩写规则：保留用户指定项，按题材补足主体、动作、空间、构图、光色与材质，只输出一份正向提示词。",
+        "module": "vs", "genre": "提示词规则",
+        "tags": ("MOSS", "文生图", "扩写", "规则"),
+        "mode": "template",
+        "files": ("rules/MOSS提示词优化规则.txt",),
+    },
+    {
+        "id": "vi-121-moss-reverse-rules",
+        "title": "MOSS · 图像反推规则",
+        "summary": "以画面证据为准的中文反推规则：先整体后细节，覆盖主体、动作关系、构图空间、环境光色、材质媒介与画面文字。",
+        "module": "vi", "genre": "图像反推",
+        "tags": ("MOSS", "反推", "规则"),
+        "mode": "template",
+        "files": ("rules/MOSS图像反推规则.txt",),
+    },
+    {
+        "id": "vs-222-fisher-moss-expander",
+        "title": "fisher · MOSS 提示词扩写器（完整版）",
+        "summary": "把一句话、参考图或改图要求扩写成详细中文画面描述；含单主体/双人/群像/环境四种骨架、九类案例与验收记录。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("MOSS", "fisher", "扩写", "提示词引擎"),
+        "mode": "template",
+        "files": ("engines/fisher-moss-prompt-expander-完整版.md",),
+    },
+    {
+        "id": "vs-223-moss-official-enhancer",
+        "title": "MOSS-Image 官方 · 提示词增强器（Caption / Layout）",
+        "summary": "OpenMOSS 官方增强器：普通场景输出连贯 Caption，需要精确文字排版时输出带包围框的 Layout JSON。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("MOSS", "官方", "Caption", "Layout", "提示词引擎"),
+        "mode": "skill",
+        "files": (
+            "official/moss-image-prompt-enhancer/SKILL.md",
+            "official/moss-image-prompt-enhancer/references/layout.md",
+        ),
+    },
+)
+
+
+def _moss_root(source_dir: Path | None) -> Path:
+    if source_dir is not None:
+        return Path(source_dir)
+    return Path(__file__).resolve().parents[1] / "presets" / MOSS_SOURCE
+
+
+def _moss_manifest(root: Path) -> dict:
+    manifest = read_json(root / "source.json")
+    _gslh_require(isinstance(manifest, dict), "moss source.json 必须是对象")
+    _gslh_require(manifest.get("collection") == MOSS_COLLECTION, "moss source.json 合集名不符")
+    rows = manifest.get("files")
+    _gslh_require(isinstance(rows, list) and rows, "moss source.json files 必须为非空数组")
+    mapping: dict[str, dict] = {}
+    for row in rows:
+        _gslh_require(isinstance(row, dict), "moss source.json 文件记录必须是对象")
+        path = str(row.get("path") or "")
+        _gslh_require(bool(path) and not path.startswith(("/", "\\")) and ".." not in path.split("/"),
+                      f"moss 路径非法：{path}")
+        _gslh_require(path not in mapping, f"moss 清单路径重复：{path}")
+        mapping[path] = row
+    required = {path for preset in MOSS_PRESETS for path in preset["files"]}
+    _gslh_require(set(mapping) == required,
+                  f"moss 清单与预设不一致：多 {sorted(set(mapping) - required)} 缺 {sorted(required - set(mapping))}")
+    actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()} - {"source.json"}
+    _gslh_require(actual == required, f"moss 目录与清单不一致：多 {sorted(actual - required)} 缺 {sorted(required - actual)}")
+    for path, row in mapping.items():
+        data = (root / path).read_bytes()
+        _gslh_require(len(data) == int(row.get("bytes") or -1), f"moss 文件字节数不符：{path}")
+        _gslh_require(hashlib.sha256(data).hexdigest() == row.get("sha256"), f"moss 文件哈希不符：{path}")
+    return mapping
+
+
+def _moss_check_body(body: str, preset_id: str) -> None:
+    """与 gslh 同口径，但承认导出文档自带的 `## references/x.md` 小节。
+
+    fisher 的「完整版」是技能目录整体导出：SKILL.md 之后紧跟 `## references/…` 分节原文，
+    不是本转换器拼的 `## 附：…`。两种写法都算已合并，其余参考文档链接仍按悬空判失败。
+    """
+    _gslh_require(bool(body.strip()) and not body.lstrip().startswith("---"),
+                  f"{preset_id} 正文为空或残留 frontmatter")
+    _gslh_require("\r" not in body, f"{preset_id} 正文残留 CRLF")
+    refs = set(re.findall(r"(?<![\w./-])((?:[\w-]+/)?references/[^\s)\]`\"'>]+?\.md)", body))
+    appendix = set(re.findall(r"(?m)^## (?:附：)?(.+)$", body))
+    dangling = sorted(ref for ref in refs
+                      if not any(ref == path or path.endswith("/" + ref) for path in appendix))
+    _gslh_require(not dangling, f"{preset_id} 仍有未合并的参考文档：{dangling}")
+
+
+def _moss_body(preset: dict, root: Path, mapping: dict) -> tuple[str, list[str], list[dict]]:
+    files = list(preset["files"])
+    cleaned: list[str] = []
+    if preset["mode"] == "template":
+        body = _gslh_text(root, files[0]).strip() + "\n"
+    else:
+        raw = (root / files[0]).read_bytes()
+        if b"\r\n" in raw or b"\r" in raw.replace(b"\r\n", b""):
+            cleaned.append("crlf_normalize")
+        skill = _gslh_strip_frontmatter(_gslh_text(root, files[0]), preset["id"])
+        parts = [f"## 附：{path}\n\n{_gslh_text(root, path).strip()}" for path in files[1:]]
+        note = (MOSS_OFFICIAL_NOTE if preset["id"] == "vs-223-moss-official-enhancer"
+                else GSLH_SINGLE_FILE_NOTE)
+        body = note + "\n\n" + skill.strip() + "\n\n---\n\n" + "\n\n".join(parts) + "\n"
+        cleaned += ["frontmatter", "single_file_refs"]
+    _moss_check_body(body, preset["id"])
+    audit = [{"path": path, "sha256": mapping[path]["sha256"], "bytes": mapping[path]["bytes"]}
+             for path in files]
+    return body, cleaned, audit
+
+
+def moss_family(source_dir: Path | None = None):
+    root = _moss_root(source_dir)
+    mapping = _moss_manifest(root)
+    items, bodies, rejects, descriptive, audits = [], {}, [], [], []
+    for order, preset in enumerate(MOSS_PRESETS, 1):
+        body, cleaned, audit = _moss_body(preset, root, mapping)
+        hits, handled = match_sensitive(body, preset["id"])
+        if handled:
+            descriptive.append({"id": preset["id"], "source": MOSS_SOURCE, "markers": sorted(handled)})
+        if hits:
+            rejects.append({"id": preset["id"], "source": MOSS_SOURCE, "reason": [], "sensitive": hits})
+            continue
+        item = new_item(
+            item_id=preset["id"], title=preset["title"], module=preset["module"],
+            item_type="template", summary=preset["summary"], tags=list(preset["tags"]),
+            body=body, source=f"{MOSS_COLLECTION} / {'、'.join(preset['files'])}",
+            genre=preset["genre"], cleaned=cleaned,
+        )
+        item["has_vars"] = bool(item["vars"])
+        item["order"] = order
+        items.append(item)
+        bodies[preset["id"]] = body
+        audits.append({"id": preset["id"], "files": audit, "rules": cleaned,
+                       "output_sha1": item["source_sha1"]})
+    manifest = read_json(root / "source.json")
+    stats = {
+        "collection": MOSS_COLLECTION,
+        "author": str(manifest.get("author") or ""),
+        "license": str(manifest.get("license") or ""),
+        "input": len(MOSS_PRESETS),
+        "output": len(items),
+        "expected": len(MOSS_PRESETS),
+        "dupes": 0,
+        "rejected": len(rejects),
+        "files": len(mapping),
+        "rejected_ids": [row["id"] for row in rejects],
+        "excluded": list(manifest.get("excluded") or []),
+        "audit": audits,
+    }
+    return items, bodies, rejects, stats, descriptive
+
+
 # ---- 家族 3：游戏原画 24 ----
 
 def game_family(source_dir: Path):
@@ -1351,6 +1526,71 @@ def append_gslh(out_dir: Path, source_dir: Path | None = None) -> dict:
     return index
 
 
+def append_moss(out_dir: Path, source_dir: Path | None = None) -> dict:
+    """幂等增补 MOSS 提示词套件；只写索引、prompt正文与JSON报告，校验先于写入。"""
+    moss_items, moss_bodies, rejects, stats, descriptive = moss_family(source_dir)
+    _gslh_require(not rejects, f"moss 预设被拒收：{json.dumps(rejects, ensure_ascii=False)}")
+    index = read_json(out_dir / "catalog_index.json")
+    prompt_bodies = read_json(out_dir / "bodies_prompt.json")
+    report = read_json(out_dir / "conversion_report.json")
+    _gslh_require(isinstance(index, dict) and isinstance(prompt_bodies, dict) and isinstance(report, dict),
+                  "已有索引/正文/报告必须是对象")
+    family_ids = set(moss_bodies)
+    old_items = index.get("items")
+    _gslh_require(isinstance(old_items, list), "已有 items 不是列表")
+    kept = [it for it in old_items if it["id"] not in family_ids]
+    next_order = {module: max((int(it.get("order", 0)) for it in kept if it["module"] == module), default=0)
+                  for module in {preset["module"] for preset in MOSS_PRESETS}}
+    for item in moss_items:
+        next_order[item["module"]] += 1
+        item["order"] = next_order[item["module"]]
+    items = kept + moss_items
+    merged_bodies = {**prompt_bodies, **moss_bodies}
+    for tag in sorted(set(BODIES_TAG_BY_MODULE[it["module"]] for it in items) - {"prompt"}):
+        shard = read_json(out_dir / f"bodies_{tag}.json")
+        _gslh_require(isinstance(shard, dict), f"bodies_{tag}.json 不是对象")
+        merged_bodies.update(shard)
+    problems = cross_check(items, merged_bodies)
+    _gslh_require(not problems, f"增补后契约不符：{problems}")
+    calculated = build_index(items)
+    for key in ("ok", "count", "chars", "modules", "types", "items"):
+        index[key] = calculated[key]
+    previous = (report.get("sources") or {}).get(MOSS_SOURCE, {})
+    index.setdefault("sources", {})[MOSS_SOURCE] = stats
+    report.setdefault("sources", {})[MOSS_SOURCE] = stats
+    counts = report.setdefault("counts", {})
+    counts["expected_plan"] = (int(counts.get("expected_plan", BASE_EXPECTED_TOTAL))
+                               - int(previous.get("expected", 0)) + stats["expected"])
+    counts["input"] = int(counts.get("input", len(kept))) - int(previous.get("input", 0)) + stats["input"]
+    counts["output_index"] = len(items)
+    report["catalog_cleanup"] = catalog_cleanup_report(items)
+    report["catalog_integrity"] = {"index_body_ids_equal": True, "shards": 4, "count": len(items)}
+    report["moss_conversion"] = {
+        "source": f"presets/{MOSS_SOURCE}",
+        "author": stats["author"],
+        "license": stats["license"],
+        "input": stats["input"], "output": stats["output"], "files": stats["files"],
+        "note": "规则类（扩写/反推）按原文整篇入库；官方增强器只收 SKILL.md 与 layout 规则，按单文件合并。",
+        "excluded": stats["excluded"],
+        "audit": stats["audit"],
+    }
+    existing_desc = report.setdefault("descriptive_mentions", [])
+    known = {(row.get("id"), row.get("source")) for row in existing_desc}
+    for row in descriptive:
+        if (row["id"], row["source"]) not in known:
+            existing_desc.append(row)
+    products = report.setdefault("products", {})
+    prompt_output = {**prompt_bodies, **moss_bodies}
+    products["catalog_index.json"] = {**products.get("catalog_index.json", {}), "items": len(items),
+                                      "bytes": len(json.dumps(index, ensure_ascii=False, indent=1).encode("utf-8"))}
+    products["bodies_prompt.json"] = {**products.get("bodies_prompt.json", {}), "items": len(prompt_output),
+                                      "bytes": len(json.dumps(prompt_output, ensure_ascii=False, indent=1).encode("utf-8"))}
+    write_json(out_dir / "catalog_index.json", index)
+    write_json(out_dir / "bodies_prompt.json", prompt_output)
+    write_json(out_dir / "conversion_report.json", report)
+    return index
+
+
 def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -1359,9 +1599,13 @@ def main() -> None:
     parser.add_argument("--sources-dir", help="完整构建必需；旧四套JSON的源目录")
     parser.add_argument("--append-manju", action="store_true", help="幂等增补已存在catalog，只写漫剧相关三份JSON")
     parser.add_argument("--append-gslh", action="store_true", help="幂等增补古手梨花合集预设，只写索引、prompt正文与JSON报告")
+    parser.add_argument("--append-moss", action="store_true", help="幂等增补 MOSS 提示词套件，只写索引、prompt正文与JSON报告")
+    parser.add_argument("--append-creative", action="store_true", help="幂等增补审核后的创作模板，按各条分类写入对应正文分片")
     parser.add_argument("--refresh-prompts", action="store_true", help="幂等刷新内置规则及已核实模板清理，不需旧来源目录")
     parser.add_argument("--manju-dir", help="漫剧包根目录，默认仓库 skills/ai-manju-skills")
     parser.add_argument("--gslh-dir", help="古手梨花合集包根目录，默认仓库 presets/gushoulihua-skills")
+    parser.add_argument("--moss-dir", help="MOSS 提示词套件包根目录，默认仓库 presets/moss-prompt-kit")
+    parser.add_argument("--creative-dir", help="审核后的创作模板目录，默认仓库 presets/creative-prompt-kit")
     parser.add_argument("--out-dir", default="public/studio")
     parser.add_argument("--report-md", help="可选：完整构建额外写Markdown报告；增补模式不写文档")
     args = parser.parse_args()
@@ -1380,6 +1624,16 @@ def main() -> None:
     gslh_dir = Path(args.gslh_dir) if args.gslh_dir else None
     if gslh_dir is not None and not gslh_dir.is_absolute():
         gslh_dir = here / gslh_dir
+    moss_dir = Path(args.moss_dir) if args.moss_dir else None
+    if moss_dir is not None and not moss_dir.is_absolute():
+        moss_dir = here / moss_dir
+    creative_dir = Path(args.creative_dir) if args.creative_dir else None
+    if creative_dir is not None and not creative_dir.is_absolute():
+        creative_dir = here / creative_dir
+    if args.append_creative:
+        index = creative_presets.append(sys.modules[__name__], out_dir, creative_dir)
+        print(f"创作模板增补完成；catalog {index['count']} 条 -> {out_dir}")
+        return
     if args.append_manju:
         index = append_manju(out_dir, manju_dir)
         print(f"manju 21 条；catalog {index['count']} 条；script {index['modules']['script']} 条 -> {out_dir}")
@@ -1388,13 +1642,18 @@ def main() -> None:
         index = append_gslh(out_dir, gslh_dir)
         print(f"gslh 15 条；catalog {index['count']} 条；vs {index['modules']['vs']} 条；h3 {index['modules']['h3']} 条 -> {out_dir}")
         return
+    if args.append_moss:
+        index = append_moss(out_dir, moss_dir)
+        print(f"moss {len(MOSS_PRESETS)} 条；catalog {index['count']} 条；vs {index['modules']['vs']} 条；vi {index['modules']['vi']} 条 -> {out_dir}")
+        return
     if not args.sources_dir:
-        parser.error("完整构建需要 --sources-dir；增补已有索引使用 --append-manju 或 --append-gslh")
+        parser.error("完整构建需要 --sources-dir；增补已有索引使用 --append-manju / --append-gslh / --append-moss")
     source_dir = Path(args.sources_dir)
     if not source_dir.is_absolute():
         source_dir = here / source_dir
     manju_items, manju_bodies, manju_rejects, manju_stats, manju_desc = manju_family(manju_dir)
     gslh_items, gslh_bodies, gslh_rejects, gslh_stats, gslh_desc = gslh_family(gslh_dir)
+    moss_items, moss_bodies, moss_rejects, moss_stats, moss_desc = moss_family(moss_dir)
 
     prompt_items, prompt_bodies, prompt_rejects, prompt_stats, prompt_desc = prompt_family(source_dir)
     script_items, script_bodies, script_rejects, script_stats, script_desc = script_family(source_dir)
@@ -1405,17 +1664,20 @@ def main() -> None:
         item["order"] += max((it["order"] for it in script_items), default=0)
     for item in gslh_items:
         item["order"] += max((it["order"] for it in prompt_items), default=0)
-    items = prompt_items + gslh_items + script_items + manju_items + game_items + style_items
-    bodies = {**prompt_bodies, **gslh_bodies, **script_bodies, **manju_bodies, **game_bodies, **style_bodies}
+    for item in moss_items:
+        item["order"] += max((it["order"] for it in prompt_items + gslh_items), default=0)
+    items = prompt_items + gslh_items + moss_items + script_items + manju_items + game_items + style_items
+    bodies = {**prompt_bodies, **gslh_bodies, **moss_bodies, **script_bodies, **manju_bodies, **game_bodies, **style_bodies}
     added_prompts = apply_prompt_updates(items, bodies)
-    rejects = prompt_rejects + gslh_rejects + script_rejects + manju_rejects + game_rejects + style_rejects
+    rejects = (prompt_rejects + gslh_rejects + moss_rejects + script_rejects + manju_rejects
+               + game_rejects + style_rejects)
 
     problems = cross_check(items, bodies)
     if problems:
         raise SystemExit(f"契约校验失败：{json.dumps(problems, ensure_ascii=False)}")
 
     index = build_index(items)
-    descriptive_mentions = prompt_desc + gslh_desc + script_desc + manju_desc + game_desc + style_desc
+    descriptive_mentions = prompt_desc + gslh_desc + moss_desc + script_desc + manju_desc + game_desc + style_desc
     index["sources"] = {
         "qiyuan_assets.prompt_library": omit_key(prompt_stats["qiyuan_assets.prompt_library"], "source"),
         "chat_studio_extra": omit_key(prompt_stats["chat_studio_extra"], "source"),
@@ -1424,6 +1686,7 @@ def main() -> None:
         "qiyuan_assets.style_libs": style_stats,
         MANJU_SOURCE: manju_stats,
         GSLH_SOURCE: gslh_stats,
+        MOSS_SOURCE: moss_stats,
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1438,7 +1701,8 @@ def main() -> None:
         f"{pack}_index.json" and read_json(source_dir / f"{pack}_index.json").get("count") or (len(read_json(source_dir / f"{pack}_index.json").get("items") or []))
         for pack in ("qiyuan_prompt_library", "chat_extra")
     )
-    input_total += script_stats["input"] + manju_stats["input"] + gslh_stats["input"] + game_stats["input"] + style_stats["input"] + added_prompts
+    input_total += (script_stats["input"] + manju_stats["input"] + gslh_stats["input"]
+                    + moss_stats["input"] + game_stats["input"] + style_stats["input"] + added_prompts)
     sensitive_rejects = [r for r in rejects if r.get("sensitive")]
     empty_rejects = [r for r in rejects if "空正文" in (r.get("reason") or [])]
     dupe_rejects = [r for r in rejects if "重复ID" in (r.get("reason") or [])]
@@ -1446,7 +1710,7 @@ def main() -> None:
     report = OrderedDict([
         ("generated_at", BUILD_STAMP),
         ("counts", {
-            "expected_plan": EXPECTED_TOTAL + added_prompts + gslh_stats["expected"],
+            "expected_plan": EXPECTED_TOTAL + added_prompts + gslh_stats["expected"] + moss_stats["expected"],
             "input": input_total,
             "output_index": len(items),
             "rejected": len(rejects),
@@ -1463,6 +1727,15 @@ def main() -> None:
             "note": "按 SKILL.md 的路由拆成独立模板分支；引擎类保留原文作为正文，流程类把 references 规则合并为单文件并在开头说明。",
             "excluded": gslh_stats["excluded"],
             "audit": gslh_stats["audit"],
+        }),
+        ("moss_conversion", {
+            "source": f"presets/{MOSS_SOURCE}",
+            "author": moss_stats["author"],
+            "license": moss_stats["license"],
+            "input": moss_stats["input"], "output": moss_stats["output"], "files": moss_stats["files"],
+            "note": "规则类（扩写/反推）按原文整篇入库；官方增强器只收 SKILL.md 与 layout 规则，按单文件合并。",
+            "excluded": moss_stats["excluded"],
+            "audit": moss_stats["audit"],
         }),
         ("descriptive_mentions", [
             {"id": row["id"], "source": row["source"], "markers": row["markers"]}
@@ -1491,8 +1764,14 @@ def main() -> None:
         for key in ("counts", "sources", "products", "anomalies"):
             report[key] = {**previous_report.get(key, {}), **report[key]}
         report = {**previous_report, **report}
+    # 创作模板在基础目录校验完成后按各模块增补；这里的计数尚未包含它。
+    report["sources"].pop(creative_presets.SOURCE, None)
     write_json(report_path, report)
     index = refresh_prompts(out_dir)
+    index = creative_presets.append(sys.modules[__name__], out_dir, creative_dir)
+    report = read_json(report_path)
+    items = index["items"]
+    input_total = report["counts"]["input"]
     if not args.report_md:
         print(f"index {index['count']} 条 -> {out_dir / 'catalog_index.json'}；JSON报告 -> {report_path}")
         return
@@ -1504,7 +1783,7 @@ def main() -> None:
         "",
         "## 汇总",
         "",
-        f"- 计划预期 {EXPECTED_TOTAL}；转换输入 {input_total}；索引条目 {len(items)}；"
+        f"- 计划预期 {report['counts']['expected_plan']}；转换输入 {input_total}；索引条目 {len(items)}；"
         f"拒收 {len(rejects)}（敏感 {len(sensitive_rejects)}、空正文 {len(empty_rejects)}、重复 {len(dupe_rejects)}）",
         f"- 最终可检索数（catalog count）：{index['count']}",
         "",

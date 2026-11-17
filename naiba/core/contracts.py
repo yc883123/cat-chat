@@ -18,6 +18,9 @@ from typing import Any, Callable, Literal, NotRequired, Protocol, TypedDict, run
 
 import threading  # noqa: F401  (供 run_context 键类型引用；协议成员注解用)
 
+# 提词库 module 枚举；prose 为小说写作，区别于影视剧本 script 与工作台 writer 任务域。
+STUDIO_CATALOG_MODULES = frozenset({"vs", "h3", "vi", "ec", "global", "script", "prose", "game", "style"})
+
 # Host-only resource snapshot served to desktop and LAN clients; unavailable
 # measurements stay null rather than masquerading as zero usage.
 class ResourceMemory(TypedDict):

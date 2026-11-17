@@ -15,8 +15,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import STUDIO_CATALOG_MODULES
+
 # 模块/类型枚举（与转换器/契约一致；越界数据在 catalog 加载时直接判非法）。
-MODULES_ALLOWED = frozenset({"vs", "h3", "vi", "ec", "global", "script", "game", "style"})
+MODULES_ALLOWED = STUDIO_CATALOG_MODULES
 TYPES_ALLOWED = frozenset({"template", "rule", "lexicon", "example"})
 SNIPPET_N = 700
 
@@ -35,8 +37,8 @@ class CatalogError(ValueError):
 
 
 def bodies_tag_for_module(module: str) -> str:
-    """模块 -> 正文分片文件标签。script/game/style 独占分片，其余并入 prompt 分片。"""
-    if module == "script":
+    """模块 -> 正文分片文件标签。剧本/小说共用 script，其余按原分片加载。"""
+    if module in {"script", "prose"}:
         return "script"
     if module == "game":
         return "game"

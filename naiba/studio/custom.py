@@ -17,7 +17,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-MODULES_ALLOWED = frozenset({"vs", "h3", "vi", "ec", "global", "script", "game", "style"})
+from naiba.core.contracts import STUDIO_CATALOG_MODULES
+
+MODULES_ALLOWED = STUDIO_CATALOG_MODULES
 TYPES_ALLOWED = frozenset({"template", "rule", "lexicon", "example"})
 TITLE_MAX = 200
 BODY_MAX = 400_000

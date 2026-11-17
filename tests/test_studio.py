@@ -96,14 +96,14 @@ class CommittedCatalogContractTests(unittest.TestCase):
         for item in items:
             self.assertEqual(item["chars"], len(item["snippet"]) if item["chars"] <= 700 else item["chars"])
             self.assertEqual(bool(item["has_vars"]), bool(item["vars"]))
-            self.assertIn(item["module"], {"vs", "h3", "vi", "ec", "global", "script", "game", "style"})
+            self.assertIn(item["module"], {"vs", "h3", "vi", "ec", "global", "script", "prose", "game", "style"})
             self.assertIn(item["type"], {"template", "rule", "lexicon", "example"})
             self.assertTrue(str(item["title"]).strip())
             self.assertTrue(item["snippet"].strip())
         # 模块->分片文件：全员可达，且每条正文长度==chars、前 700 字==snippet。
         tags = {}
         for item in items:
-            tag = {"script": "script", "game": "game", "style": "style"}.get(item["module"], "prompt")
+            tag = {"script": "script", "prose": "script", "game": "game", "style": "style"}.get(item["module"], "prompt")
             tags.setdefault(tag, []).append(item)
         all_body_ids = set()
         for tag, rows in tags.items():

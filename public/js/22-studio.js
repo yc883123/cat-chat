@@ -24,6 +24,7 @@ const MODULE_TABS = [
   { key: "ec", label: "电商" },
   { key: "global", label: "通用" },
   { key: "script", label: "剧本" },
+  { key: "prose", label: "小说写作" },
   { key: "game", label: "游戏原画" },
   { key: "style", label: "风格" },
   { key: "custom", label: "我的" },

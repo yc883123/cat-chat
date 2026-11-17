@@ -21,6 +21,8 @@
   "test_file_action_bridge",
   "test_folder_index",
   "test_gslh_presets",
+  "test_moss_presets",
+  "test_creative_presets",
   "test_http_disconnect",
   "test_interject_direct_send",
   "test_interjection_edit_actions",

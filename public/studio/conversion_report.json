@@ -1,9 +1,9 @@
 {
  "generated_at": "2026-10-22",
  "counts": {
-  "expected_plan": 598,
-  "input": 598,
-  "output_index": 596,
+  "expected_plan": 665,
+  "input": 643,
+  "output_index": 663,
   "rejected": 2,
   "sensitive": 2,
   "empty": 0,
@@ -850,6 +850,1439 @@
      "output_sha1": "4f4b18cece534a6c7e5f72592abd7fa53b2a6143"
     }
    ]
+  },
+  "moss-prompt-kit": {
+   "collection": "MOSS-Image 提示词套件",
+   "author": "OpenMOSS / fisher / 未知（用户本地收集）",
+   "license": "官方增强器为 Apache-2.0（OpenMOSS/MOSS-Image @2b46b1e）；两份规则文本与 fisher 扩写器未附许可证，仅按用户本地导入使用，公开再分发前需原作者授权",
+   "input": 4,
+   "output": 4,
+   "expected": 4,
+   "dupes": 0,
+   "rejected": 0,
+   "files": 5,
+   "rejected_ids": [],
+   "excluded": [
+    {
+     "file": "moss-image-prompt-enhancer/scripts/compile_prompt.py",
+     "reason": "Python 可执行脚本不入库（与合集既有口径一致）；Layout 方向按 references/layout.md 的规则手写，正文已说明脚本未内置"
+    },
+    {
+     "file": "moss-image-prompt-enhancer/agents/openai.yaml",
+     "reason": "Agent 元数据，与提词库预设正文无关"
+    },
+    {
+     "file": "moss-image-prompt-enhancer/scripts/test_compile_prompt.py",
+     "reason": "脚本测试，同上不入库"
+    },
+    {
+     "file": "MOSS人像提示词模板_sfw版_3.0.md",
+     "reason": "与既有 vs-206-gslh-moss-portrait 逐字节相同（md5 ed15c591…），重复入库只增噪声，改用既有条目"
+    }
+   ],
+   "audit": [
+    {
+     "id": "vs-221-moss-t2i-rules",
+     "files": [
+      {
+       "path": "rules/MOSS提示词优化规则.txt",
+       "sha256": "57ca633d291ba1699d2564b2f0f66005346981d1959c46a08b48feba9b9ce4da",
+       "bytes": 4951
+      }
+     ],
+     "rules": [],
+     "output_sha1": "32de5c3358b20927ec6e4fa63fff629009de314f"
+    },
+    {
+     "id": "vi-121-moss-reverse-rules",
+     "files": [
+      {
+       "path": "rules/MOSS图像反推规则.txt",
+       "sha256": "b4bb552487d8d6cd9e808fa44b49c51b1c7d46f3de6ca9fb2a44ee849a0ba8dd",
+       "bytes": 6868
+      }
+     ],
+     "rules": [],
+     "output_sha1": "0e1c0e9cc3d265dca1f9091d6c40551755522f07"
+    },
+    {
+     "id": "vs-222-fisher-moss-expander",
+     "files": [
+      {
+       "path": "engines/fisher-moss-prompt-expander-完整版.md",
+       "sha256": "ac4b3c289348e4bc4a1c04cc6b12433f014cd152e595cc079cb09acf8ac253b9",
+       "bytes": 106829
+      }
+     ],
+     "rules": [],
+     "output_sha1": "2d0c49d91c915c7c573d3d09f278c3c1ce0735ae"
+    },
+    {
+     "id": "vs-223-moss-official-enhancer",
+     "files": [
+      {
+       "path": "official/moss-image-prompt-enhancer/SKILL.md",
+       "sha256": "72cd39883af0b6c6997038b068af2d858dcd968ca43466ebf93fea21833878a0",
+       "bytes": 5909
+      },
+      {
+       "path": "official/moss-image-prompt-enhancer/references/layout.md",
+       "sha256": "e3d74ded6ab402ef69131fc7609117affff5ee1c6d14a49752d44c865b79525c",
+       "bytes": 4072
+      }
+     ],
+     "rules": [
+      "frontmatter",
+      "single_file_refs"
+     ],
+     "output_sha1": "e4eca509b38612045d2324975bb04765c54a4626"
+    }
+   ]
+  },
+  "creative-prompt-kit": {
+   "collection": "创作模板资料",
+   "input": 41,
+   "output": 63,
+   "expected": 63,
+   "files": 63,
+   "license": "用户提供的本地创作资料；未附统一许可证，保留来源文件名与指纹，公开再分发前需确认原作者授权。",
+   "decisions": [
+    {
+     "number": 1,
+     "name": "核心分镜提示词模版V3版-分镜提示词生产模板_V3.md",
+     "bytes": 46534,
+     "sha256": "d694ed56e29ee167b36c6708e8975387fc2710aacd2c82ef6d5916991de11507",
+     "decision": "included",
+     "reason": "已完整阅读；提取15秒分镜16字段、接力物与字段互锁规则。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "h3-creative-storyboard-relay-v3"
+     ]
+    },
+    {
+     "number": 2,
+     "name": "分镜解析充电版.md",
+     "bytes": 106010,
+     "sha256": "f3fa18cc7c35ca7bd15a0c16a5dccb00f0158a5a3ef6df00e538eeedbd63010c",
+     "decision": "included",
+     "reason": "已完整阅读；提取制作包、镜头语言参考及节奏特效审计，校正示例统计矛盾。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "h3-creative-shotlist-production-package",
+      "h3-creative-shot-language-reference",
+      "h3-creative-pacing-vfx-review"
+     ]
+    },
+    {
+     "number": 3,
+     "name": "核心第一人称剧本输出-eye-blink-life-完整版.md",
+     "bytes": 69583,
+     "sha256": "e697e4ec9bb6d965b68376e1ef1e9e9d58ffb742d9433ab6b7863fa94f76d689",
+     "decision": "included",
+     "reason": "已完整阅读；提取POV一生回望剧本与眨眼语法。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "script-creative-pov-life-blink-script"
+     ]
+    },
+    {
+     "number": 4,
+     "name": "女频短篇创作方法论1.md",
+     "bytes": 72022,
+     "sha256": "8d70404d75323d9d91fce729c3918e8265374ff97aeb31cf15a04806ef367f61",
+     "decision": "included",
+     "reason": "已完整阅读；拆为短篇结构与情绪人物工具，明确类型限定与量表差异。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "prose-creative-female-short-fiction-design",
+      "prose-creative-character-emotion-engine"
+     ]
+    },
+    {
+     "number": 5,
+     "name": "3.专用于SD2.0。可以根据剧本或者图像生成剧本-角色-九宫格图像-视频提示词.md",
+     "bytes": 24324,
+     "sha256": "aaa600226cb6fdf6ba827f05b97d608010eedddbb1104c491c8dd4a262ec9a96",
+     "decision": "included",
+     "reason": "已完整阅读；按反推、短片剧本、九宫格与视频提示词用途拆分。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "vi-creative-reference-character-profile",
+      "script-creative-short-film-story-grid",
+      "vs-creative-nine-panel-image-prompt",
+      "h3-creative-nine-panel-video-prompt"
+     ]
+    },
+    {
+     "number": 6,
+     "name": "1.用来分析剧本合理性生成可视化评分系统-分镜合理性校对提示词模板_v2_跨模型版.md",
+     "bytes": 9440,
+     "sha256": "6b44abc7c064deb6fbbdf4103d03fe787af1cbeaaab84d14c0d21927d7a897b1",
+     "decision": "included",
+     "reason": "已完整阅读；保留100分量表及文字、JSON、HTML输出契约。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "h3-creative-storyboard-rationality-audit"
+     ]
+    },
+    {
+     "number": 7,
+     "name": "2.可以根据剧本生成角色场景道具资产库提示词-剧本转资产库卡.md",
+     "bytes": 16966,
+     "sha256": "eff39394db1395e241a4002b4ad5a1144911adde2f3df042ed329554d2a481ed",
+     "decision": "included",
+     "reason": "已完整阅读；三引擎资产卡可独立使用。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "vs-creative-script-assets-three-models"
+     ]
+    },
+    {
+     "number": 8,
+     "name": "视频提示词模板-内部版.md",
+     "bytes": 51810,
+     "sha256": "8cb342dfba846ac8db688a9533cea6136dbadec634dbdb17c5bd59d4b29748a2",
+     "decision": "included",
+     "reason": "已完整阅读；分为八帧静态故事板和逐镜动态提示词，去敏感词规避字典。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "vs-creative-eight-frame-storyboard-prompt",
+      "h3-creative-storyboard-to-video-prompt"
+     ]
+    },
+    {
+     "number": 9,
+     "name": "核心资产库输出-全资产大师V3.0_场景+角色+道具_万能版.txt",
+     "bytes": 23764,
+     "sha256": "fae0964e575c085bfd1bb2015388c42341075cc86cc23633b5f0accd33b7e278",
+     "decision": "included",
+     "reason": "已完整阅读；保留空场景七层、角色四宫格与道具卡规范。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "vs-creative-complete-visual-assets"
+     ]
+    },
+    {
+     "number": 10,
+     "name": "0基础 AI 短剧制作系统课大纲（完善版 V2）.md",
+     "bytes": 32566,
+     "sha256": "8dd84a5bf56c88161674d74936ed21f6f8e127ef0a8e8c00294473f9366a48b3",
+     "decision": "excluded",
+     "reason": "完整1138行均为课程定位、24课教学议程、练习作业及结课标准，无独立完整提示词模板；不把教学大纲硬改造成新创作任务。",
+     "entry_ids": []
+    },
+    {
+     "number": 11,
+     "name": "gpt生图模板.md",
+     "bytes": 13712,
+     "sha256": "62015460504331a65e88b47571b704b12d4dc2bd878faf3c05e5f73eed0a96cb",
+     "decision": "included",
+     "reason": "已完整阅读；人物、场景、道具设定图三种独立版式分别提取，删未经核实API尺寸断言。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "vs-creative-guoman-character-sheet",
+      "vs-creative-guoman-scene-sheet",
+      "vs-creative-guoman-prop-sheet"
+     ]
+    },
+    {
+     "number": 12,
+     "name": "超自然网络小说AI创作方法论_提炼版.md",
+     "bytes": 9513,
+     "sha256": "8560e575f81314f1ed3777239850607ab3648b3372d8615d4580c95a1c0b827f",
+     "decision": "included",
+     "reason": "已完整阅读；保留三级纲要、功能因果、魔法限制与类型适配，去伪官方编码与未定义指数。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "prose-creative-supernatural-fiction-outline"
+     ]
+    },
+    {
+     "number": 13,
+     "name": "B站-是古手梨花sama-仙宫专用场景提示词引擎.md",
+     "bytes": 93343,
+     "sha256": "ed34c48010491ff67f60fa02b2e7cc7d221a5fce6f974143c260309d68e82ccd",
+     "decision": "duplicate",
+     "reason": "inventory标记与现有presets/gushoulihua-skills/k2-prompt-engine/references/K2仙宫专用场景提示词引擎.md为精确重复（sha256 ed34c48010491ff67f60fa02b2e7cc7d221a5fce6f974143c260309d68e82ccd）；跳过重复正文与重复入库。",
+     "entry_ids": [],
+     "existing_paths": [
+      "presets/gushoulihua-skills/k2-prompt-engine/references/K2仙宫专用场景提示词引擎.md"
+     ]
+    },
+    {
+     "number": 14,
+     "name": "ATU_301_叙事功能簇体系.md",
+     "bytes": 24057,
+     "sha256": "ce236c72b15d75f3c159f18c08693d0dfafa22f3a0d35df9a398ea5e527feb65",
+     "decision": "included",
+     "reason": "已完整阅读；保留异界营救与归来认领的A-G功能簇、三重试炼和道具；去错误Propp编号及错误ATU近邻对应。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "script-creative-otherworld-rescue-functions"
+     ]
+    },
+    {
+     "number": 15,
+     "name": "02电影级分镜.md",
+     "bytes": 6153,
+     "sha256": "0e9e2315e12e204de5fd3948f6cc740a0bae6e60694e3a11bfed40f53425f6f0",
+     "decision": "included",
+     "reason": "已完整阅读；保留15秒相对时间切片、音色档案、场景锚定和SFX公式。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "h3-creative-cinematic-sfx-shot-slices"
+     ]
+    },
+    {
+     "number": 16,
+     "name": "01影视剧本“洗稿”专家.md",
+     "bytes": 1994,
+     "sha256": "63c19eb826e5a9d8e33afcc540b0a64c2ee479bbb769dcfb341ede3e45995ace",
+     "decision": "included",
+     "reason": "已完整阅读；内容实际是将小说心理与抽象说明转成可拍动作，改名为原创或已获授权作品的视听化改编，不含隐匿来源和规避查重。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "script-creative-novel-to-audiovisual-script"
+     ]
+    },
+    {
+     "number": 17,
+     "name": "MBTI角色设计方案_进阶版.md",
+     "bytes": 29179,
+     "sha256": "a17390c21d4331c2a62e958c4abc44961ff990c736e14ed136f0332ba9f2a53b",
+     "decision": "included",
+     "reason": "已完整阅读；保留八功能、16型、关系冲突及弧光，校正ESFP第三功能并去固定诊断式断言。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "script-creative-mbti-character-workshop"
+     ]
+    },
+    {
+     "number": 18,
+     "name": "master-writer-skill-v4.md",
+     "bytes": 44216,
+     "sha256": "961ab3652397c095a1b27e5763ece6fda733e7d9a6ac6a53923b5248e383f6cd",
+     "decision": "included",
+     "reason": "已完整阅读；仅提取文本层的章节任务合约、状态摘要和独立审稿，不保留虚构Agent工具、权限配置、cron或自动学习执行指令。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "prose-creative-chapter-contract-and-state",
+      "prose-creative-evidence-based-chapter-review"
+     ]
+    },
+    {
+     "number": 19,
+     "name": "立体人物教学案例.md",
+     "bytes": 13029,
+     "sha256": "8319ecba10279202d35bf32c05d550e871886fba28e5f91cbf9190cd9dc7818c",
+     "decision": "included",
+     "reason": "已完整阅读；能转成人物练习，保留五个案例的欲望缺口、反向弱点和四级压力。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "script-creative-three-dimensional-character-exercise"
+     ]
+    },
+    {
+     "number": 20,
+     "name": "经典编剧模板体系全9套.md",
+     "bytes": 28251,
+     "sha256": "d2f6ffc9156a29f20d2e9fcdbfc18c474ea42e37813725e093851df22cdfdb22",
+     "decision": "included",
+     "reason": "已完整阅读；九套分别整理，其中人物22节点、情感七点和悬疑12步改为来源整理法，不沿用错误权威署名。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "script-creative-structure-three-acts",
+      "script-creative-structure-story-circle",
+      "script-creative-structure-eight-sequences",
+      "script-creative-structure-value-turns",
+      "script-creative-structure-character-twenty-two",
+      "script-creative-structure-three-dimensional-conflict",
+      "script-creative-structure-save-the-cat",
+      "script-creative-structure-emotional-seven",
+      "script-creative-structure-mystery-twelve"
+     ]
+    },
+    {
+     "number": 21,
+     "name": "小说转短剧叙事剧本模板_五段功能优化版2.4_人物真实性版(1)(2).md",
+     "bytes": 60592,
+     "sha256": "893db6f808472a5bdeefbab2ab3ea60531c09319d317b080e3dcfbfb06d392c6",
+     "decision": "included",
+     "reason": "已完整阅读；分为75秒五段改编和可独立调用的对白精修，保留知识边界、空间与情绪连续性。已提取为可直接使用的自包含文本模板。",
+     "entry_ids": [
+      "script-creative-novel-short-drama-five-blocks",
+      "script-creative-dialogue-naturalization"
+     ]
+    },
+    {
+     "number": 22,
+     "name": "项目圣经生成器_SKILL-010.md",
+     "bytes": 7586,
+     "sha256": "a3adfa62e6bf1362b4d96f01307beb39e8efd62e8c41a2025c6720ea73333deb",
+     "decision": "included",
+     "reason": "整合主线、世界法则、人物动力、场景道具与写作风格的长篇小说规划模板。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "prose-creative-novel-project-bible"
+     ]
+    },
+    {
+     "number": 23,
+     "name": "The_Man_from_Earth_Script.md",
+     "bytes": 73818,
+     "sha256": "41ce472a0a6f46bdec73065fb8dc3cd006526c2ae2febdcfb768473874e9bede",
+     "decision": "excluded",
+     "reason": "完整受版权保护电影剧本，属于参考作品，不是可复用提示词模板，不导入正文。",
+     "entry_ids": []
+    },
+    {
+     "number": 24,
+     "name": "让人物与故事生长出来.md",
+     "bytes": 7406,
+     "sha256": "e24daf39a6c7fe2dcba61cce5e2e272f936a72b0d0fdedcd16c2e108d346cfb6",
+     "decision": "included",
+     "reason": "已提取人物动力、弱点代价与递进冲突的可用模板。",
+     "entry_ids": [
+      "prose-creative-character-choice-growth"
+     ]
+    },
+    {
+     "number": 25,
+     "name": "情绪导演_Skill_V2.1.md",
+     "bytes": 18312,
+     "sha256": "ef19f0a5498d893d9cc2081f7dea527a30a3f3a496cd2fe4612a4a9dc11e9d38",
+     "decision": "included",
+     "reason": "将剧本和故事素材转为1900字以内的六段式Seedance视频提示词，保留情绪、动作、声音和环境反馈设计。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "h3-creative-seedance-emotion-director"
+     ]
+    },
+    {
+     "number": 26,
+     "name": "祛AI味_人类叙事黄金法则.md",
+     "bytes": 6842,
+     "sha256": "28c340dde0aad417bfa8e3ccdd3aa931e49f5653d58f28b4b17fe0014c63d15f",
+     "decision": "included",
+     "reason": "用句式变化、真实对话、感官细节和情绪回旋修订小说，保留事实与限制视角。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "prose-creative-natural-fiction-narrative"
+     ]
+    },
+    {
+     "number": 27,
+     "name": "著名编剧模板大全.md",
+     "bytes": 24864,
+     "sha256": "d7ef3cb075ebe30b415eaa8a284de1988a701ac5f6cc8bef38cf69f520bea103",
+     "decision": "included",
+     "reason": "用日常、催化、连续后果、终局和新常态搭建动画或家庭故事。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "script-creative-structure-three-acts",
+      "script-creative-structure-story-circle",
+      "script-creative-structure-eight-sequences",
+      "script-creative-structure-save-the-cat",
+      "script-creative-heros-journey-development",
+      "script-creative-freytag-dramatic-arc",
+      "script-creative-seven-point-story-design",
+      "prose-creative-snowflake-story-development",
+      "script-creative-kishotenketsu-story-pattern",
+      "script-creative-episodic-act-break-outline",
+      "script-creative-genre-story-skeletons",
+      "script-creative-minimal-chapter-narrative",
+      "script-creative-animation-causal-story-spine"
+     ]
+    },
+    {
+     "number": 28,
+     "name": "小说转短剧叙事剧本模板_五段结构版(1).md",
+     "bytes": 16881,
+     "sha256": "f09df0dd7a71770783d9b0e5c41ebbc0f86bd1b783742f40f019f972d4b9f2b8",
+     "decision": "included",
+     "reason": "将原文改为90–105秒、4–7段的可表演叙事中间稿，保留原事实与信息顺序。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "script-creative-novel-short-drama-long-form"
+     ]
+    },
+    {
+     "number": 29,
+     "name": "生成分镜头.txt",
+     "bytes": 29110,
+     "sha256": "512486fcb06abcbecc5929d74f2aa104d982246ddd6d074b40be6a7f1ded2a21",
+     "decision": "included",
+     "reason": "把当前文案转为12秒镜头组，包含图片与视频字段、参考资产映射、声线和衔接状态。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "h3-creative-mapped-twelve-second-storyboards"
+     ]
+    },
+    {
+     "number": 30,
+     "name": "你是一个顶级的小说推文改文专家。你的唯一任务是将小说原文改写为适合短视频配音的“第一人称解说文案.txt",
+     "bytes": 5194,
+     "sha256": "3d4becfe62ae072c5402d17f995f0569b19d60782f859314f6bff5713cfd961a",
+     "decision": "included",
+     "reason": "用八类开头、短段与感知因果把小说改为第一人称短视频口播。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "prose-creative-first-person-novel-voiceover"
+     ]
+    },
+    {
+     "number": 31,
+     "name": "连续段落式AI视频提示词模板_自由运镜增强_人物筛选版(1).md",
+     "bytes": 17280,
+     "sha256": "0a64cd9c059d8199279110af7bf17effdef0a3cf84d2ebcdfc3237f32a88381a",
+     "decision": "included",
+     "reason": "固定5×15秒连续场面，逐段筛选人物和参考，锁定空间路径、道具交接及首尾状态。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "h3-creative-continuous-five-segment-video"
+     ]
+    },
+    {
+     "number": 32,
+     "name": "2.MJ资产提示词(1).md",
+     "bytes": 54005,
+     "sha256": "97c9e0b1ffb5eba88031c214ee420e5436926081f76ca230901bedf171dbc4c6",
+     "decision": "included",
+     "reason": "用七维评分和内容、解剖、构图、光色、风格、伪影、参考故障表定位最弱项，只改一个主要变量。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "vs-creative-midjourney-description-builder",
+      "style-creative-image-material-lighting-lexicon",
+      "vi-creative-midjourney-single-variable-critique"
+     ]
+    },
+    {
+     "number": 33,
+     "name": "将给定小说内容划分为角色和内容，并输出为结构化JSON结果.txt",
+     "bytes": 4497,
+     "sha256": "31e833e07f8c4d917832e4093da3d0faa1fd1cd11bc12b168fb0c1b00f74fa59",
+     "decision": "included",
+     "reason": "将原文按说话者与旁白切分为最多50字的JSON记录，并标注受控情绪和强度。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "prose-creative-lossless-dialogue-json"
+     ]
+    },
+    {
+     "number": 34,
+     "name": "GROK小说转剧本(1).txt",
+     "bytes": 2583,
+     "sha256": "97a5d00470f2d085ead4235314332b61fa3e383a2bfe3a3f96b717382c03324a",
+     "decision": "included",
+     "reason": "按场景、节奏、机位、站位、可见动作与对白，将小说转成视听剧本。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "script-creative-novel-to-audiovisual-scenes"
+     ]
+    },
+    {
+     "number": 35,
+     "name": "（第2步）剧本转分镜(1).txt",
+     "bytes": 2633,
+     "sha256": "40551c436b2038b2d7b895aaff034ff6fcd0b4a1099bafaafa0b0528ea9a35bb",
+     "decision": "included",
+     "reason": "生成可直接复制到表格的13列分镜表，约束景别、运动、对白、情绪和时长。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "script-creative-script-storyboard-table"
+     ]
+    },
+    {
+     "number": 36,
+     "name": "（第1步）故事转剧本(1).txt",
+     "bytes": 51,
+     "sha256": "ade29540c4ad470ebdec10c5fc82fc7b4d578c1d94d63c825d4c83d1182645f3",
+     "decision": "excluded",
+     "reason": "仅17字泛化要求，没有独立结构或可复用细则，已有详细改编模板覆盖。",
+     "entry_ids": []
+    },
+    {
+     "number": 37,
+     "name": "小说转短剧叙事剧本模板_五段功能优化版2.4_人物真实性版(1)(3).md",
+     "bytes": 60592,
+     "sha256": "893db6f808472a5bdeefbab2ab3ea60531c09319d317b080e3dcfbfb06d392c6",
+     "decision": "duplicate",
+     "reason": "inventory SHA-256与21号完全一致，复用21号导入结果。",
+     "entry_ids": [],
+     "duplicate_of": 21
+    },
+    {
+     "number": 38,
+     "name": "小说转短剧叙事剧本模板_五段功能优化版2.4_人物真实性版(1)(1).md",
+     "bytes": 60592,
+     "sha256": "893db6f808472a5bdeefbab2ab3ea60531c09319d317b080e3dcfbfb06d392c6",
+     "decision": "duplicate",
+     "reason": "inventory SHA-256与21号完全一致，复用21号导入结果。",
+     "entry_ids": [],
+     "duplicate_of": 21
+    },
+    {
+     "number": 39,
+     "name": "图片信息提取转 JSON 元指令.txt",
+     "bytes": 11489,
+     "sha256": "ba00a394860a9561f705697bc493ea281e5502e968b51b7601066a1e4934b1e9",
+     "decision": "duplicate",
+     "reason": "去空白与Markdown标记归一化后，与现有vi-007-img2json、vi-103-json-meta均相同；三份原文均在插画JSON的hair字段截断，不新增第三条。",
+     "entry_ids": []
+    },
+    {
+     "number": 40,
+     "name": "krea2-万物复刻-3.2独立版.md",
+     "bytes": 15680,
+     "sha256": "c268e51c320fc172bd20898680a055319e11a6c116c4a568e3d4cda2c25a5b14",
+     "decision": "included",
+     "reason": "按图像可见特征反推英文提示词，支持严格复刻、受控修改、风格迁移与多图融合。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "vi-creative-krea2-image-reconstruction"
+     ]
+    },
+    {
+     "number": 41,
+     "name": "krea2-万能生图-3.2独立版.md",
+     "bytes": 11882,
+     "sha256": "16e2cb171c0098757a4af4f293cebaf7a1146d79995191806d47c68b35b1e520",
+     "decision": "included",
+     "reason": "把简短文字需求扩写为涵盖用途、主体、场景、镜头、光色、媒介和材质的英文自然段。 已保留可直接使用的正文，具体适配见条目transformations。",
+     "entry_ids": [
+      "vs-creative-krea2-text-image-direction"
+     ]
+    }
+   ],
+   "audit": [
+    {
+     "id": "h3-creative-storyboard-relay-v3",
+     "source_numbers": [
+      1
+     ],
+     "sha256": "751454733ef57dfe1c26859744942946f6ef3faffa5dd7c21929d3894a1115b6",
+     "output_sha1": "c2c9e109860ed62781c28c451966f69f7a7797b0",
+     "rules": [
+      "删除开头、末尾及逐批强制版权播报和推广话术；出处仍由source_numbers保存。",
+      "保留16字段、内容密度决策树、多题材例、七种过门、角色卡及完整自检。",
+      "解释15秒容器与传统单镜区别；T编号改为自定义具名方案，不依赖缺失模板。",
+      "删除玩家A外貌刻板化示例；将少量伤害细节改为护甲/受力反馈，保留动作因果。"
+     ]
+    },
+    {
+     "id": "h3-creative-shotlist-production-package",
+     "source_numbers": [
+      2
+     ],
+     "sha256": "bb099f89be4ff2af541bff577232b1571756204d26d40f144d4627e03e274382",
+     "output_sha1": "6351ac6de655f7fdd037598e5b2a86c5d0dcf314",
+     "rules": [
+      "删除推广、版本、缺失Skill路径、链路指令和整部参考片样例。",
+      "保留8字段、7列镜头卡、世界观5槽、4类人物及声音4层12槽的输出契约。",
+      "校正原文“7档却列8档”、中英文计数字段及情感轴紧/重混用。",
+      "声音槽按实际时间填，不照抄参考片58/62镜与断臂后双臂等矛盾。"
+     ]
+    },
+    {
+     "id": "h3-creative-shot-language-reference",
+     "source_numbers": [
+      2
+     ],
+     "sha256": "6e90cf296406eb3157da8c962e4a1182230eb567f917a9ebc58debf6ff40a10b",
+     "output_sha1": "acc7ee3d6c280fe8e4ff16cf36a0ef3a88ce46e4",
+     "rules": [
+      "保留具体介质、画幅、色彩ID、质感、导演语法、调色、类型惯例与机位运动转场表。",
+      "把刻板类型禁令改为建议；移除未经核实作品年份及“竖屏不能全景”绝对断言。",
+      "校正90秒镜数推导、拉焦与变焦、摄影速率与运镜的混用。"
+     ]
+    },
+    {
+     "id": "h3-creative-pacing-vfx-review",
+     "source_numbers": [
+      2
+     ],
+     "sha256": "6003fefa5dcd7cfbf5cb8a87b65d26e412f9abdb690454030bbac6aac3ac39be",
+     "output_sha1": "0475970531f6efbc203c47322cfde0732060c573",
+     "rules": [
+      "独立成审计用途，保留ASL、σ、异常条件、四档与六项加权及工作量表。",
+      "明确σ统计口径并修正示例工时比例；原文倍率降为本地示意，不当行业事实。",
+      "删除厂商推荐、无依据排期红线和整部参考片不一致数据。"
+     ]
+    },
+    {
+     "id": "script-creative-pov-life-blink-script",
+     "source_numbers": [
+      3
+     ],
+     "sha256": "18c8068f588808dcadf233933bbd7a7bbac439dfbe46194b20a142bd869881e9",
+     "output_sha1": "1023b45832f5abedb5cacb71583cc5b86475afd1",
+     "rules": [
+      "移除YAML、触发词、启动版权协议、下游缺失Skill和反复确认话术。",
+      "保留6字段、4种生命模板、切片库、年代锚、三种闭环、眨眼语法与镜头表示例。",
+      "校正POV与中文主语混淆、MS全身误释及N-1与例外转场矛盾。",
+      "真实人物事迹和年代物件标核验；朗诵改为授权素材，不要求复制整首现成诗。"
+     ]
+    },
+    {
+     "id": "prose-creative-female-short-fiction-design",
+     "source_numbers": [
+      4
+     ],
+     "sha256": "a04da4d105602ba1821647962aca607dbeb3e3edfba2212503192a338964c1bd",
+     "output_sha1": "d8b2d8487b4fc1af84741f094155f44fe9b11dbc",
+     "rules": [
+      "整合主体与两批结构增补，去重复版本清单和不存在章节指向。",
+      "分清5套混用L的量表；将类型偏好和量化百分比标为经验，不冒充心理学定律。",
+      "不纳入性内容段、投毒技巧表与买凶杀妻细节模板；保留证据、关系和代际反击的可用结构。",
+      "修正孕检不能确认亲子、监控绝对真实及单一化学指标断言；四级开头改为可选模式。"
+     ]
+    },
+    {
+     "id": "prose-creative-character-emotion-engine",
+     "source_numbers": [
+      4
+     ],
+     "sha256": "9e01fb885feec6cea765bba3d44c23d0fda596155aeb72495c943d902a3d0791",
+     "output_sha1": "fc6bc44858b3c88929863a529d3a44851aba9fd5",
+     "rules": [
+      "独立提取情绪方法派、R量表、六类强度词典、过渡态、需求字典和ABC校验。",
+      "三脑降为本能/记忆/合理化三层创作比喻；删科学化和绝对因果断言。",
+      "情绪配比与300字波谷等标为可选经验，修正“只升不降”与疏密交替矛盾。"
+     ]
+    },
+    {
+     "id": "vi-creative-reference-character-profile",
+     "source_numbers": [
+      5
+     ],
+     "sha256": "a3c657c6082f972776890e99a4bca768d1ec2fa3f8ea3c7fd528f8a84bbdf905",
+     "output_sha1": "b74b04f8cd0783e73fe5eadae4711c5cb84ff5c6",
+     "rules": [
+      "原反推混入职业、性格和技能，增加证据与创作扩展边界。",
+      "保留命名原则、三技能差异、武器类别和视觉基准字段，不声称工具可自动看文件。"
+     ]
+    },
+    {
+     "id": "script-creative-short-film-story-grid",
+     "source_numbers": [
+      5
+     ],
+     "sha256": "5caef3105c9a4fcabca9dbe25e79ae9d6851a52f1b19a56c3556f55d25a06d0b",
+     "output_sha1": "838562b31e7a52a65c8ec4018f05ef729fe7d135",
+     "rules": [
+      "拆出剧本用途，与静态九宫格和动态提示词分开。",
+      "校正两分钟与三分钟时段矛盾；保持方向库、高潮库、组数表和赤鲤示例。",
+      "不纳入违禁词同义替换表，不把死亡偷换成昏迷；伤害表达按目标分级实质改写。"
+     ]
+    },
+    {
+     "id": "vs-creative-nine-panel-image-prompt",
+     "source_numbers": [
+      5
+     ],
+     "sha256": "7545cfd5fb63af065e628428c76eff9731bffd0e63d2b8dff1b66037044cc35c",
+     "output_sha1": "c82efe958ca79a783d72914977f32cb29439c7e7",
+     "rules": [
+      "保留3×3模板、行功能与逐格占位；静态帧与动态动作分开。",
+      "修正既要求角标又要求任何文字皆无的冲突；明确单格/整图画幅。"
+     ]
+    },
+    {
+     "id": "h3-creative-nine-panel-video-prompt",
+     "source_numbers": [
+      5
+     ],
+     "sha256": "20dca907ad4cef343effd41be70c22fd1c456b7127583d04525e0bd89ecaa785",
+     "output_sha1": "9c65cf46de270688d7c203d2814bf2e272096101",
+     "rules": [
+      "保留分秒动作、运镜、物理、风格、三层声音和台词契约。",
+      "明确时间求和与末镜差异；不执行生成，不采用违禁词替换表。"
+     ]
+    },
+    {
+     "id": "h3-creative-storyboard-rationality-audit",
+     "source_numbers": [
+      6
+     ],
+     "sha256": "9b59c78d839632e3cadc929f9e89def0f9a89e99b84dd4720d6ba836b4ed634c",
+     "output_sha1": "c5bd321c88144035f9c9b829173a5ac9109062ca",
+     "rules": [
+      "去版本对话和模型强弱推销，保留评分锚点、文字分隔符与诊断JSON字段。",
+      "缺失HTML模板改为可直接执行的自包含报告版式要求，不依赖文件。"
+     ]
+    },
+    {
+     "id": "vs-creative-script-assets-three-models",
+     "source_numbers": [
+      7
+     ],
+     "sha256": "f528112bf56bea66ea42e146b282fdab3b64a38ae1f2d3de075a28f46178b767",
+     "output_sha1": "e3d02653fbb3ca8288f914a841e73c40c16fa4a2",
+     "rules": [
+      "删除外部万能生成器链接、后续接口承诺和项目闲聊。",
+      "完整保留三类资产字段、三版本规则、五层分析与展示视角。",
+      "补足无技能现实题材与独立调用资产上下文边界。"
+     ]
+    },
+    {
+     "id": "vs-creative-eight-frame-storyboard-prompt",
+     "source_numbers": [
+      8
+     ],
+     "sha256": "60f91c7f4550225c463330ffb5d52b38d43ad6c4c917605bf85f89e8d211f5fc",
+     "output_sha1": "0a5376ef6f263709553fb3468c7302bafeb411c0",
+     "rules": [
+      "保留八帧固定文案、冻结瞬间、方向与运动合并实例。",
+      "移除敏感词四区检查和替词规避规则、版权推广及版本记录。",
+      "修正自检@角色名与实际@图片N引用矛盾；解释黑屏只作拼版占位。"
+     ]
+    },
+    {
+     "id": "h3-creative-storyboard-to-video-prompt",
+     "source_numbers": [
+      8
+     ],
+     "sha256": "91cfe5819a6b658abf2296d76e1c9a107425735df2cc9f7c8804902f19b5ffcc",
+     "output_sha1": "30c51c1e0e028f735a90c4039cffc0879ed05b33",
+     "rules": [
+      "保留动作驱动、四档空间锚、方向字典、逐镜音效和固定输出。",
+      "删四区字典及规避同义替换，不再将普通叙事词机械封禁。",
+      "纠正天空示例提前泄密、种子技术臆测、无故事板强造引用及镜尾规则吞掉已定结果的问题。",
+      "一般生成内容标为通用视频，不套用MiniMax H3官方格式。"
+     ]
+    },
+    {
+     "id": "vs-creative-complete-visual-assets",
+     "source_numbers": [
+      9
+     ],
+     "sha256": "a6d975326cf90bec05cf947ed8e09dbc1d3ee98cf10f8dab8dd3a9329ec13f5e",
+     "output_sha1": "e210b646209788620dde059dcc15917642fc36ad",
+     "rules": [
+      "去首次启动四问、扫描假进度与智能体执行包装。",
+      "保留七层细项、材质表、面容及六层服装、四宫格/道具四视图、三类输出与检查。",
+      "纠正七层却称第八层、分层字数与总字数相斥、2D仍强加真人及伪规范引用。"
+     ]
+    },
+    {
+     "id": "vs-creative-guoman-character-sheet",
+     "source_numbers": [
+      11
+     ],
+     "sha256": "d8ecd0e35eb2ce0c7cce61765050bdeedbc7aae427fe5a56c2cc3639d995bb3d",
+     "output_sha1": "8c5d2f9d97b04013605a80d36eb3ab20c5344c62",
+     "rules": [
+      "从三种独立设定页模板分别提取完整Prompt，保留细节字段和版式。",
+      "删除未经核实模型能力与API尺寸说明；道具无手要求与手剪影冲突改为比例尺。"
+     ]
+    },
+    {
+     "id": "vs-creative-guoman-scene-sheet",
+     "source_numbers": [
+      11
+     ],
+     "sha256": "712f7a1cfb255172e8e9363c008b9bd1ac657297f417f0e414bf8d1e23d4fa34",
+     "output_sha1": "2e714669490b79fa908a85c7a22a934c4f166e9d",
+     "rules": [
+      "从三种独立设定页模板分别提取完整Prompt，保留细节字段和版式。",
+      "删除未经核实模型能力与API尺寸说明；道具无手要求与手剪影冲突改为比例尺。"
+     ]
+    },
+    {
+     "id": "vs-creative-guoman-prop-sheet",
+     "source_numbers": [
+      11
+     ],
+     "sha256": "589694942d51acb09b38f70126ef06233168309bed077325178a5055f61d1824",
+     "output_sha1": "8bb055acf5e358236e086df1ffc13914b6ba3ded",
+     "rules": [
+      "从三种独立设定页模板分别提取完整Prompt，保留细节字段和版式。",
+      "删除未经核实模型能力与API尺寸说明；道具无手要求与手剪影冲突改为比例尺。"
+     ]
+    },
+    {
+     "id": "prose-creative-supernatural-fiction-outline",
+     "source_numbers": [
+      12
+     ],
+     "sha256": "68cd0e70236b80f474f7caf0cef517959825685154a14c94ea9e86404bd2aa3a",
+     "output_sha1": "ef7ed62fac06b58835096b55a4f097feac2682e7",
+     "rules": [
+      "保留八模块、三级纲要、功能触发四要素、四类钩子、魔法限制、契约代价和三类本土适配。",
+      "去掉伪ATU小数、混乱母题代码和未定义UTI数值；标明来源增长公式实际为指数。",
+      "删除ASEVL向量库/VF/CG等虚构依赖，改为当前输入中的文本清单。"
+     ]
+    },
+    {
+     "id": "script-creative-otherworld-rescue-functions",
+     "source_numbers": [
+      14
+     ],
+     "sha256": "975dffae579b13dfdea947f72af840f2d96d86befc268ebcef5a50fdd0daf406",
+     "output_sha1": "718db3312b2769c232f4821fa40d28edafc4a337",
+     "rules": [
+      "保留七簇、角色功能、魔法物品、三重试炼/逃脱/证明与检查表。",
+      "删除错误的Propp编号和ATU近邻、未经核实代表故事对应与跨文化分布断言。",
+      "本地标签去伪官方化；婚姻与多人婚姻不作必备奖赏，保留被救者能动性。"
+     ]
+    },
+    {
+     "id": "h3-creative-cinematic-sfx-shot-slices",
+     "source_numbers": [
+      15
+     ],
+     "sha256": "eea586ad8502a07cb357715f034a00be02c59c5be8fd03ef65a784ae56eea3e3",
+     "output_sha1": "e3f7273958cc991e847e8c1fd2b2ebdb32ba2495",
+     "rules": [
+      "去多阶段强制等待问卷与自动宫格预览；按已给信息生成文本。",
+      "保留15秒上限、绝对片段标题/相对切片、音色分析、实体UI光影互动和SFX公式。",
+      "校正Pan与平移混淆，尾帧引用以实际提供为前提。"
+     ]
+    },
+    {
+     "id": "script-creative-novel-to-audiovisual-script",
+     "source_numbers": [
+      16
+     ],
+     "sha256": "1e565263863d4e6d1b9011e891ff67f2db9c8af38a637cbed409c4913785d101",
+     "output_sha1": "0ae16a72b8d29a57eaed6034084e77b89f0f4e03",
+     "rules": [
+      "原文实际为可拍性脱水；移除洗稿身份，明确合法原创/授权改编。",
+      "完整保留四条处理规则与场景/人物/动作/对白/附注格式。"
+     ]
+    },
+    {
+     "id": "script-creative-mbti-character-workshop",
+     "source_numbers": [
+      17
+     ],
+     "sha256": "866ed8f65af6c430b59090fd5409cdde6dd89ed059a20dee81767b659e1197da",
+     "output_sha1": "aa2e6c35f3f946ac08b21e4b51686ea1f9847eec",
+     "rules": [
+      "保留八功能、16型档案、四冲突轴、搭配、团队角色、成长例和避坑。",
+      "校正ESFP第三功能Ti为Te；删除无来源人物定型与压力必然换型。",
+      "将智力比例和绝对行为断言改为倾向，明确创作而非诊断。"
+     ]
+    },
+    {
+     "id": "prose-creative-chapter-contract-and-state",
+     "source_numbers": [
+      18
+     ],
+     "sha256": "7e2adc60586513fff7f7899d52d4a923faee8fac212a60d0b4f2a94075a17630",
+     "output_sha1": "df2c190e52f7cacfe4956f9b6162e6e4dc39f263",
+     "rules": [
+      "从M1/M2/M3/M6/M9/M14/M15抽取文本层合约、上下文整理、状态diff和复盘。",
+      "去除YAML、作者私人身份、虚构工具、MCP/Agent调度、cron、自动写记忆、权限策略与运行架构。",
+      "去无法核实原创率和强行无意义细节要求；保留原章后JSON含义并规范字段。",
+      "补充原文角色分工、输入校验/返修分流、修改影响范围、预算比例和状态提取条目，均转成可执行文本规则。"
+     ]
+    },
+    {
+     "id": "prose-creative-evidence-based-chapter-review",
+     "source_numbers": [
+      18
+     ],
+     "sha256": "e0a1c920e321eac45cabce7a58bc129bd09dc0d146ad3429ad2bc5ae73202d15",
+     "output_sha1": "6a20731aa528bed9d667d710b86002b4cc4c27aa",
+     "rules": [
+      "保留独立验证流程、三色裁决、证据对照与严重度分级。",
+      "删必须真实命令输出的错位要求、虚构工具依赖及每章必须反打的类型泛化。",
+      "明确字数边界和PARTIAL用途，校正37%战力示例无依据推论。"
+     ]
+    },
+    {
+     "id": "script-creative-three-dimensional-character-exercise",
+     "source_numbers": [
+      19
+     ],
+     "sha256": "ce010d6a5b9e022f9363e1dba5a5f4d181b73617f57e819e76d9e511650800b0",
+     "output_sha1": "f04deac3a8fbc7cc6b36675c7d8ec270e1a770ba",
+     "rules": [
+      "将教学案例转换成独立可执行人物练习，保留五例的具体欲望、弱点和四级压力。",
+      "去教学署名日期；柳如是改为虚构柳如青以免与历史人物混淆。",
+      "指出伤手恢复、时间表与成长完成度问题，保留案例不把矛盾包装成标准。"
+     ]
+    },
+    {
+     "id": "script-creative-structure-three-acts",
+     "source_numbers": [
+      20,
+      27
+     ],
+     "sha256": "bd63ea01ee47fdc5ee41536b1c9e35fd96cec13a9fe1d4d97b75d368798a16f6",
+     "output_sha1": "681cff82de295595efbc76a4133ade8a48848d7e",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "校正：25%左右的是第一情节点/幕转折，不等同于通常更早的激励事件；第二情节点约75%，具体页码随篇幅变化。",
+      "合并另一来源同一结构的有效细节，不重复建条目"
+     ]
+    },
+    {
+     "id": "script-creative-structure-story-circle",
+     "source_numbers": [
+      20,
+      27
+     ],
+     "sha256": "226374c7a932177acbd3675c1387373478eadbf6d4a7774f5d656b48e50126f3",
+     "output_sha1": "24a01f2bb1e327b0f2e988aba81ecd3cf59cf7ef",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "按表中八步次序，不用来源残缺的字母示意图；改变可正可负，回归可以是象征性的熟悉秩序。",
+      "合并另一来源同一结构的有效细节，不重复建条目"
+     ]
+    },
+    {
+     "id": "script-creative-structure-eight-sequences",
+     "source_numbers": [
+      20,
+      27
+     ],
+     "sha256": "cd51cf755612804e299236b020f9c7038037427c400f860114e2b5fcc9eb0c8c",
+     "output_sha1": "78ce8c1f15de651ec8e758715a8589d549ba83f3",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "八序列为创作近似，不强制每段严格12.5%；7段终局与8段收束可按剧情调整。",
+      "合并另一来源同一结构的有效细节，不重复建条目"
+     ]
+    },
+    {
+     "id": "script-creative-structure-value-turns",
+     "source_numbers": [
+      20
+     ],
+     "sha256": "637c745f2c4fcc88d50913af179b4f50da62e9f3f4f82ef0c7a9aa9ae8198366",
+     "output_sha1": "bfc2add30e1e5d11288c87243c49586a816eade8",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "价值轴应具体，例如信任/怀疑、安全/危险、自由/受控；变化可正转负、负转正或更深恶化，不只限情绪正负。"
+     ]
+    },
+    {
+     "id": "script-creative-structure-character-twenty-two",
+     "source_numbers": [
+      20
+     ],
+     "sha256": "a7d6bfa795841d291cd5ae390b576b46b5f1d5c69728dac2cd8d96e672632818",
+     "output_sha1": "254929f7a061c736d5dec7b92870556d931e9848",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "这是来源整理的22节点改编法，不是John Truby标准22步。原表把终极选择放在收尾之后：第22项视为回看高潮选择的检查项，第19/21项为主题检查；不得把它们当结局之后再发生的新戏。自我揭露需分层，避免第10与15点重复。"
+     ]
+    },
+    {
+     "id": "script-creative-structure-three-dimensional-conflict",
+     "source_numbers": [
+      20
+     ],
+     "sha256": "b9073ec1e0fdcbde70fd9edaed4489526182f6e1c0e5e887be54da352908cf14",
+     "output_sha1": "f7efad4c044b6ee17c5c174b2efd78d086d362c9",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "来源“静态→跳跃→升级”不当标准进阶阶梯；静态和无过渡的跳跃是要避免的缺陷，目标是有过渡的增长冲突。人物不能仅凭标签决定行动。"
+     ]
+    },
+    {
+     "id": "script-creative-structure-save-the-cat",
+     "source_numbers": [
+      20,
+      27
+     ],
+     "sha256": "c0e83a78157863d9777097893b87a87a93298ba797c98fc68622467d16b03f98",
+     "output_sha1": "5c0b4d83eb8548c9d24da5d010ebfc0a318245d5",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "位置为示意：采用来源百分比保持可用，不能称所有商业片都遵循；B故事不必须爱情，主题可通过行为暗示，终局含选择与新做法，不只是战斗。",
+      "合并另一来源同一结构的有效细节，不重复建条目"
+     ]
+    },
+    {
+     "id": "script-creative-structure-emotional-seven",
+     "source_numbers": [
+      20
+     ],
+     "sha256": "654ab98966e414262502784856d3f1c6341fd15e38d066f103bb40a3897bd697",
+     "output_sha1": "71c14c57be5eeceb3ae70f7fd0dfe962da168e68",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "本条为来源整理的情感七点法，不署名Lindsay Doran，也不同于Dan Wells七点结构。情感圆满指本题材约定的诚实结果，可以建立新边界而非强制复合。"
+     ]
+    },
+    {
+     "id": "script-creative-structure-mystery-twelve",
+     "source_numbers": [
+      20
+     ],
+     "sha256": "14915756aa09337c0bb5d2a9fa1886cc78196f6c85bc0681805fcaaba337661c",
+     "output_sha1": "e8aca07eed39146bd1ba6d4a84019a4c76450221",
+     "rules": [
+      "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+      "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+      "来源无法支持“三宅隆太12步”权威归属，改为通用整理法。信息差×反转密度只作比喻，不是可计算定律；规则反转必须有早先可回看的线索，不能临时改规则。"
+     ]
+    },
+    {
+     "id": "script-creative-novel-short-drama-five-blocks",
+     "source_numbers": [
+      21
+     ],
+     "sha256": "5840abe2dd0ee1b458302a8cb4f80308d0e3293a4b2ce1c3afb9464749beb651",
+     "output_sha1": "e44abd76ebd1c89bde168c6e4d66991a796256bf",
+     "rules": [
+      "保留完整保真边界、行为声音卡、五段结构、压力精修、文字信息转行动、多空间对白及跨集连续性。",
+      "将对白独立精修分出，默认中间稿保持字段输出与分析模式。",
+      "解决用户自定时长与强制75秒冲突；节奏说明不输出创作意图，删除重复版本介绍和末尾重复执行指令。"
+     ]
+    },
+    {
+     "id": "script-creative-dialogue-naturalization",
+     "source_numbers": [
+      21
+     ],
+     "sha256": "2479132f2c3ece497ac2b9b114c41436b915bfdbc57c4297203d4528e598a894",
+     "output_sha1": "687a8a13c4f4b229e6879c89c787ac5065cb6acd",
+     "rules": [
+      "从大模板分出可单独调用的中英对白精修，保留角色声音示例与诊断/最终格式。",
+      "补充例句的事实损失风险，防止用隐喻和英文改写改变原意。",
+      "不沿用末尾统一简化的calm/concise等四角色标签，优先详细声音卡。"
+     ]
+    },
+    {
+     "id": "prose-creative-character-choice-growth",
+     "source_numbers": [
+      24
+     ],
+     "sha256": "687486a9c11fb8c1fa246c8bb2fbc5095fc575410f9ced715ea669dd703d66a7",
+     "output_sha1": "ea42f6ea7f71100c5f44ab76553eec79fde03388",
+     "rules": [
+      "将教学文章改为带输入槽、推演流程和输出格式的独立模板",
+      "保留三层欲望、弱点代价链、四级压力测试及商人示例",
+      "删除署名日期和反复总结",
+      "将成长必然等于攻击性升级改为依据人物价值观选择"
+     ]
+    },
+    {
+     "id": "prose-creative-novel-project-bible",
+     "source_numbers": [
+      22
+     ],
+     "sha256": "8dd60404618a97f1b058ddfd173a923301a13cc4aa8ba0bf14b29464ecbca732",
+     "output_sha1": "812d6b6b01d14fe54bd5bb65e1c5d79d29b36241",
+     "rules": [
+      "保留原九大规划模块和全部字段表",
+      "加入输入槽与缺项建议边界，移除强制保存文件指令",
+      "移除未提供的SKILL-009引用及将ATU_301泛称人物系统的错误依赖",
+      "按原实际13项修正15节拍标题，不冒称完整救猫咪节拍表",
+      "将作者姓名拼贴改为可执行的叙述特征"
+     ]
+    },
+    {
+     "id": "h3-creative-seedance-emotion-director",
+     "source_numbers": [
+      25
+     ],
+     "sha256": "69a6fa63abd5d3cdc0a89c0be260f4d6d5d7f344587b6692f748e185cc464897",
+     "output_sha1": "9bed3a990826f9fc6b340010412737baa6fbde78",
+     "rules": [
+      "保留六段结构、情绪映射表、动作声音层次、镜头与环境反馈规则及可填写示例",
+      "删除加载欢迎语与技能执行壳，改成文本输入槽",
+      "将情绪必失控和四层动作必齐改为按人物选择，避免机械表演",
+      "统一1900字适用范围及连续时间区间，删除强制公开过程",
+      "明确此条只写提示词，module h3为通用视频类别"
+     ]
+    },
+    {
+     "id": "prose-creative-natural-fiction-narrative",
+     "source_numbers": [
+      26
+     ],
+     "sha256": "9feb27b0b69fed29bb3bbb883fabb51038ca97de7205b10f531711d315ee6151",
+     "output_sha1": "7b741ae161456db0d1ec470b7c11f10f8648ed8a",
+     "rules": [
+      "保留八项技法、正反对照示例和参考频率表",
+      "加入原文和视角输入槽及正文输出要求",
+      "将AI来源断言改为可观察文本问题",
+      "修正限制视角中直接进入配角内心的示例",
+      "将随机细节、机械模糊词及断句配额改为情境化建议"
+     ]
+    },
+    {
+     "id": "script-creative-heros-journey-development",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "8cf8d07204101b435b490a8a2da2a2e49e86b378d54a1c3f976faffeffe8ca75",
+     "output_sha1": "9814d87dfe639b72eb51aa19ab6a541ed6891f32",
+     "rules": [
+      "保留十二阶段及英雄对手双线表",
+      "删除未经核验的作品采用方法断言",
+      "将对手必死与英雄被选中的固定结论改为可选结果"
+     ]
+    },
+    {
+     "id": "script-creative-freytag-dramatic-arc",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "cd130264007d838bb801de62b1e40b0d1b982a6038e06cb4b79059d76d27d3d5",
+     "output_sha1": "bf075c59a2ad721e1aec67ae7d706d4c40155ed6",
+     "rules": [
+      "保留五阶段解释与参考比例",
+      "删除图中高潮与灾难位置混乱的ASCII金字塔",
+      "明确比例不强制，中心转折不等同所有现代影片的最终高潮",
+      "移除未经核验的电影套用清单"
+     ]
+    },
+    {
+     "id": "script-creative-seven-point-story-design",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "b9da936815bf9f53c91a3ae153249524397db1f90d27e2aa161bc9be649ba491",
+     "output_sha1": "dfd6c5715bb80f606d390ea446dc23ffde61ae00",
+     "rules": [
+      "修正原文将Hook误置结尾及节点排序倒置",
+      "将第二转折从计划崩溃修正为通往结局的理解或方案",
+      "保留压力升级与结局反推方法，删除无法核验的作品关联"
+     ]
+    },
+    {
+     "id": "prose-creative-snowflake-story-development",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "c1e7cca8ff64900d6c3fd3a1095e8a5aeab78c2835995d8552216cdfb7e2ea31",
+     "output_sha1": "fcc77d5d87916acd960ab2a4e9cb402ebbca2660",
+     "rules": [
+      "保留逐层扩展思想及图书管理员示例",
+      "修正源文重复四页概要、将每角色一句话当完整人物开发等不完整步骤",
+      "字词及页数改为尺度参考，避免伪精确要求"
+     ]
+    },
+    {
+     "id": "script-creative-kishotenketsu-story-pattern",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "22e0818375e1f9c6ccf64f59f250e87e8d57063d112c043ff081cd1e654a7222",
+     "output_sha1": "f36797925cfe1662aa9e1c270acca14026f55e94",
+     "rules": [
+      "纠正坎泰atsu混杂名称，使用起承转合",
+      "删除对三幕与起承转合是否需要冲突的绝对断言",
+      "保留四阶段与两种组织方式比较，移除未证实作品套用"
+     ]
+    },
+    {
+     "id": "script-creative-episodic-act-break-outline",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "6179b6d73033b66583fc052436cb145f21bfd79387b6ede3ed652d692e85377c",
+     "output_sha1": "b4f5086150b50e08868874a7ea068606726967d7",
+     "rules": [
+      "保留单集时长幕式及冷开场时间规划",
+      "删除无依据TEAM权威命名和固化韩剧排播集数表",
+      "分钟数改为可调整参考，不认定为平台硬性规格"
+     ]
+    },
+    {
+     "id": "script-creative-genre-story-skeletons",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "b9b1ff2e4ab140be9134e39326746f740211cb77adf9cba73d7763bcb459e5e2",
+     "output_sha1": "ff19f73b8493647d720438f5dda6b0ec7b5791b8",
+     "rules": [
+      "保留四类完整情节链及阶段说明",
+      "将单一类型结局和首次伤亡固定要求改为按材料选择",
+      "增加误导公平性和能力代价约束，避免只有标签没有因果"
+     ]
+    },
+    {
+     "id": "script-creative-minimal-chapter-narrative",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "be1b3a793f42e139fd8c621c641d69c203ae9ba66c8557b96b14f2d1259bc33b",
+     "output_sha1": "c8ba5cc5ea0cb27461e8c6f6962d85739c70c0bd",
+     "rules": [
+      "保留极简三阶段与章节留白回环模式",
+      "加入双时间顺序和信息公开表，防止非线性导致逻辑漏洞",
+      "不将列举电影归为同一固定写作方法"
+     ]
+    },
+    {
+     "id": "script-creative-animation-causal-story-spine",
+     "source_numbers": [
+      27
+     ],
+     "sha256": "3acd08b12a63540a1b1f5ff289ced9549d37930de84b9dde3ea2c2207c01863a",
+     "output_sha1": "52c14b3352ec2dbaf069325ea568e3ec26bf42c8",
+     "rules": [
+      "保留从前每天直到有一天因为直到最后从此以后七段因果链",
+      "保留实际11项角色成长检查点",
+      "移除25条及皮克斯官方法则的未核验归属"
+     ]
+    },
+    {
+     "id": "script-creative-novel-short-drama-long-form",
+     "source_numbers": [
+      28
+     ],
+     "sha256": "9d49fa3279caec81c63e6c4958752d0b1ea4f5eee639cb07f03f472ee258b99c",
+     "output_sha1": "cdfd38db93abb54af38543794852029014b4be9e",
+     "rules": [
+      "完整保留事实边界、单集设计、五段功能、表演化、连续性与三种输出模式",
+      "明确保留长版制作规格，区别于21号75秒固定五段",
+      "保留首尾钩子偏好但不允许为了硬钩子增造事实",
+      "删除后台推理输出暗示，保留可核对设计规则"
+     ]
+    },
+    {
+     "id": "h3-creative-mapped-twelve-second-storyboards",
+     "source_numbers": [
+      29
+     ],
+     "sha256": "654cf50a4649e368df90b55f1c7defb0b108449620fcdcb63af771143b3c0d66",
+     "output_sha1": "aa38fba7df133f90fd1d70d38bc880661da9ba98",
+     "rules": [
+      "保留映射归一化、自定义分隔协议、镜头细节和VoiceID方法",
+      "移除两段现成小说角色大示例，改为短小通用格式示例",
+      "统一12秒时长与对白容量，协调库外原文元素和映射冲突",
+      "修正主观镜头、人物强弱机位与左右入画绝对规则",
+      "将情绪百分比改为可见表演，将随机转场改为因果承接",
+      "去掉成品英文技术参数堆叠，不声称文本会自动上传映射",
+      "将外部系统冒号数量变量改为提词库可读的前两个分镜和后两个分镜"
+     ]
+    },
+    {
+     "id": "prose-creative-first-person-novel-voiceover",
+     "source_numbers": [
+      30
+     ],
+     "sha256": "e25324f09769441b007378725aabb4500c7545f911ef64b97098afe6fb0ceaeb",
+     "output_sha1": "9b73d2f061c79020da8f6dd027f7b8702cdd282b",
+     "rules": [
+      "保留八种开头结构、短段节奏及五个示例",
+      "修正第一人称与他她你冲突，明确原文是事实边界",
+      "将机械45段、强制后字及删语气词改为参考",
+      "把黑丝钩这一含混行话改为具体叙事悬停",
+      "替换以重复虐待为卖点的示例为原创建议场景，非基于正常衣物或关系词作过滤"
+     ]
+    },
+    {
+     "id": "h3-creative-continuous-five-segment-video",
+     "source_numbers": [
+      31
+     ],
+     "sha256": "50a8e2cf249103e4e76f9f309142d126ba2bbabf7b5da7adffd14caf8b78c7af",
+     "output_sha1": "5b1763109d777767efedbfb47e36ae9a2b85a53d",
+     "rules": [
+      "保留全集与分镜参考分层、功能人物筛选、空间锚定及完整分镜格式",
+      "修正不能换位为移动须有路径，保持可拍摄性",
+      "对白语言改为输入项，不默认英文",
+      "图片和@只引用用户已有资产，删除自动生成能力暗示",
+      "原文还原改为按需段号映射，避免重复长篇原文",
+      "补充角色合并与身份遮挡不得破坏原文信息边界"
+     ]
+    },
+    {
+     "id": "prose-creative-lossless-dialogue-json",
+     "source_numbers": [
+      33
+     ],
+     "sha256": "ac02b951811ac12e78a931dbcda67636c204d4bc4f9ad693b9b0efac0e2a632a",
+     "output_sha1": "08e8489dce9fd74fcb34e12ba159f1c1287fbaae",
+     "rules": [
+      "保留角色、旁白、情绪与强度识别规则和字段",
+      "删除原文损坏的JSON示例及固定小说人物名单",
+      "解决保留原文与替换引号冲突，以JSON转义保留原标点",
+      "修正所有标点都当台词、35字硬下限和说话者猜测问题",
+      "补入可合法解析的短示例和顺序拼接可恢复原文的核对要求"
+     ]
+    },
+    {
+     "id": "script-creative-novel-to-audiovisual-scenes",
+     "source_numbers": [
+      34
+     ],
+     "sha256": "64e996d368e1c5382be370f79e5e99a02ca9e6d230a2d78ec83661e5281c0aa8",
+     "output_sha1": "34cae2e5488dfbdde7e53db95fa8394301814bd7",
+     "rules": [
+      "保留场景Markdown模板、双节奏标注、物理空间与摄影光影规则",
+      "移除底层精准控制与资历自称",
+      "将恐惧示例改为不新增水杯道具的动作",
+      "轴线规则保留为默认并允许有交代的越轴",
+      "补齐保真、旁白功能与参数属于设计意图的边界"
+     ]
+    },
+    {
+     "id": "script-creative-script-storyboard-table",
+     "source_numbers": [
+      35
+     ],
+     "sha256": "67e77705b1bab0a257327499bcc39846e22273dfeb0dc1d4443d7f3acfa32a32",
+     "output_sha1": "a6067474245dce4e6197ac3a3d1cbb19347ba378",
+     "rules": [
+      "保留13列、编号sc001、景别运动枚举与字词限制",
+      "将Excel产物承诺改为可复制Markdown文本",
+      "修正多人对白一行与一镜一行冲突，要求按话轮分配时长",
+      "旁白不强制改人称，动作标注移列而不丢失",
+      "补充表格转义及空对白空情绪规则"
+     ]
+    },
+    {
+     "id": "vs-creative-midjourney-description-builder",
+     "source_numbers": [
+      32
+     ],
+     "sha256": "1f63680fe63dc55ba1628a54a9fe1bf59d3e2a8f93a7baa416b0afc8b8965067",
+     "output_sha1": "c258481af4980392764f19ab9443ccf29d775f20",
+     "rules": [
+      "从完整技能合并文中提取独立构建与中文意象翻译方法",
+      "删除YAML、技能路径读取、版本加载与执行壳",
+      "保留主体具体化、2–3风格修饰上限、双语一致和描述参数分离",
+      "不导入未经核验的2026版本默认值与参数区间断言",
+      "人物肖像及名字叠字从站立偏好改为可覆盖建议"
+     ]
+    },
+    {
+     "id": "style-creative-image-material-lighting-lexicon",
+     "source_numbers": [
+      32
+     ],
+     "sha256": "543082278cd96c75a6a7e98ae7861dd845e89448937d36e40c8014028398f0b3",
+     "output_sha1": "2bde0cb2a0caa2d11bf0e78460aaeb6758b46c59",
+     "rules": [
+      "保留七组词库及每词用途提示",
+      "删除外部方法文件引用",
+      "补入使用输入和输出方式，限制同一提示词修饰词数量",
+      "未把词库宣传为模型效果保证"
+     ]
+    },
+    {
+     "id": "vi-creative-midjourney-single-variable-critique",
+     "source_numbers": [
+      32
+     ],
+     "sha256": "363d2eb15c122bbb636affd19607add282db689874934d41af9fbe1a83f49ca2",
+     "output_sha1": "11fab26dc9f9b44c6b4340f9074130effcd39b0f",
+     "rules": [
+      "保留七维评分锚点、最低分路由和单变量迭代方法",
+      "保留ADH/SUBJ/COMP/LIGHT/STYLE/COH/REF/VER故障家族及文本修法",
+      "删除读取外部参考文件和自动重生成指令",
+      "删去未验证版本旗标、精确权重与数值断言，参数建议必须独立核查"
+     ]
+    },
+    {
+     "id": "vi-creative-krea2-image-reconstruction",
+     "source_numbers": [
+      40
+     ],
+     "sha256": "440c62fe3a4d377a5275f1b13d350104c2da0078b6cc9184f4e225f42f32c35e",
+     "output_sha1": "733a01de50f2c15fd01a83e87cf05b789f50b6e2",
+     "rules": [
+      "保留四模式、观察维度、人像与非人物锁定、占比分配和三种英文整合公式",
+      "移除启动词与外部模板依赖，增加实际图片与多图用途输入",
+      "不执行图像生成或上传，不从缺图推测画面",
+      "将面部地域印象改为可见形态，保留原文不可断言真实身份的边界",
+      "解决严格复刻与一律no text/no logo冲突，以用户保留项优先",
+      "长度和内容占比为参考，不为凑字数添加不可见细节"
+     ]
+    },
+    {
+     "id": "vs-creative-krea2-text-image-direction",
+     "source_numbers": [
+      41
+     ],
+     "sha256": "ffa218e844ab427cd740b7a0b072fdecbd45ee13039e618b138ebf937f41124f",
+     "output_sha1": "4bd41e190063830ad494b4847923b15f135eeec6",
+     "rules": [
+      "保留完整文字导演流程、用途适配、光材词汇及英文整合公式",
+      "移除启动词与外部模板依赖，增加可填写输入和纯文本产物边界",
+      "解决封面文字、品牌需求与通用负面词冲突",
+      "面部地域印象改为可见形态，保留原文年龄不明时的非性感默认",
+      "细节与媒介相容，禁止为了固定篇幅补无关素材"
+     ]
+    }
+   ]
   }
  },
  "descriptive_mentions": [
@@ -899,24 +2332,24 @@
  ],
  "products": {
   "catalog_index.json": {
-   "items": 596,
-   "bytes": 855607
+   "items": 663,
+   "bytes": 1107231
   },
   "bodies_prompt.json": {
-   "items": 102,
-   "bytes": 1671951
+   "items": 129,
+   "bytes": 2096270
   },
   "bodies_script.json": {
-   "items": 74,
-   "bytes": 450720
+   "items": 113,
+   "bytes": 798144
   },
   "bodies_game.json": {
    "items": 24,
    "bytes": 15727
   },
   "bodies_style.json": {
-   "items": 396,
-   "bytes": 265544
+   "items": 397,
+   "bytes": 270754
   }
  },
  "anomalies": {
@@ -1350,7 +2783,7 @@
  "catalog_integrity": {
   "index_body_ids_equal": true,
   "shards": 4,
-  "count": 596
+  "count": 663
  },
  "gslh_conversion": {
   "source": "presets/gushoulihua-skills",
@@ -1776,6 +3209,1436 @@
      "case_reference"
     ],
     "output_sha1": "4f4b18cece534a6c7e5f72592abd7fa53b2a6143"
+   }
+  ]
+ },
+ "moss_conversion": {
+  "source": "presets/moss-prompt-kit",
+  "author": "OpenMOSS / fisher / 未知（用户本地收集）",
+  "license": "官方增强器为 Apache-2.0（OpenMOSS/MOSS-Image @2b46b1e）；两份规则文本与 fisher 扩写器未附许可证，仅按用户本地导入使用，公开再分发前需原作者授权",
+  "input": 4,
+  "output": 4,
+  "files": 5,
+  "note": "规则类（扩写/反推）按原文整篇入库；官方增强器只收 SKILL.md 与 layout 规则，按单文件合并。",
+  "excluded": [
+   {
+    "file": "moss-image-prompt-enhancer/scripts/compile_prompt.py",
+    "reason": "Python 可执行脚本不入库（与合集既有口径一致）；Layout 方向按 references/layout.md 的规则手写，正文已说明脚本未内置"
+   },
+   {
+    "file": "moss-image-prompt-enhancer/agents/openai.yaml",
+    "reason": "Agent 元数据，与提词库预设正文无关"
+   },
+   {
+    "file": "moss-image-prompt-enhancer/scripts/test_compile_prompt.py",
+    "reason": "脚本测试，同上不入库"
+   },
+   {
+    "file": "MOSS人像提示词模板_sfw版_3.0.md",
+    "reason": "与既有 vs-206-gslh-moss-portrait 逐字节相同（md5 ed15c591…），重复入库只增噪声，改用既有条目"
+   }
+  ],
+  "audit": [
+   {
+    "id": "vs-221-moss-t2i-rules",
+    "files": [
+     {
+      "path": "rules/MOSS提示词优化规则.txt",
+      "sha256": "57ca633d291ba1699d2564b2f0f66005346981d1959c46a08b48feba9b9ce4da",
+      "bytes": 4951
+     }
+    ],
+    "rules": [],
+    "output_sha1": "32de5c3358b20927ec6e4fa63fff629009de314f"
+   },
+   {
+    "id": "vi-121-moss-reverse-rules",
+    "files": [
+     {
+      "path": "rules/MOSS图像反推规则.txt",
+      "sha256": "b4bb552487d8d6cd9e808fa44b49c51b1c7d46f3de6ca9fb2a44ee849a0ba8dd",
+      "bytes": 6868
+     }
+    ],
+    "rules": [],
+    "output_sha1": "0e1c0e9cc3d265dca1f9091d6c40551755522f07"
+   },
+   {
+    "id": "vs-222-fisher-moss-expander",
+    "files": [
+     {
+      "path": "engines/fisher-moss-prompt-expander-完整版.md",
+      "sha256": "ac4b3c289348e4bc4a1c04cc6b12433f014cd152e595cc079cb09acf8ac253b9",
+      "bytes": 106829
+     }
+    ],
+    "rules": [],
+    "output_sha1": "2d0c49d91c915c7c573d3d09f278c3c1ce0735ae"
+   },
+   {
+    "id": "vs-223-moss-official-enhancer",
+    "files": [
+     {
+      "path": "official/moss-image-prompt-enhancer/SKILL.md",
+      "sha256": "72cd39883af0b6c6997038b068af2d858dcd968ca43466ebf93fea21833878a0",
+      "bytes": 5909
+     },
+     {
+      "path": "official/moss-image-prompt-enhancer/references/layout.md",
+      "sha256": "e3d74ded6ab402ef69131fc7609117affff5ee1c6d14a49752d44c865b79525c",
+      "bytes": 4072
+     }
+    ],
+    "rules": [
+     "frontmatter",
+     "single_file_refs"
+    ],
+    "output_sha1": "e4eca509b38612045d2324975bb04765c54a4626"
+   }
+  ]
+ },
+ "creative_conversion": {
+  "collection": "创作模板资料",
+  "input": 41,
+  "output": 63,
+  "expected": 63,
+  "files": 63,
+  "license": "用户提供的本地创作资料；未附统一许可证，保留来源文件名与指纹，公开再分发前需确认原作者授权。",
+  "decisions": [
+   {
+    "number": 1,
+    "name": "核心分镜提示词模版V3版-分镜提示词生产模板_V3.md",
+    "bytes": 46534,
+    "sha256": "d694ed56e29ee167b36c6708e8975387fc2710aacd2c82ef6d5916991de11507",
+    "decision": "included",
+    "reason": "已完整阅读；提取15秒分镜16字段、接力物与字段互锁规则。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "h3-creative-storyboard-relay-v3"
+    ]
+   },
+   {
+    "number": 2,
+    "name": "分镜解析充电版.md",
+    "bytes": 106010,
+    "sha256": "f3fa18cc7c35ca7bd15a0c16a5dccb00f0158a5a3ef6df00e538eeedbd63010c",
+    "decision": "included",
+    "reason": "已完整阅读；提取制作包、镜头语言参考及节奏特效审计，校正示例统计矛盾。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "h3-creative-shotlist-production-package",
+     "h3-creative-shot-language-reference",
+     "h3-creative-pacing-vfx-review"
+    ]
+   },
+   {
+    "number": 3,
+    "name": "核心第一人称剧本输出-eye-blink-life-完整版.md",
+    "bytes": 69583,
+    "sha256": "e697e4ec9bb6d965b68376e1ef1e9e9d58ffb742d9433ab6b7863fa94f76d689",
+    "decision": "included",
+    "reason": "已完整阅读；提取POV一生回望剧本与眨眼语法。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "script-creative-pov-life-blink-script"
+    ]
+   },
+   {
+    "number": 4,
+    "name": "女频短篇创作方法论1.md",
+    "bytes": 72022,
+    "sha256": "8d70404d75323d9d91fce729c3918e8265374ff97aeb31cf15a04806ef367f61",
+    "decision": "included",
+    "reason": "已完整阅读；拆为短篇结构与情绪人物工具，明确类型限定与量表差异。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "prose-creative-female-short-fiction-design",
+     "prose-creative-character-emotion-engine"
+    ]
+   },
+   {
+    "number": 5,
+    "name": "3.专用于SD2.0。可以根据剧本或者图像生成剧本-角色-九宫格图像-视频提示词.md",
+    "bytes": 24324,
+    "sha256": "aaa600226cb6fdf6ba827f05b97d608010eedddbb1104c491c8dd4a262ec9a96",
+    "decision": "included",
+    "reason": "已完整阅读；按反推、短片剧本、九宫格与视频提示词用途拆分。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "vi-creative-reference-character-profile",
+     "script-creative-short-film-story-grid",
+     "vs-creative-nine-panel-image-prompt",
+     "h3-creative-nine-panel-video-prompt"
+    ]
+   },
+   {
+    "number": 6,
+    "name": "1.用来分析剧本合理性生成可视化评分系统-分镜合理性校对提示词模板_v2_跨模型版.md",
+    "bytes": 9440,
+    "sha256": "6b44abc7c064deb6fbbdf4103d03fe787af1cbeaaab84d14c0d21927d7a897b1",
+    "decision": "included",
+    "reason": "已完整阅读；保留100分量表及文字、JSON、HTML输出契约。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "h3-creative-storyboard-rationality-audit"
+    ]
+   },
+   {
+    "number": 7,
+    "name": "2.可以根据剧本生成角色场景道具资产库提示词-剧本转资产库卡.md",
+    "bytes": 16966,
+    "sha256": "eff39394db1395e241a4002b4ad5a1144911adde2f3df042ed329554d2a481ed",
+    "decision": "included",
+    "reason": "已完整阅读；三引擎资产卡可独立使用。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "vs-creative-script-assets-three-models"
+    ]
+   },
+   {
+    "number": 8,
+    "name": "视频提示词模板-内部版.md",
+    "bytes": 51810,
+    "sha256": "8cb342dfba846ac8db688a9533cea6136dbadec634dbdb17c5bd59d4b29748a2",
+    "decision": "included",
+    "reason": "已完整阅读；分为八帧静态故事板和逐镜动态提示词，去敏感词规避字典。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "vs-creative-eight-frame-storyboard-prompt",
+     "h3-creative-storyboard-to-video-prompt"
+    ]
+   },
+   {
+    "number": 9,
+    "name": "核心资产库输出-全资产大师V3.0_场景+角色+道具_万能版.txt",
+    "bytes": 23764,
+    "sha256": "fae0964e575c085bfd1bb2015388c42341075cc86cc23633b5f0accd33b7e278",
+    "decision": "included",
+    "reason": "已完整阅读；保留空场景七层、角色四宫格与道具卡规范。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "vs-creative-complete-visual-assets"
+    ]
+   },
+   {
+    "number": 10,
+    "name": "0基础 AI 短剧制作系统课大纲（完善版 V2）.md",
+    "bytes": 32566,
+    "sha256": "8dd84a5bf56c88161674d74936ed21f6f8e127ef0a8e8c00294473f9366a48b3",
+    "decision": "excluded",
+    "reason": "完整1138行均为课程定位、24课教学议程、练习作业及结课标准，无独立完整提示词模板；不把教学大纲硬改造成新创作任务。",
+    "entry_ids": []
+   },
+   {
+    "number": 11,
+    "name": "gpt生图模板.md",
+    "bytes": 13712,
+    "sha256": "62015460504331a65e88b47571b704b12d4dc2bd878faf3c05e5f73eed0a96cb",
+    "decision": "included",
+    "reason": "已完整阅读；人物、场景、道具设定图三种独立版式分别提取，删未经核实API尺寸断言。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "vs-creative-guoman-character-sheet",
+     "vs-creative-guoman-scene-sheet",
+     "vs-creative-guoman-prop-sheet"
+    ]
+   },
+   {
+    "number": 12,
+    "name": "超自然网络小说AI创作方法论_提炼版.md",
+    "bytes": 9513,
+    "sha256": "8560e575f81314f1ed3777239850607ab3648b3372d8615d4580c95a1c0b827f",
+    "decision": "included",
+    "reason": "已完整阅读；保留三级纲要、功能因果、魔法限制与类型适配，去伪官方编码与未定义指数。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "prose-creative-supernatural-fiction-outline"
+    ]
+   },
+   {
+    "number": 13,
+    "name": "B站-是古手梨花sama-仙宫专用场景提示词引擎.md",
+    "bytes": 93343,
+    "sha256": "ed34c48010491ff67f60fa02b2e7cc7d221a5fce6f974143c260309d68e82ccd",
+    "decision": "duplicate",
+    "reason": "inventory标记与现有presets/gushoulihua-skills/k2-prompt-engine/references/K2仙宫专用场景提示词引擎.md为精确重复（sha256 ed34c48010491ff67f60fa02b2e7cc7d221a5fce6f974143c260309d68e82ccd）；跳过重复正文与重复入库。",
+    "entry_ids": [],
+    "existing_paths": [
+     "presets/gushoulihua-skills/k2-prompt-engine/references/K2仙宫专用场景提示词引擎.md"
+    ]
+   },
+   {
+    "number": 14,
+    "name": "ATU_301_叙事功能簇体系.md",
+    "bytes": 24057,
+    "sha256": "ce236c72b15d75f3c159f18c08693d0dfafa22f3a0d35df9a398ea5e527feb65",
+    "decision": "included",
+    "reason": "已完整阅读；保留异界营救与归来认领的A-G功能簇、三重试炼和道具；去错误Propp编号及错误ATU近邻对应。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "script-creative-otherworld-rescue-functions"
+    ]
+   },
+   {
+    "number": 15,
+    "name": "02电影级分镜.md",
+    "bytes": 6153,
+    "sha256": "0e9e2315e12e204de5fd3948f6cc740a0bae6e60694e3a11bfed40f53425f6f0",
+    "decision": "included",
+    "reason": "已完整阅读；保留15秒相对时间切片、音色档案、场景锚定和SFX公式。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "h3-creative-cinematic-sfx-shot-slices"
+    ]
+   },
+   {
+    "number": 16,
+    "name": "01影视剧本“洗稿”专家.md",
+    "bytes": 1994,
+    "sha256": "63c19eb826e5a9d8e33afcc540b0a64c2ee479bbb769dcfb341ede3e45995ace",
+    "decision": "included",
+    "reason": "已完整阅读；内容实际是将小说心理与抽象说明转成可拍动作，改名为原创或已获授权作品的视听化改编，不含隐匿来源和规避查重。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "script-creative-novel-to-audiovisual-script"
+    ]
+   },
+   {
+    "number": 17,
+    "name": "MBTI角色设计方案_进阶版.md",
+    "bytes": 29179,
+    "sha256": "a17390c21d4331c2a62e958c4abc44961ff990c736e14ed136f0332ba9f2a53b",
+    "decision": "included",
+    "reason": "已完整阅读；保留八功能、16型、关系冲突及弧光，校正ESFP第三功能并去固定诊断式断言。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "script-creative-mbti-character-workshop"
+    ]
+   },
+   {
+    "number": 18,
+    "name": "master-writer-skill-v4.md",
+    "bytes": 44216,
+    "sha256": "961ab3652397c095a1b27e5763ece6fda733e7d9a6ac6a53923b5248e383f6cd",
+    "decision": "included",
+    "reason": "已完整阅读；仅提取文本层的章节任务合约、状态摘要和独立审稿，不保留虚构Agent工具、权限配置、cron或自动学习执行指令。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "prose-creative-chapter-contract-and-state",
+     "prose-creative-evidence-based-chapter-review"
+    ]
+   },
+   {
+    "number": 19,
+    "name": "立体人物教学案例.md",
+    "bytes": 13029,
+    "sha256": "8319ecba10279202d35bf32c05d550e871886fba28e5f91cbf9190cd9dc7818c",
+    "decision": "included",
+    "reason": "已完整阅读；能转成人物练习，保留五个案例的欲望缺口、反向弱点和四级压力。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "script-creative-three-dimensional-character-exercise"
+    ]
+   },
+   {
+    "number": 20,
+    "name": "经典编剧模板体系全9套.md",
+    "bytes": 28251,
+    "sha256": "d2f6ffc9156a29f20d2e9fcdbfc18c474ea42e37813725e093851df22cdfdb22",
+    "decision": "included",
+    "reason": "已完整阅读；九套分别整理，其中人物22节点、情感七点和悬疑12步改为来源整理法，不沿用错误权威署名。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "script-creative-structure-three-acts",
+     "script-creative-structure-story-circle",
+     "script-creative-structure-eight-sequences",
+     "script-creative-structure-value-turns",
+     "script-creative-structure-character-twenty-two",
+     "script-creative-structure-three-dimensional-conflict",
+     "script-creative-structure-save-the-cat",
+     "script-creative-structure-emotional-seven",
+     "script-creative-structure-mystery-twelve"
+    ]
+   },
+   {
+    "number": 21,
+    "name": "小说转短剧叙事剧本模板_五段功能优化版2.4_人物真实性版(1)(2).md",
+    "bytes": 60592,
+    "sha256": "893db6f808472a5bdeefbab2ab3ea60531c09319d317b080e3dcfbfb06d392c6",
+    "decision": "included",
+    "reason": "已完整阅读；分为75秒五段改编和可独立调用的对白精修，保留知识边界、空间与情绪连续性。已提取为可直接使用的自包含文本模板。",
+    "entry_ids": [
+     "script-creative-novel-short-drama-five-blocks",
+     "script-creative-dialogue-naturalization"
+    ]
+   },
+   {
+    "number": 22,
+    "name": "项目圣经生成器_SKILL-010.md",
+    "bytes": 7586,
+    "sha256": "a3adfa62e6bf1362b4d96f01307beb39e8efd62e8c41a2025c6720ea73333deb",
+    "decision": "included",
+    "reason": "整合主线、世界法则、人物动力、场景道具与写作风格的长篇小说规划模板。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "prose-creative-novel-project-bible"
+    ]
+   },
+   {
+    "number": 23,
+    "name": "The_Man_from_Earth_Script.md",
+    "bytes": 73818,
+    "sha256": "41ce472a0a6f46bdec73065fb8dc3cd006526c2ae2febdcfb768473874e9bede",
+    "decision": "excluded",
+    "reason": "完整受版权保护电影剧本，属于参考作品，不是可复用提示词模板，不导入正文。",
+    "entry_ids": []
+   },
+   {
+    "number": 24,
+    "name": "让人物与故事生长出来.md",
+    "bytes": 7406,
+    "sha256": "e24daf39a6c7fe2dcba61cce5e2e272f936a72b0d0fdedcd16c2e108d346cfb6",
+    "decision": "included",
+    "reason": "已提取人物动力、弱点代价与递进冲突的可用模板。",
+    "entry_ids": [
+     "prose-creative-character-choice-growth"
+    ]
+   },
+   {
+    "number": 25,
+    "name": "情绪导演_Skill_V2.1.md",
+    "bytes": 18312,
+    "sha256": "ef19f0a5498d893d9cc2081f7dea527a30a3f3a496cd2fe4612a4a9dc11e9d38",
+    "decision": "included",
+    "reason": "将剧本和故事素材转为1900字以内的六段式Seedance视频提示词，保留情绪、动作、声音和环境反馈设计。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "h3-creative-seedance-emotion-director"
+    ]
+   },
+   {
+    "number": 26,
+    "name": "祛AI味_人类叙事黄金法则.md",
+    "bytes": 6842,
+    "sha256": "28c340dde0aad417bfa8e3ccdd3aa931e49f5653d58f28b4b17fe0014c63d15f",
+    "decision": "included",
+    "reason": "用句式变化、真实对话、感官细节和情绪回旋修订小说，保留事实与限制视角。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "prose-creative-natural-fiction-narrative"
+    ]
+   },
+   {
+    "number": 27,
+    "name": "著名编剧模板大全.md",
+    "bytes": 24864,
+    "sha256": "d7ef3cb075ebe30b415eaa8a284de1988a701ac5f6cc8bef38cf69f520bea103",
+    "decision": "included",
+    "reason": "用日常、催化、连续后果、终局和新常态搭建动画或家庭故事。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "script-creative-structure-three-acts",
+     "script-creative-structure-story-circle",
+     "script-creative-structure-eight-sequences",
+     "script-creative-structure-save-the-cat",
+     "script-creative-heros-journey-development",
+     "script-creative-freytag-dramatic-arc",
+     "script-creative-seven-point-story-design",
+     "prose-creative-snowflake-story-development",
+     "script-creative-kishotenketsu-story-pattern",
+     "script-creative-episodic-act-break-outline",
+     "script-creative-genre-story-skeletons",
+     "script-creative-minimal-chapter-narrative",
+     "script-creative-animation-causal-story-spine"
+    ]
+   },
+   {
+    "number": 28,
+    "name": "小说转短剧叙事剧本模板_五段结构版(1).md",
+    "bytes": 16881,
+    "sha256": "f09df0dd7a71770783d9b0e5c41ebbc0f86bd1b783742f40f019f972d4b9f2b8",
+    "decision": "included",
+    "reason": "将原文改为90–105秒、4–7段的可表演叙事中间稿，保留原事实与信息顺序。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "script-creative-novel-short-drama-long-form"
+    ]
+   },
+   {
+    "number": 29,
+    "name": "生成分镜头.txt",
+    "bytes": 29110,
+    "sha256": "512486fcb06abcbecc5929d74f2aa104d982246ddd6d074b40be6a7f1ded2a21",
+    "decision": "included",
+    "reason": "把当前文案转为12秒镜头组，包含图片与视频字段、参考资产映射、声线和衔接状态。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "h3-creative-mapped-twelve-second-storyboards"
+    ]
+   },
+   {
+    "number": 30,
+    "name": "你是一个顶级的小说推文改文专家。你的唯一任务是将小说原文改写为适合短视频配音的“第一人称解说文案.txt",
+    "bytes": 5194,
+    "sha256": "3d4becfe62ae072c5402d17f995f0569b19d60782f859314f6bff5713cfd961a",
+    "decision": "included",
+    "reason": "用八类开头、短段与感知因果把小说改为第一人称短视频口播。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "prose-creative-first-person-novel-voiceover"
+    ]
+   },
+   {
+    "number": 31,
+    "name": "连续段落式AI视频提示词模板_自由运镜增强_人物筛选版(1).md",
+    "bytes": 17280,
+    "sha256": "0a64cd9c059d8199279110af7bf17effdef0a3cf84d2ebcdfc3237f32a88381a",
+    "decision": "included",
+    "reason": "固定5×15秒连续场面，逐段筛选人物和参考，锁定空间路径、道具交接及首尾状态。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "h3-creative-continuous-five-segment-video"
+    ]
+   },
+   {
+    "number": 32,
+    "name": "2.MJ资产提示词(1).md",
+    "bytes": 54005,
+    "sha256": "97c9e0b1ffb5eba88031c214ee420e5436926081f76ca230901bedf171dbc4c6",
+    "decision": "included",
+    "reason": "用七维评分和内容、解剖、构图、光色、风格、伪影、参考故障表定位最弱项，只改一个主要变量。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "vs-creative-midjourney-description-builder",
+     "style-creative-image-material-lighting-lexicon",
+     "vi-creative-midjourney-single-variable-critique"
+    ]
+   },
+   {
+    "number": 33,
+    "name": "将给定小说内容划分为角色和内容，并输出为结构化JSON结果.txt",
+    "bytes": 4497,
+    "sha256": "31e833e07f8c4d917832e4093da3d0faa1fd1cd11bc12b168fb0c1b00f74fa59",
+    "decision": "included",
+    "reason": "将原文按说话者与旁白切分为最多50字的JSON记录，并标注受控情绪和强度。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "prose-creative-lossless-dialogue-json"
+    ]
+   },
+   {
+    "number": 34,
+    "name": "GROK小说转剧本(1).txt",
+    "bytes": 2583,
+    "sha256": "97a5d00470f2d085ead4235314332b61fa3e383a2bfe3a3f96b717382c03324a",
+    "decision": "included",
+    "reason": "按场景、节奏、机位、站位、可见动作与对白，将小说转成视听剧本。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "script-creative-novel-to-audiovisual-scenes"
+    ]
+   },
+   {
+    "number": 35,
+    "name": "（第2步）剧本转分镜(1).txt",
+    "bytes": 2633,
+    "sha256": "40551c436b2038b2d7b895aaff034ff6fcd0b4a1099bafaafa0b0528ea9a35bb",
+    "decision": "included",
+    "reason": "生成可直接复制到表格的13列分镜表，约束景别、运动、对白、情绪和时长。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "script-creative-script-storyboard-table"
+    ]
+   },
+   {
+    "number": 36,
+    "name": "（第1步）故事转剧本(1).txt",
+    "bytes": 51,
+    "sha256": "ade29540c4ad470ebdec10c5fc82fc7b4d578c1d94d63c825d4c83d1182645f3",
+    "decision": "excluded",
+    "reason": "仅17字泛化要求，没有独立结构或可复用细则，已有详细改编模板覆盖。",
+    "entry_ids": []
+   },
+   {
+    "number": 37,
+    "name": "小说转短剧叙事剧本模板_五段功能优化版2.4_人物真实性版(1)(3).md",
+    "bytes": 60592,
+    "sha256": "893db6f808472a5bdeefbab2ab3ea60531c09319d317b080e3dcfbfb06d392c6",
+    "decision": "duplicate",
+    "reason": "inventory SHA-256与21号完全一致，复用21号导入结果。",
+    "entry_ids": [],
+    "duplicate_of": 21
+   },
+   {
+    "number": 38,
+    "name": "小说转短剧叙事剧本模板_五段功能优化版2.4_人物真实性版(1)(1).md",
+    "bytes": 60592,
+    "sha256": "893db6f808472a5bdeefbab2ab3ea60531c09319d317b080e3dcfbfb06d392c6",
+    "decision": "duplicate",
+    "reason": "inventory SHA-256与21号完全一致，复用21号导入结果。",
+    "entry_ids": [],
+    "duplicate_of": 21
+   },
+   {
+    "number": 39,
+    "name": "图片信息提取转 JSON 元指令.txt",
+    "bytes": 11489,
+    "sha256": "ba00a394860a9561f705697bc493ea281e5502e968b51b7601066a1e4934b1e9",
+    "decision": "duplicate",
+    "reason": "去空白与Markdown标记归一化后，与现有vi-007-img2json、vi-103-json-meta均相同；三份原文均在插画JSON的hair字段截断，不新增第三条。",
+    "entry_ids": []
+   },
+   {
+    "number": 40,
+    "name": "krea2-万物复刻-3.2独立版.md",
+    "bytes": 15680,
+    "sha256": "c268e51c320fc172bd20898680a055319e11a6c116c4a568e3d4cda2c25a5b14",
+    "decision": "included",
+    "reason": "按图像可见特征反推英文提示词，支持严格复刻、受控修改、风格迁移与多图融合。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "vi-creative-krea2-image-reconstruction"
+    ]
+   },
+   {
+    "number": 41,
+    "name": "krea2-万能生图-3.2独立版.md",
+    "bytes": 11882,
+    "sha256": "16e2cb171c0098757a4af4f293cebaf7a1146d79995191806d47c68b35b1e520",
+    "decision": "included",
+    "reason": "把简短文字需求扩写为涵盖用途、主体、场景、镜头、光色、媒介和材质的英文自然段。 已保留可直接使用的正文，具体适配见条目transformations。",
+    "entry_ids": [
+     "vs-creative-krea2-text-image-direction"
+    ]
+   }
+  ],
+  "audit": [
+   {
+    "id": "h3-creative-storyboard-relay-v3",
+    "source_numbers": [
+     1
+    ],
+    "sha256": "751454733ef57dfe1c26859744942946f6ef3faffa5dd7c21929d3894a1115b6",
+    "output_sha1": "c2c9e109860ed62781c28c451966f69f7a7797b0",
+    "rules": [
+     "删除开头、末尾及逐批强制版权播报和推广话术；出处仍由source_numbers保存。",
+     "保留16字段、内容密度决策树、多题材例、七种过门、角色卡及完整自检。",
+     "解释15秒容器与传统单镜区别；T编号改为自定义具名方案，不依赖缺失模板。",
+     "删除玩家A外貌刻板化示例；将少量伤害细节改为护甲/受力反馈，保留动作因果。"
+    ]
+   },
+   {
+    "id": "h3-creative-shotlist-production-package",
+    "source_numbers": [
+     2
+    ],
+    "sha256": "bb099f89be4ff2af541bff577232b1571756204d26d40f144d4627e03e274382",
+    "output_sha1": "6351ac6de655f7fdd037598e5b2a86c5d0dcf314",
+    "rules": [
+     "删除推广、版本、缺失Skill路径、链路指令和整部参考片样例。",
+     "保留8字段、7列镜头卡、世界观5槽、4类人物及声音4层12槽的输出契约。",
+     "校正原文“7档却列8档”、中英文计数字段及情感轴紧/重混用。",
+     "声音槽按实际时间填，不照抄参考片58/62镜与断臂后双臂等矛盾。"
+    ]
+   },
+   {
+    "id": "h3-creative-shot-language-reference",
+    "source_numbers": [
+     2
+    ],
+    "sha256": "6e90cf296406eb3157da8c962e4a1182230eb567f917a9ebc58debf6ff40a10b",
+    "output_sha1": "acc7ee3d6c280fe8e4ff16cf36a0ef3a88ce46e4",
+    "rules": [
+     "保留具体介质、画幅、色彩ID、质感、导演语法、调色、类型惯例与机位运动转场表。",
+     "把刻板类型禁令改为建议；移除未经核实作品年份及“竖屏不能全景”绝对断言。",
+     "校正90秒镜数推导、拉焦与变焦、摄影速率与运镜的混用。"
+    ]
+   },
+   {
+    "id": "h3-creative-pacing-vfx-review",
+    "source_numbers": [
+     2
+    ],
+    "sha256": "6003fefa5dcd7cfbf5cb8a87b65d26e412f9abdb690454030bbac6aac3ac39be",
+    "output_sha1": "0475970531f6efbc203c47322cfde0732060c573",
+    "rules": [
+     "独立成审计用途，保留ASL、σ、异常条件、四档与六项加权及工作量表。",
+     "明确σ统计口径并修正示例工时比例；原文倍率降为本地示意，不当行业事实。",
+     "删除厂商推荐、无依据排期红线和整部参考片不一致数据。"
+    ]
+   },
+   {
+    "id": "script-creative-pov-life-blink-script",
+    "source_numbers": [
+     3
+    ],
+    "sha256": "18c8068f588808dcadf233933bbd7a7bbac439dfbe46194b20a142bd869881e9",
+    "output_sha1": "1023b45832f5abedb5cacb71583cc5b86475afd1",
+    "rules": [
+     "移除YAML、触发词、启动版权协议、下游缺失Skill和反复确认话术。",
+     "保留6字段、4种生命模板、切片库、年代锚、三种闭环、眨眼语法与镜头表示例。",
+     "校正POV与中文主语混淆、MS全身误释及N-1与例外转场矛盾。",
+     "真实人物事迹和年代物件标核验；朗诵改为授权素材，不要求复制整首现成诗。"
+    ]
+   },
+   {
+    "id": "prose-creative-female-short-fiction-design",
+    "source_numbers": [
+     4
+    ],
+    "sha256": "a04da4d105602ba1821647962aca607dbeb3e3edfba2212503192a338964c1bd",
+    "output_sha1": "d8b2d8487b4fc1af84741f094155f44fe9b11dbc",
+    "rules": [
+     "整合主体与两批结构增补，去重复版本清单和不存在章节指向。",
+     "分清5套混用L的量表；将类型偏好和量化百分比标为经验，不冒充心理学定律。",
+     "不纳入性内容段、投毒技巧表与买凶杀妻细节模板；保留证据、关系和代际反击的可用结构。",
+     "修正孕检不能确认亲子、监控绝对真实及单一化学指标断言；四级开头改为可选模式。"
+    ]
+   },
+   {
+    "id": "prose-creative-character-emotion-engine",
+    "source_numbers": [
+     4
+    ],
+    "sha256": "9e01fb885feec6cea765bba3d44c23d0fda596155aeb72495c943d902a3d0791",
+    "output_sha1": "fc6bc44858b3c88929863a529d3a44851aba9fd5",
+    "rules": [
+     "独立提取情绪方法派、R量表、六类强度词典、过渡态、需求字典和ABC校验。",
+     "三脑降为本能/记忆/合理化三层创作比喻；删科学化和绝对因果断言。",
+     "情绪配比与300字波谷等标为可选经验，修正“只升不降”与疏密交替矛盾。"
+    ]
+   },
+   {
+    "id": "vi-creative-reference-character-profile",
+    "source_numbers": [
+     5
+    ],
+    "sha256": "a3c657c6082f972776890e99a4bca768d1ec2fa3f8ea3c7fd528f8a84bbdf905",
+    "output_sha1": "b74b04f8cd0783e73fe5eadae4711c5cb84ff5c6",
+    "rules": [
+     "原反推混入职业、性格和技能，增加证据与创作扩展边界。",
+     "保留命名原则、三技能差异、武器类别和视觉基准字段，不声称工具可自动看文件。"
+    ]
+   },
+   {
+    "id": "script-creative-short-film-story-grid",
+    "source_numbers": [
+     5
+    ],
+    "sha256": "5caef3105c9a4fcabca9dbe25e79ae9d6851a52f1b19a56c3556f55d25a06d0b",
+    "output_sha1": "838562b31e7a52a65c8ec4018f05ef729fe7d135",
+    "rules": [
+     "拆出剧本用途，与静态九宫格和动态提示词分开。",
+     "校正两分钟与三分钟时段矛盾；保持方向库、高潮库、组数表和赤鲤示例。",
+     "不纳入违禁词同义替换表，不把死亡偷换成昏迷；伤害表达按目标分级实质改写。"
+    ]
+   },
+   {
+    "id": "vs-creative-nine-panel-image-prompt",
+    "source_numbers": [
+     5
+    ],
+    "sha256": "7545cfd5fb63af065e628428c76eff9731bffd0e63d2b8dff1b66037044cc35c",
+    "output_sha1": "c82efe958ca79a783d72914977f32cb29439c7e7",
+    "rules": [
+     "保留3×3模板、行功能与逐格占位；静态帧与动态动作分开。",
+     "修正既要求角标又要求任何文字皆无的冲突；明确单格/整图画幅。"
+    ]
+   },
+   {
+    "id": "h3-creative-nine-panel-video-prompt",
+    "source_numbers": [
+     5
+    ],
+    "sha256": "20dca907ad4cef343effd41be70c22fd1c456b7127583d04525e0bd89ecaa785",
+    "output_sha1": "9c65cf46de270688d7c203d2814bf2e272096101",
+    "rules": [
+     "保留分秒动作、运镜、物理、风格、三层声音和台词契约。",
+     "明确时间求和与末镜差异；不执行生成，不采用违禁词替换表。"
+    ]
+   },
+   {
+    "id": "h3-creative-storyboard-rationality-audit",
+    "source_numbers": [
+     6
+    ],
+    "sha256": "9b59c78d839632e3cadc929f9e89def0f9a89e99b84dd4720d6ba836b4ed634c",
+    "output_sha1": "c5bd321c88144035f9c9b829173a5ac9109062ca",
+    "rules": [
+     "去版本对话和模型强弱推销，保留评分锚点、文字分隔符与诊断JSON字段。",
+     "缺失HTML模板改为可直接执行的自包含报告版式要求，不依赖文件。"
+    ]
+   },
+   {
+    "id": "vs-creative-script-assets-three-models",
+    "source_numbers": [
+     7
+    ],
+    "sha256": "f528112bf56bea66ea42e146b282fdab3b64a38ae1f2d3de075a28f46178b767",
+    "output_sha1": "e3d02653fbb3ca8288f914a841e73c40c16fa4a2",
+    "rules": [
+     "删除外部万能生成器链接、后续接口承诺和项目闲聊。",
+     "完整保留三类资产字段、三版本规则、五层分析与展示视角。",
+     "补足无技能现实题材与独立调用资产上下文边界。"
+    ]
+   },
+   {
+    "id": "vs-creative-eight-frame-storyboard-prompt",
+    "source_numbers": [
+     8
+    ],
+    "sha256": "60f91c7f4550225c463330ffb5d52b38d43ad6c4c917605bf85f89e8d211f5fc",
+    "output_sha1": "0a5376ef6f263709553fb3468c7302bafeb411c0",
+    "rules": [
+     "保留八帧固定文案、冻结瞬间、方向与运动合并实例。",
+     "移除敏感词四区检查和替词规避规则、版权推广及版本记录。",
+     "修正自检@角色名与实际@图片N引用矛盾；解释黑屏只作拼版占位。"
+    ]
+   },
+   {
+    "id": "h3-creative-storyboard-to-video-prompt",
+    "source_numbers": [
+     8
+    ],
+    "sha256": "91cfe5819a6b658abf2296d76e1c9a107425735df2cc9f7c8804902f19b5ffcc",
+    "output_sha1": "30c51c1e0e028f735a90c4039cffc0879ed05b33",
+    "rules": [
+     "保留动作驱动、四档空间锚、方向字典、逐镜音效和固定输出。",
+     "删四区字典及规避同义替换，不再将普通叙事词机械封禁。",
+     "纠正天空示例提前泄密、种子技术臆测、无故事板强造引用及镜尾规则吞掉已定结果的问题。",
+     "一般生成内容标为通用视频，不套用MiniMax H3官方格式。"
+    ]
+   },
+   {
+    "id": "vs-creative-complete-visual-assets",
+    "source_numbers": [
+     9
+    ],
+    "sha256": "a6d975326cf90bec05cf947ed8e09dbc1d3ee98cf10f8dab8dd3a9329ec13f5e",
+    "output_sha1": "e210b646209788620dde059dcc15917642fc36ad",
+    "rules": [
+     "去首次启动四问、扫描假进度与智能体执行包装。",
+     "保留七层细项、材质表、面容及六层服装、四宫格/道具四视图、三类输出与检查。",
+     "纠正七层却称第八层、分层字数与总字数相斥、2D仍强加真人及伪规范引用。"
+    ]
+   },
+   {
+    "id": "vs-creative-guoman-character-sheet",
+    "source_numbers": [
+     11
+    ],
+    "sha256": "d8ecd0e35eb2ce0c7cce61765050bdeedbc7aae427fe5a56c2cc3639d995bb3d",
+    "output_sha1": "8c5d2f9d97b04013605a80d36eb3ab20c5344c62",
+    "rules": [
+     "从三种独立设定页模板分别提取完整Prompt，保留细节字段和版式。",
+     "删除未经核实模型能力与API尺寸说明；道具无手要求与手剪影冲突改为比例尺。"
+    ]
+   },
+   {
+    "id": "vs-creative-guoman-scene-sheet",
+    "source_numbers": [
+     11
+    ],
+    "sha256": "712f7a1cfb255172e8e9363c008b9bd1ac657297f417f0e414bf8d1e23d4fa34",
+    "output_sha1": "2e714669490b79fa908a85c7a22a934c4f166e9d",
+    "rules": [
+     "从三种独立设定页模板分别提取完整Prompt，保留细节字段和版式。",
+     "删除未经核实模型能力与API尺寸说明；道具无手要求与手剪影冲突改为比例尺。"
+    ]
+   },
+   {
+    "id": "vs-creative-guoman-prop-sheet",
+    "source_numbers": [
+     11
+    ],
+    "sha256": "589694942d51acb09b38f70126ef06233168309bed077325178a5055f61d1824",
+    "output_sha1": "8bb055acf5e358236e086df1ffc13914b6ba3ded",
+    "rules": [
+     "从三种独立设定页模板分别提取完整Prompt，保留细节字段和版式。",
+     "删除未经核实模型能力与API尺寸说明；道具无手要求与手剪影冲突改为比例尺。"
+    ]
+   },
+   {
+    "id": "prose-creative-supernatural-fiction-outline",
+    "source_numbers": [
+     12
+    ],
+    "sha256": "68cd0e70236b80f474f7caf0cef517959825685154a14c94ea9e86404bd2aa3a",
+    "output_sha1": "ef7ed62fac06b58835096b55a4f097feac2682e7",
+    "rules": [
+     "保留八模块、三级纲要、功能触发四要素、四类钩子、魔法限制、契约代价和三类本土适配。",
+     "去掉伪ATU小数、混乱母题代码和未定义UTI数值；标明来源增长公式实际为指数。",
+     "删除ASEVL向量库/VF/CG等虚构依赖，改为当前输入中的文本清单。"
+    ]
+   },
+   {
+    "id": "script-creative-otherworld-rescue-functions",
+    "source_numbers": [
+     14
+    ],
+    "sha256": "975dffae579b13dfdea947f72af840f2d96d86befc268ebcef5a50fdd0daf406",
+    "output_sha1": "718db3312b2769c232f4821fa40d28edafc4a337",
+    "rules": [
+     "保留七簇、角色功能、魔法物品、三重试炼/逃脱/证明与检查表。",
+     "删除错误的Propp编号和ATU近邻、未经核实代表故事对应与跨文化分布断言。",
+     "本地标签去伪官方化；婚姻与多人婚姻不作必备奖赏，保留被救者能动性。"
+    ]
+   },
+   {
+    "id": "h3-creative-cinematic-sfx-shot-slices",
+    "source_numbers": [
+     15
+    ],
+    "sha256": "eea586ad8502a07cb357715f034a00be02c59c5be8fd03ef65a784ae56eea3e3",
+    "output_sha1": "e3f7273958cc991e847e8c1fd2b2ebdb32ba2495",
+    "rules": [
+     "去多阶段强制等待问卷与自动宫格预览；按已给信息生成文本。",
+     "保留15秒上限、绝对片段标题/相对切片、音色分析、实体UI光影互动和SFX公式。",
+     "校正Pan与平移混淆，尾帧引用以实际提供为前提。"
+    ]
+   },
+   {
+    "id": "script-creative-novel-to-audiovisual-script",
+    "source_numbers": [
+     16
+    ],
+    "sha256": "1e565263863d4e6d1b9011e891ff67f2db9c8af38a637cbed409c4913785d101",
+    "output_sha1": "0ae16a72b8d29a57eaed6034084e77b89f0f4e03",
+    "rules": [
+     "原文实际为可拍性脱水；移除洗稿身份，明确合法原创/授权改编。",
+     "完整保留四条处理规则与场景/人物/动作/对白/附注格式。"
+    ]
+   },
+   {
+    "id": "script-creative-mbti-character-workshop",
+    "source_numbers": [
+     17
+    ],
+    "sha256": "866ed8f65af6c430b59090fd5409cdde6dd89ed059a20dee81767b659e1197da",
+    "output_sha1": "aa2e6c35f3f946ac08b21e4b51686ea1f9847eec",
+    "rules": [
+     "保留八功能、16型档案、四冲突轴、搭配、团队角色、成长例和避坑。",
+     "校正ESFP第三功能Ti为Te；删除无来源人物定型与压力必然换型。",
+     "将智力比例和绝对行为断言改为倾向，明确创作而非诊断。"
+    ]
+   },
+   {
+    "id": "prose-creative-chapter-contract-and-state",
+    "source_numbers": [
+     18
+    ],
+    "sha256": "7e2adc60586513fff7f7899d52d4a923faee8fac212a60d0b4f2a94075a17630",
+    "output_sha1": "df2c190e52f7cacfe4956f9b6162e6e4dc39f263",
+    "rules": [
+     "从M1/M2/M3/M6/M9/M14/M15抽取文本层合约、上下文整理、状态diff和复盘。",
+     "去除YAML、作者私人身份、虚构工具、MCP/Agent调度、cron、自动写记忆、权限策略与运行架构。",
+     "去无法核实原创率和强行无意义细节要求；保留原章后JSON含义并规范字段。",
+     "补充原文角色分工、输入校验/返修分流、修改影响范围、预算比例和状态提取条目，均转成可执行文本规则。"
+    ]
+   },
+   {
+    "id": "prose-creative-evidence-based-chapter-review",
+    "source_numbers": [
+     18
+    ],
+    "sha256": "e0a1c920e321eac45cabce7a58bc129bd09dc0d146ad3429ad2bc5ae73202d15",
+    "output_sha1": "6a20731aa528bed9d667d710b86002b4cc4c27aa",
+    "rules": [
+     "保留独立验证流程、三色裁决、证据对照与严重度分级。",
+     "删必须真实命令输出的错位要求、虚构工具依赖及每章必须反打的类型泛化。",
+     "明确字数边界和PARTIAL用途，校正37%战力示例无依据推论。"
+    ]
+   },
+   {
+    "id": "script-creative-three-dimensional-character-exercise",
+    "source_numbers": [
+     19
+    ],
+    "sha256": "ce010d6a5b9e022f9363e1dba5a5f4d181b73617f57e819e76d9e511650800b0",
+    "output_sha1": "f04deac3a8fbc7cc6b36675c7d8ec270e1a770ba",
+    "rules": [
+     "将教学案例转换成独立可执行人物练习，保留五例的具体欲望、弱点和四级压力。",
+     "去教学署名日期；柳如是改为虚构柳如青以免与历史人物混淆。",
+     "指出伤手恢复、时间表与成长完成度问题，保留案例不把矛盾包装成标准。"
+    ]
+   },
+   {
+    "id": "script-creative-structure-three-acts",
+    "source_numbers": [
+     20,
+     27
+    ],
+    "sha256": "bd63ea01ee47fdc5ee41536b1c9e35fd96cec13a9fe1d4d97b75d368798a16f6",
+    "output_sha1": "681cff82de295595efbc76a4133ade8a48848d7e",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "校正：25%左右的是第一情节点/幕转折，不等同于通常更早的激励事件；第二情节点约75%，具体页码随篇幅变化。",
+     "合并另一来源同一结构的有效细节，不重复建条目"
+    ]
+   },
+   {
+    "id": "script-creative-structure-story-circle",
+    "source_numbers": [
+     20,
+     27
+    ],
+    "sha256": "226374c7a932177acbd3675c1387373478eadbf6d4a7774f5d656b48e50126f3",
+    "output_sha1": "24a01f2bb1e327b0f2e988aba81ecd3cf59cf7ef",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "按表中八步次序，不用来源残缺的字母示意图；改变可正可负，回归可以是象征性的熟悉秩序。",
+     "合并另一来源同一结构的有效细节，不重复建条目"
+    ]
+   },
+   {
+    "id": "script-creative-structure-eight-sequences",
+    "source_numbers": [
+     20,
+     27
+    ],
+    "sha256": "cd51cf755612804e299236b020f9c7038037427c400f860114e2b5fcc9eb0c8c",
+    "output_sha1": "78ce8c1f15de651ec8e758715a8589d549ba83f3",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "八序列为创作近似，不强制每段严格12.5%；7段终局与8段收束可按剧情调整。",
+     "合并另一来源同一结构的有效细节，不重复建条目"
+    ]
+   },
+   {
+    "id": "script-creative-structure-value-turns",
+    "source_numbers": [
+     20
+    ],
+    "sha256": "637c745f2c4fcc88d50913af179b4f50da62e9f3f4f82ef0c7a9aa9ae8198366",
+    "output_sha1": "bfc2add30e1e5d11288c87243c49586a816eade8",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "价值轴应具体，例如信任/怀疑、安全/危险、自由/受控；变化可正转负、负转正或更深恶化，不只限情绪正负。"
+    ]
+   },
+   {
+    "id": "script-creative-structure-character-twenty-two",
+    "source_numbers": [
+     20
+    ],
+    "sha256": "a7d6bfa795841d291cd5ae390b576b46b5f1d5c69728dac2cd8d96e672632818",
+    "output_sha1": "254929f7a061c736d5dec7b92870556d931e9848",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "这是来源整理的22节点改编法，不是John Truby标准22步。原表把终极选择放在收尾之后：第22项视为回看高潮选择的检查项，第19/21项为主题检查；不得把它们当结局之后再发生的新戏。自我揭露需分层，避免第10与15点重复。"
+    ]
+   },
+   {
+    "id": "script-creative-structure-three-dimensional-conflict",
+    "source_numbers": [
+     20
+    ],
+    "sha256": "b9073ec1e0fdcbde70fd9edaed4489526182f6e1c0e5e887be54da352908cf14",
+    "output_sha1": "f7efad4c044b6ee17c5c174b2efd78d086d362c9",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "来源“静态→跳跃→升级”不当标准进阶阶梯；静态和无过渡的跳跃是要避免的缺陷，目标是有过渡的增长冲突。人物不能仅凭标签决定行动。"
+    ]
+   },
+   {
+    "id": "script-creative-structure-save-the-cat",
+    "source_numbers": [
+     20,
+     27
+    ],
+    "sha256": "c0e83a78157863d9777097893b87a87a93298ba797c98fc68622467d16b03f98",
+    "output_sha1": "5c0b4d83eb8548c9d24da5d010ebfc0a318245d5",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "位置为示意：采用来源百分比保持可用，不能称所有商业片都遵循；B故事不必须爱情，主题可通过行为暗示，终局含选择与新做法，不只是战斗。",
+     "合并另一来源同一结构的有效细节，不重复建条目"
+    ]
+   },
+   {
+    "id": "script-creative-structure-emotional-seven",
+    "source_numbers": [
+     20
+    ],
+    "sha256": "654ab98966e414262502784856d3f1c6341fd15e38d066f103bb40a3897bd697",
+    "output_sha1": "71c14c57be5eeceb3ae70f7fd0dfe962da168e68",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "本条为来源整理的情感七点法，不署名Lindsay Doran，也不同于Dan Wells七点结构。情感圆满指本题材约定的诚实结果，可以建立新边界而非强制复合。"
+    ]
+   },
+   {
+    "id": "script-creative-structure-mystery-twelve",
+    "source_numbers": [
+     20
+    ],
+    "sha256": "14915756aa09337c0bb5d2a9fa1886cc78196f6c85bc0681805fcaaba337661c",
+    "output_sha1": "e8aca07eed39146bd1ba6d4a84019a4c76450221",
+    "rules": [
+     "逐套独立保留来源节点与规则，增加统一输入和逐节点交付表。",
+     "删除伪ATU A-K映射、夸大行业覆盖率与未经核实权威归属。",
+     "来源无法支持“三宅隆太12步”权威归属，改为通用整理法。信息差×反转密度只作比喻，不是可计算定律；规则反转必须有早先可回看的线索，不能临时改规则。"
+    ]
+   },
+   {
+    "id": "script-creative-novel-short-drama-five-blocks",
+    "source_numbers": [
+     21
+    ],
+    "sha256": "5840abe2dd0ee1b458302a8cb4f80308d0e3293a4b2ce1c3afb9464749beb651",
+    "output_sha1": "e44abd76ebd1c89bde168c6e4d66991a796256bf",
+    "rules": [
+     "保留完整保真边界、行为声音卡、五段结构、压力精修、文字信息转行动、多空间对白及跨集连续性。",
+     "将对白独立精修分出，默认中间稿保持字段输出与分析模式。",
+     "解决用户自定时长与强制75秒冲突；节奏说明不输出创作意图，删除重复版本介绍和末尾重复执行指令。"
+    ]
+   },
+   {
+    "id": "script-creative-dialogue-naturalization",
+    "source_numbers": [
+     21
+    ],
+    "sha256": "2479132f2c3ece497ac2b9b114c41436b915bfdbc57c4297203d4528e598a894",
+    "output_sha1": "687a8a13c4f4b229e6879c89c787ac5065cb6acd",
+    "rules": [
+     "从大模板分出可单独调用的中英对白精修，保留角色声音示例与诊断/最终格式。",
+     "补充例句的事实损失风险，防止用隐喻和英文改写改变原意。",
+     "不沿用末尾统一简化的calm/concise等四角色标签，优先详细声音卡。"
+    ]
+   },
+   {
+    "id": "prose-creative-character-choice-growth",
+    "source_numbers": [
+     24
+    ],
+    "sha256": "687486a9c11fb8c1fa246c8bb2fbc5095fc575410f9ced715ea669dd703d66a7",
+    "output_sha1": "ea42f6ea7f71100c5f44ab76553eec79fde03388",
+    "rules": [
+     "将教学文章改为带输入槽、推演流程和输出格式的独立模板",
+     "保留三层欲望、弱点代价链、四级压力测试及商人示例",
+     "删除署名日期和反复总结",
+     "将成长必然等于攻击性升级改为依据人物价值观选择"
+    ]
+   },
+   {
+    "id": "prose-creative-novel-project-bible",
+    "source_numbers": [
+     22
+    ],
+    "sha256": "8dd60404618a97f1b058ddfd173a923301a13cc4aa8ba0bf14b29464ecbca732",
+    "output_sha1": "812d6b6b01d14fe54bd5bb65e1c5d79d29b36241",
+    "rules": [
+     "保留原九大规划模块和全部字段表",
+     "加入输入槽与缺项建议边界，移除强制保存文件指令",
+     "移除未提供的SKILL-009引用及将ATU_301泛称人物系统的错误依赖",
+     "按原实际13项修正15节拍标题，不冒称完整救猫咪节拍表",
+     "将作者姓名拼贴改为可执行的叙述特征"
+    ]
+   },
+   {
+    "id": "h3-creative-seedance-emotion-director",
+    "source_numbers": [
+     25
+    ],
+    "sha256": "69a6fa63abd5d3cdc0a89c0be260f4d6d5d7f344587b6692f748e185cc464897",
+    "output_sha1": "9bed3a990826f9fc6b340010412737baa6fbde78",
+    "rules": [
+     "保留六段结构、情绪映射表、动作声音层次、镜头与环境反馈规则及可填写示例",
+     "删除加载欢迎语与技能执行壳，改成文本输入槽",
+     "将情绪必失控和四层动作必齐改为按人物选择，避免机械表演",
+     "统一1900字适用范围及连续时间区间，删除强制公开过程",
+     "明确此条只写提示词，module h3为通用视频类别"
+    ]
+   },
+   {
+    "id": "prose-creative-natural-fiction-narrative",
+    "source_numbers": [
+     26
+    ],
+    "sha256": "9feb27b0b69fed29bb3bbb883fabb51038ca97de7205b10f531711d315ee6151",
+    "output_sha1": "7b741ae161456db0d1ec470b7c11f10f8648ed8a",
+    "rules": [
+     "保留八项技法、正反对照示例和参考频率表",
+     "加入原文和视角输入槽及正文输出要求",
+     "将AI来源断言改为可观察文本问题",
+     "修正限制视角中直接进入配角内心的示例",
+     "将随机细节、机械模糊词及断句配额改为情境化建议"
+    ]
+   },
+   {
+    "id": "script-creative-heros-journey-development",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "8cf8d07204101b435b490a8a2da2a2e49e86b378d54a1c3f976faffeffe8ca75",
+    "output_sha1": "9814d87dfe639b72eb51aa19ab6a541ed6891f32",
+    "rules": [
+     "保留十二阶段及英雄对手双线表",
+     "删除未经核验的作品采用方法断言",
+     "将对手必死与英雄被选中的固定结论改为可选结果"
+    ]
+   },
+   {
+    "id": "script-creative-freytag-dramatic-arc",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "cd130264007d838bb801de62b1e40b0d1b982a6038e06cb4b79059d76d27d3d5",
+    "output_sha1": "bf075c59a2ad721e1aec67ae7d706d4c40155ed6",
+    "rules": [
+     "保留五阶段解释与参考比例",
+     "删除图中高潮与灾难位置混乱的ASCII金字塔",
+     "明确比例不强制，中心转折不等同所有现代影片的最终高潮",
+     "移除未经核验的电影套用清单"
+    ]
+   },
+   {
+    "id": "script-creative-seven-point-story-design",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "b9da936815bf9f53c91a3ae153249524397db1f90d27e2aa161bc9be649ba491",
+    "output_sha1": "dfd6c5715bb80f606d390ea446dc23ffde61ae00",
+    "rules": [
+     "修正原文将Hook误置结尾及节点排序倒置",
+     "将第二转折从计划崩溃修正为通往结局的理解或方案",
+     "保留压力升级与结局反推方法，删除无法核验的作品关联"
+    ]
+   },
+   {
+    "id": "prose-creative-snowflake-story-development",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "c1e7cca8ff64900d6c3fd3a1095e8a5aeab78c2835995d8552216cdfb7e2ea31",
+    "output_sha1": "fcc77d5d87916acd960ab2a4e9cb402ebbca2660",
+    "rules": [
+     "保留逐层扩展思想及图书管理员示例",
+     "修正源文重复四页概要、将每角色一句话当完整人物开发等不完整步骤",
+     "字词及页数改为尺度参考，避免伪精确要求"
+    ]
+   },
+   {
+    "id": "script-creative-kishotenketsu-story-pattern",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "22e0818375e1f9c6ccf64f59f250e87e8d57063d112c043ff081cd1e654a7222",
+    "output_sha1": "f36797925cfe1662aa9e1c270acca14026f55e94",
+    "rules": [
+     "纠正坎泰atsu混杂名称，使用起承转合",
+     "删除对三幕与起承转合是否需要冲突的绝对断言",
+     "保留四阶段与两种组织方式比较，移除未证实作品套用"
+    ]
+   },
+   {
+    "id": "script-creative-episodic-act-break-outline",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "6179b6d73033b66583fc052436cb145f21bfd79387b6ede3ed652d692e85377c",
+    "output_sha1": "b4f5086150b50e08868874a7ea068606726967d7",
+    "rules": [
+     "保留单集时长幕式及冷开场时间规划",
+     "删除无依据TEAM权威命名和固化韩剧排播集数表",
+     "分钟数改为可调整参考，不认定为平台硬性规格"
+    ]
+   },
+   {
+    "id": "script-creative-genre-story-skeletons",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "b9b1ff2e4ab140be9134e39326746f740211cb77adf9cba73d7763bcb459e5e2",
+    "output_sha1": "ff19f73b8493647d720438f5dda6b0ec7b5791b8",
+    "rules": [
+     "保留四类完整情节链及阶段说明",
+     "将单一类型结局和首次伤亡固定要求改为按材料选择",
+     "增加误导公平性和能力代价约束，避免只有标签没有因果"
+    ]
+   },
+   {
+    "id": "script-creative-minimal-chapter-narrative",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "be1b3a793f42e139fd8c621c641d69c203ae9ba66c8557b96b14f2d1259bc33b",
+    "output_sha1": "c8ba5cc5ea0cb27461e8c6f6962d85739c70c0bd",
+    "rules": [
+     "保留极简三阶段与章节留白回环模式",
+     "加入双时间顺序和信息公开表，防止非线性导致逻辑漏洞",
+     "不将列举电影归为同一固定写作方法"
+    ]
+   },
+   {
+    "id": "script-creative-animation-causal-story-spine",
+    "source_numbers": [
+     27
+    ],
+    "sha256": "3acd08b12a63540a1b1f5ff289ced9549d37930de84b9dde3ea2c2207c01863a",
+    "output_sha1": "52c14b3352ec2dbaf069325ea568e3ec26bf42c8",
+    "rules": [
+     "保留从前每天直到有一天因为直到最后从此以后七段因果链",
+     "保留实际11项角色成长检查点",
+     "移除25条及皮克斯官方法则的未核验归属"
+    ]
+   },
+   {
+    "id": "script-creative-novel-short-drama-long-form",
+    "source_numbers": [
+     28
+    ],
+    "sha256": "9d49fa3279caec81c63e6c4958752d0b1ea4f5eee639cb07f03f472ee258b99c",
+    "output_sha1": "cdfd38db93abb54af38543794852029014b4be9e",
+    "rules": [
+     "完整保留事实边界、单集设计、五段功能、表演化、连续性与三种输出模式",
+     "明确保留长版制作规格，区别于21号75秒固定五段",
+     "保留首尾钩子偏好但不允许为了硬钩子增造事实",
+     "删除后台推理输出暗示，保留可核对设计规则"
+    ]
+   },
+   {
+    "id": "h3-creative-mapped-twelve-second-storyboards",
+    "source_numbers": [
+     29
+    ],
+    "sha256": "654cf50a4649e368df90b55f1c7defb0b108449620fcdcb63af771143b3c0d66",
+    "output_sha1": "aa38fba7df133f90fd1d70d38bc880661da9ba98",
+    "rules": [
+     "保留映射归一化、自定义分隔协议、镜头细节和VoiceID方法",
+     "移除两段现成小说角色大示例，改为短小通用格式示例",
+     "统一12秒时长与对白容量，协调库外原文元素和映射冲突",
+     "修正主观镜头、人物强弱机位与左右入画绝对规则",
+     "将情绪百分比改为可见表演，将随机转场改为因果承接",
+     "去掉成品英文技术参数堆叠，不声称文本会自动上传映射",
+     "将外部系统冒号数量变量改为提词库可读的前两个分镜和后两个分镜"
+    ]
+   },
+   {
+    "id": "prose-creative-first-person-novel-voiceover",
+    "source_numbers": [
+     30
+    ],
+    "sha256": "e25324f09769441b007378725aabb4500c7545f911ef64b97098afe6fb0ceaeb",
+    "output_sha1": "9b73d2f061c79020da8f6dd027f7b8702cdd282b",
+    "rules": [
+     "保留八种开头结构、短段节奏及五个示例",
+     "修正第一人称与他她你冲突，明确原文是事实边界",
+     "将机械45段、强制后字及删语气词改为参考",
+     "把黑丝钩这一含混行话改为具体叙事悬停",
+     "替换以重复虐待为卖点的示例为原创建议场景，非基于正常衣物或关系词作过滤"
+    ]
+   },
+   {
+    "id": "h3-creative-continuous-five-segment-video",
+    "source_numbers": [
+     31
+    ],
+    "sha256": "50a8e2cf249103e4e76f9f309142d126ba2bbabf7b5da7adffd14caf8b78c7af",
+    "output_sha1": "5b1763109d777767efedbfb47e36ae9a2b85a53d",
+    "rules": [
+     "保留全集与分镜参考分层、功能人物筛选、空间锚定及完整分镜格式",
+     "修正不能换位为移动须有路径，保持可拍摄性",
+     "对白语言改为输入项，不默认英文",
+     "图片和@只引用用户已有资产，删除自动生成能力暗示",
+     "原文还原改为按需段号映射，避免重复长篇原文",
+     "补充角色合并与身份遮挡不得破坏原文信息边界"
+    ]
+   },
+   {
+    "id": "prose-creative-lossless-dialogue-json",
+    "source_numbers": [
+     33
+    ],
+    "sha256": "ac02b951811ac12e78a931dbcda67636c204d4bc4f9ad693b9b0efac0e2a632a",
+    "output_sha1": "08e8489dce9fd74fcb34e12ba159f1c1287fbaae",
+    "rules": [
+     "保留角色、旁白、情绪与强度识别规则和字段",
+     "删除原文损坏的JSON示例及固定小说人物名单",
+     "解决保留原文与替换引号冲突，以JSON转义保留原标点",
+     "修正所有标点都当台词、35字硬下限和说话者猜测问题",
+     "补入可合法解析的短示例和顺序拼接可恢复原文的核对要求"
+    ]
+   },
+   {
+    "id": "script-creative-novel-to-audiovisual-scenes",
+    "source_numbers": [
+     34
+    ],
+    "sha256": "64e996d368e1c5382be370f79e5e99a02ca9e6d230a2d78ec83661e5281c0aa8",
+    "output_sha1": "34cae2e5488dfbdde7e53db95fa8394301814bd7",
+    "rules": [
+     "保留场景Markdown模板、双节奏标注、物理空间与摄影光影规则",
+     "移除底层精准控制与资历自称",
+     "将恐惧示例改为不新增水杯道具的动作",
+     "轴线规则保留为默认并允许有交代的越轴",
+     "补齐保真、旁白功能与参数属于设计意图的边界"
+    ]
+   },
+   {
+    "id": "script-creative-script-storyboard-table",
+    "source_numbers": [
+     35
+    ],
+    "sha256": "67e77705b1bab0a257327499bcc39846e22273dfeb0dc1d4443d7f3acfa32a32",
+    "output_sha1": "a6067474245dce4e6197ac3a3d1cbb19347ba378",
+    "rules": [
+     "保留13列、编号sc001、景别运动枚举与字词限制",
+     "将Excel产物承诺改为可复制Markdown文本",
+     "修正多人对白一行与一镜一行冲突，要求按话轮分配时长",
+     "旁白不强制改人称，动作标注移列而不丢失",
+     "补充表格转义及空对白空情绪规则"
+    ]
+   },
+   {
+    "id": "vs-creative-midjourney-description-builder",
+    "source_numbers": [
+     32
+    ],
+    "sha256": "1f63680fe63dc55ba1628a54a9fe1bf59d3e2a8f93a7baa416b0afc8b8965067",
+    "output_sha1": "c258481af4980392764f19ab9443ccf29d775f20",
+    "rules": [
+     "从完整技能合并文中提取独立构建与中文意象翻译方法",
+     "删除YAML、技能路径读取、版本加载与执行壳",
+     "保留主体具体化、2–3风格修饰上限、双语一致和描述参数分离",
+     "不导入未经核验的2026版本默认值与参数区间断言",
+     "人物肖像及名字叠字从站立偏好改为可覆盖建议"
+    ]
+   },
+   {
+    "id": "style-creative-image-material-lighting-lexicon",
+    "source_numbers": [
+     32
+    ],
+    "sha256": "543082278cd96c75a6a7e98ae7861dd845e89448937d36e40c8014028398f0b3",
+    "output_sha1": "2bde0cb2a0caa2d11bf0e78460aaeb6758b46c59",
+    "rules": [
+     "保留七组词库及每词用途提示",
+     "删除外部方法文件引用",
+     "补入使用输入和输出方式，限制同一提示词修饰词数量",
+     "未把词库宣传为模型效果保证"
+    ]
+   },
+   {
+    "id": "vi-creative-midjourney-single-variable-critique",
+    "source_numbers": [
+     32
+    ],
+    "sha256": "363d2eb15c122bbb636affd19607add282db689874934d41af9fbe1a83f49ca2",
+    "output_sha1": "11fab26dc9f9b44c6b4340f9074130effcd39b0f",
+    "rules": [
+     "保留七维评分锚点、最低分路由和单变量迭代方法",
+     "保留ADH/SUBJ/COMP/LIGHT/STYLE/COH/REF/VER故障家族及文本修法",
+     "删除读取外部参考文件和自动重生成指令",
+     "删去未验证版本旗标、精确权重与数值断言，参数建议必须独立核查"
+    ]
+   },
+   {
+    "id": "vi-creative-krea2-image-reconstruction",
+    "source_numbers": [
+     40
+    ],
+    "sha256": "440c62fe3a4d377a5275f1b13d350104c2da0078b6cc9184f4e225f42f32c35e",
+    "output_sha1": "733a01de50f2c15fd01a83e87cf05b789f50b6e2",
+    "rules": [
+     "保留四模式、观察维度、人像与非人物锁定、占比分配和三种英文整合公式",
+     "移除启动词与外部模板依赖，增加实际图片与多图用途输入",
+     "不执行图像生成或上传，不从缺图推测画面",
+     "将面部地域印象改为可见形态，保留原文不可断言真实身份的边界",
+     "解决严格复刻与一律no text/no logo冲突，以用户保留项优先",
+     "长度和内容占比为参考，不为凑字数添加不可见细节"
+    ]
+   },
+   {
+    "id": "vs-creative-krea2-text-image-direction",
+    "source_numbers": [
+     41
+    ],
+    "sha256": "ffa218e844ab427cd740b7a0b072fdecbd45ee13039e618b138ebf937f41124f",
+    "output_sha1": "4bd41e190063830ad494b4847923b15f135eeec6",
+    "rules": [
+     "保留完整文字导演流程、用途适配、光材词汇及英文整合公式",
+     "移除启动词与外部模板依赖，增加可填写输入和纯文本产物边界",
+     "解决封面文字、品牌需求与通用负面词冲突",
+     "面部地域印象改为可见形态，保留原文年龄不明时的非性感默认",
+     "细节与媒介相容，禁止为了固定篇幅补无关素材"
+    ]
    }
   ]
  }

@@ -188,6 +188,9 @@ KEEP = {
     # 工作台（Studio，_studio_plan_v2.md）三件套（2026-10-22 入库；.gitignore 对应位置有说明）：
     # 转换器生成 public/studio/ 只读预设（可复现）；UI 冒烟与真连模型生成实测发版前各跑一遍
     "studio_catalog_build.py", "studio_ui_smoke.cjs", "studio_live_ui_check.cjs",
+    # 创作资料提词库导入的只读校验器（2026-11-17 入库；.gitignore 对应位置有说明）：
+    # 核对 presets/creative-prompt-kit 正文指纹与 public/studio 增补结果一致。
+    "studio_creative_presets.py",
     # 创作场（小说改编阶段一、二，2026-10-25/26 入库；.gitignore 对应位置有说明）：
     # 导入 → 拆章 → 勾选 → 保存 → 单章编辑 → 导出 + 要素/大纲生成与写回的前端冒烟。
     "novel_ui_smoke.cjs",

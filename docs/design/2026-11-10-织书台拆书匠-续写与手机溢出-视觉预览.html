@@ -1,0 +1,1007 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-skin="violet">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Cat Chat · 织书台 / 拆书匠 重设计 + 续写功能 + 手机溢出体检 · 视觉预览</title>
+<!--
+  ============================================================================
+  设计预览稿 · 只读。不连后端、不读真实数据、不调用模型、不写入任何文件、
+  不修改 public/ 下的产品代码。本轮只做视觉与交互方案，等本人明确「开工」再改代码。
+
+  基线依据（均为仓库现存实现）：
+    · 产品令牌 / 圆角 / 阴影 / 字体       public/styles.css:1-78（:root）
+    · 拆书匠三栏 248 | 1fr | 280         public/styles.css:4962-4968
+    · 织书台三栏 248 | 1fr | 280         public/styles.css:5707-5716
+    · 右栏「预览与下一步 / 说明与状态」   public/index.html:1140-1178、1673-1700
+    · 页头 + 状态文字 + 4 个操作按钮      public/index.html:870-890、1235-1257
+    · 阶段条 / 手机分档                   public/index.html:891-905、1259-1271
+    · 章节行、稿件卡片长元数据            public/js/25-novel.js:368-440、581-615
+    · 织书台章节行                        public/js/27-writer.js:483-498
+    · 手机溢出根因与几何判据结论          docs/plans/2026-11-03-拆书匠手机端横向溢出修复计划.md
+      （.studio-view 缺 min-width:0；长书名带「作者：」把 min-content 撑到 402px；
+        html{overflow-x:hidden} 会让 documentElement.scrollWidth 判据恒真 ⇒ 必须逐元素几何）
+
+  本稿的「溢出体检」不是截图目测：用 getBoundingClientRect() 逐元素比屏幕左右边界，
+  与项目既有诊断纪律一致。所有人物/书名均为占位文本，不使用任何真实素材图或含人脸产物。
+  ============================================================================
+-->
+<style>
+/* ═══ 1. 产品令牌：逐字对齐 public/styles.css:1-78 ═══ */
+:root{
+  color-scheme:light;
+  --brand-50:#F3F0FF;--brand-100:#EDECFF;--brand-200:#DCD3FF;--brand-300:#BCA8FF;--brand-400:#9B82FF;
+  --brand-500:#7C5CFF;--brand-600:#6D5AE6;--brand-700:#5A47C4;
+  --neutral-0:#FFFFFF;--neutral-50:#F8F9FC;--neutral-100:#F1F2F7;--neutral-200:#E6E8F0;--neutral-300:#D2D6E3;
+  --neutral-400:#A9AFC2;--neutral-500:#7A8099;--neutral-600:#5A6079;--neutral-700:#3D4257;--neutral-800:#2A2E40;--neutral-900:#1E2138;
+  --bg:var(--neutral-50);--surface:var(--neutral-0);--surface-2:var(--neutral-100);--surface-inset:var(--neutral-50);
+  --line:var(--neutral-200);--line-strong:var(--neutral-300);
+  --text:var(--neutral-800);--muted:var(--neutral-500);
+  --accent:var(--brand-500);--accent-solid:var(--brand-600);--accent-soft:var(--brand-100);
+  --sidebar:var(--neutral-900);--sidebar-line:rgba(255,255,255,.10);--sidebar-text:var(--neutral-100);--sidebar-muted:#989FC0;
+  --success:#12A594;--warning:#E8930C;--danger:#DC4A46;
+  --r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-xl:16px;--r-full:999px;
+  --shadow-1:0 1px 2px rgba(30,33,56,.06),0 1px 3px rgba(30,33,56,.04);
+  --shadow-2:0 4px 12px rgba(30,33,56,.08),0 2px 4px rgba(30,33,56,.04);
+  --shadow-3:0 12px 32px rgba(30,33,56,.12),0 4px 8px rgba(30,33,56,.06);
+  --s-1:4px;--s-2:8px;--s-3:12px;--s-4:16px;--s-5:20px;--s-6:24px;--s-8:32px;
+  --t-fast:120ms cubic-bezier(.4,0,.2,1);--t-base:180ms cubic-bezier(.4,0,.2,1);
+  --success-soft:#DCF4F0;--warning-soft:#FCF0E0;--danger-soft:#FCE8E7;
+  --violet-soft:#F0EDFF;--violet-softer:#F6F4FF;--violet-line:#C9BCF5;--violet-deep:#5A47C4;--violet-deep-2:#6D5AE6;
+  --brand-500-rgb:124,92,255;--accent-soft-2:#EAE4FF;
+  --sidebar-hover:rgba(255,255,255,.07);--sidebar-active:rgba(124,92,255,.22);
+  --code-bg:var(--neutral-900);--code-inline:var(--neutral-100);
+  --user-bubble:var(--violet-soft);--info:#3B82C4;--info-soft:#E6F1FB;
+  --font-sans:"Inter","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+  --sb-thumb:var(--neutral-300);
+  --card-r:14px;--ctl-r:10px;--card-pad:14px;--gap:12px;
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --neutral-0:#171A24;--neutral-50:#111522;--neutral-100:#1D2130;--neutral-200:#2B3143;--neutral-300:#3D455C;
+  --neutral-400:#66708A;--neutral-500:#8D96AD;--neutral-600:#AEB6C8;--neutral-700:#C8CEDA;--neutral-800:#E3E7EF;--neutral-900:#0D1019;
+  --bg:#111522;--surface:#171A24;--surface-2:#1D2130;--surface-inset:#121620;
+  --line:#2B3143;--line-strong:#3D455C;--text:#E3E7EF;--muted:#8D96AD;
+  --sidebar:#0D1019;--sidebar-text:#E3E7EF;--sidebar-muted:#9CA6BD;
+  --accent-soft:#2A2350;--violet-soft:#241F3A;--violet-softer:#1B1830;--violet-line:#4B4280;--violet-deep:#B3A1FF;
+  --accent-soft-2:#332B5C;--success-soft:#163C3B;--warning-soft:#46351A;--danger-soft:#452322;--info-soft:#183044;
+  --user-bubble:#241F3A;--code-inline:#242A3C;
+  --shadow-1:0 1px 2px rgba(0,0,0,.28);--shadow-2:0 6px 20px rgba(0,0,0,.34);--shadow-3:0 18px 44px rgba(0,0,0,.5);
+  --sb-thumb:#3D455C;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:#E9EBF2;color:var(--text);font:13px/1.6 var(--font-sans);overflow:hidden;-webkit-font-smoothing:antialiased}
+html[data-theme="dark"] body{background:#0A0C14}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer}
+h1,h2,h3,h4,p{margin:0}
+[hidden]{display:none!important}
+svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:var(--sb-thumb);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-track{background:transparent}
+.scroll{overflow:auto;min-height:0;scrollbar-width:thin}
+.mono{font-family:var(--font-mono)}
+
+/* ═══ 2. 预览工具条（不属于产品界面）═══ */
+.pv-bar{min-height:54px;display:flex;align-items:center;gap:9px;padding:7px 12px;background:var(--surface);border-bottom:1px solid var(--line);flex:none;position:relative;z-index:60;flex-wrap:wrap}
+.pv-id{display:flex;align-items:center;gap:9px;white-space:nowrap;font-weight:700;font-size:12.5px;flex:none}
+.pv-id i{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
+.pv-id small{display:block;font-weight:500;color:var(--muted);font-size:10.5px;line-height:1.2;margin-top:1px}
+.pv-sep{width:1px;height:24px;background:var(--line);flex:none}
+.seg{display:flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);flex:none}
+.seg button{border:0;border-radius:6px;padding:5px 9px;background:transparent;color:var(--muted);font-size:11.5px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;transition:var(--t-fast)}
+.seg button:hover{color:var(--text)}
+.seg button.on{background:var(--surface);color:var(--accent-solid);font-weight:700;box-shadow:var(--shadow-1)}
+.seg button svg{width:13px;height:13px}
+.pv-spacer{flex:1;min-width:4px}
+.pv-check{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:9px;background:var(--success-soft);color:var(--success);font-size:11.5px;font-weight:700;white-space:nowrap;flex:none}
+.pv-check[data-bad="1"]{background:var(--danger-soft);color:var(--danger)}
+.pv-check button{border:0;background:transparent;color:inherit;font-size:11px;font-weight:700;text-decoration:underline;padding:0}
+.pv-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:14px;overflow:auto}
+.device{background:var(--bg);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow-3);position:relative;display:flex;flex-direction:column;height:min(100%,860px);transition:width var(--t-base)}
+.device[data-kind="mobile"]{border-radius:30px;border-width:6px;border-color:#262A3C;box-shadow:0 22px 60px rgba(20,22,38,.32)}
+.device[data-kind="tablet"]{border-radius:18px}
+.screen{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;overflow:hidden;min-width:0}
+.scene{display:none;flex:1;min-height:0;flex-direction:column}
+.scene.on{display:flex;animation:fade .18s ease}
+@keyframes fade{from{opacity:.5;transform:translateY(3px)}to{opacity:1;transform:none}}
+
+/* ═══ 3. 通用原子 ═══ */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:5px 11px;border:1px solid var(--line-strong);border-radius:var(--ctl-r);background:var(--surface);color:var(--text);font-size:12px;white-space:nowrap;transition:var(--t-fast);flex:none}
+.btn:hover{border-color:var(--accent);color:var(--accent-solid)}
+.btn.primary{background:var(--accent-solid);border-color:var(--accent-solid);color:#fff;font-weight:650}
+.btn.primary:hover{filter:brightness(1.07);color:#fff}
+.btn.soft{background:var(--accent-soft);border-color:var(--violet-line);color:var(--violet-deep);font-weight:600}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--muted)}
+.btn.ghost:hover{background:var(--surface-2);color:var(--text)}
+.btn.tiny{min-height:26px;padding:3px 8px;font-size:11px;border-radius:7px}
+.btn.danger{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,var(--line))}
+.btn svg{width:14px;height:14px}
+.btn-sm{display:none}
+.icb{width:30px;height:30px;display:grid;place-items:center;border:1px solid transparent;border-radius:9px;background:transparent;color:var(--muted);flex:none}
+.icb:hover{background:var(--surface-2);color:var(--text);border-color:var(--line)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--card-r);box-shadow:var(--shadow-1);padding:var(--card-pad);min-width:0}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:var(--r-full);background:var(--surface-2);color:var(--muted);font-size:10.5px;font-weight:600;white-space:nowrap;flex:none}
+.chip.acc{background:var(--accent-soft);color:var(--violet-deep);border:1px solid var(--violet-line)}
+.chip.ok{background:var(--success-soft);color:var(--success)}
+.chip.wait{background:var(--warning-soft);color:var(--warning)}
+.chip.bad{background:var(--danger-soft);color:var(--danger)}
+.chip.info{background:var(--info-soft);color:var(--info)}
+.pill{display:inline-flex;align-items:center;min-height:20px;padding:0 8px;border-radius:var(--r-full);font-size:11px;font-weight:600;white-space:nowrap}
+.pill.ok{background:var(--success-soft);color:var(--success)}
+.pill.wait{background:var(--warning-soft);color:var(--warning)}
+.pill.bad{background:var(--danger-soft);color:var(--danger)}
+.eyebrow{font-size:10.5px;letter-spacing:.4px;color:var(--muted);font-weight:600;text-transform:uppercase}
+.hint{font-size:10.8px;color:var(--muted);line-height:1.6}
+.field{display:grid;gap:5px;min-width:0}
+.field>label,.field>span{font-size:11px;color:var(--muted);font-weight:600}
+.inp,textarea.inp,select.inp{width:100%;min-width:0;padding:7px 10px;border:1px solid var(--line-strong);border-radius:var(--ctl-r);background:var(--surface);color:var(--text);font-size:12px;outline:0}
+textarea.inp{resize:vertical;line-height:1.6}
+.divider{height:1px;background:var(--line);margin:12px 0}
+.sec-t{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;min-width:0}
+.sec-t h3{font-size:13px;font-weight:700;display:flex;align-items:center;gap:7px;white-space:nowrap}
+.sec-t h3::before{content:"";width:3px;height:13px;border-radius:2px;background:var(--accent-solid);flex:none}
+.sec-t small{color:var(--muted);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* ═══ 4. 重设计后的产品骨架 ═══ */
+.app{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
+/* L1 顶栏：一行，标题与状态竞争同一行，操作收进「更多」 */
+.app-head{flex:none;background:var(--surface);border-bottom:1px solid var(--line);padding:9px 14px;display:flex;align-items:center;gap:10px;min-width:0}
+.app-mark{display:flex;align-items:center;gap:8px;flex:none;font-size:14px;font-weight:750;letter-spacing:.2px}
+.app-mark i{width:24px;height:24px;border-radius:8px;background:var(--accent-soft);color:var(--violet-deep);display:grid;place-items:center;font-size:12px;font-style:normal;font-weight:800}
+.app-mark svg{width:15px;height:15px}
+.app-state{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden}
+.app-state .st{font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.app-state .st b{color:var(--text);font-weight:650}
+.app-ops{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}
+.app-ops .lbl{font-size:11px;color:var(--muted);white-space:nowrap}
+/* L2 阶段条：紧凑、可横滑、带序号，替代原来的「阶段条 + 分档条」两行 */
+.steps{flex:none;display:flex;align-items:center;gap:5px;padding:7px 14px;background:var(--surface);border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none;min-width:0}
+.steps::-webkit-scrollbar{display:none}
+.step{display:inline-flex;align-items:center;gap:6px;flex:none;min-height:28px;padding:3px 10px 3px 7px;border:1px solid transparent;border-radius:var(--r-full);background:transparent;color:var(--muted);font-size:11.5px;white-space:nowrap}
+.step:hover{background:var(--surface-2);color:var(--text)}
+.step i{width:18px;height:18px;border-radius:50%;background:var(--surface-2);color:var(--muted);display:grid;place-items:center;font-size:10px;font-style:normal;font-weight:700;flex:none}
+.step.done i{background:var(--success-soft);color:var(--success)}
+.step.on{background:var(--accent-soft);border-color:var(--violet-line);color:var(--violet-deep);font-weight:700}
+.step.on i{background:var(--accent-solid);color:#fff}
+.steps-note{margin-left:auto;flex:none;font-size:10.5px;color:var(--muted);padding-left:10px;white-space:nowrap}
+/* 内容区：桌面两栏；右栏不再常驻 */
+.app-body{flex:1;min-height:0;display:grid;grid-template-columns:248px minmax(0,1fr);gap:12px;padding:14px;min-width:0}
+.toc{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);padding:11px}
+.work{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;overflow:auto}
+.work-inner{display:flex;flex-direction:column;gap:10px;min-width:0}
+.toc-head,.work-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;padding-bottom:8px;border-bottom:1px solid var(--line);flex:none}
+.toc-head strong,.work-head strong{font-size:12.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.toc-head small,.work-head small{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.book{display:flex;align-items:center;gap:9px;min-width:0;flex:none}
+.book-cover{width:36px;height:44px;border-radius:7px;background:linear-gradient(135deg,#4A4270,#7C5CFF);color:#fff;display:grid;place-items:center;font-size:15px;font-weight:750;flex:none}
+.book-copy{min-width:0;flex:1}
+.book-copy strong{display:block;font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.book-copy small{display:block;font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;flex:none}
+.stat{background:var(--surface-inset);border:1px solid var(--line);border-radius:8px;padding:6px 4px;text-align:center;min-width:0}
+.stat b{display:block;font-size:14px;font-weight:750;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis}
+.stat span{display:block;font-size:9.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.filter{display:flex;align-items:center;gap:6px;flex:none}
+.filter .inp{padding:6px 9px;font-size:11.5px}
+.list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:5px;min-width:0}
+/* 条目契约：所有可收缩子项 min-width:0；标题单行省略；元数据第二行可换行；右侧固定 28px */
+.row{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:7px 8px;border:1px solid transparent;border-radius:9px;background:var(--surface-inset);text-align:left;transition:var(--t-fast)}
+.row:hover{border-color:var(--violet-line);background:var(--accent-soft)}
+.row.on{border-color:var(--accent-solid);background:var(--accent-soft)}
+.row .ck{width:15px;height:15px;flex:none;accent-color:var(--accent-solid);margin:0}
+.row-copy{flex:1 1 auto;min-width:0;display:grid;gap:1px}
+.row-copy strong{font-size:11.8px;font-weight:650;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-copy small{font-size:10.3px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-no{flex:none;font-size:9.5px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:20px;text-align:right}
+.row-act{flex:none;width:26px;height:26px;display:grid;place-items:center;border:0;border-radius:7px;background:transparent;color:var(--muted)}
+.row-act:hover{background:var(--surface-2);color:var(--text)}
+.row-act svg{width:14px;height:14px}
+.row.broken{background:var(--danger-soft);border-color:color-mix(in srgb,var(--danger) 30%,var(--line))}
+.row.broken .row-copy small{color:var(--danger)}
+.badge-src{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:var(--r-full);background:var(--info-soft);color:var(--info);font-size:9.5px;font-weight:650;white-space:nowrap;flex:none}
+/* 来源追溯条 */
+.trace{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;padding:7px 9px;border-radius:9px;background:var(--info-soft);color:var(--info);font-size:10.5px;line-height:1.5}
+.trace b{font-weight:700;white-space:nowrap}
+.trace span{overflow-wrap:anywhere;min-width:0}
+/* 上下文抽屉：替代常驻右栏 */
+.ctx-rail{flex:none;width:44px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 6px;background:var(--surface);border-left:1px solid var(--line)}
+.app-body{grid-template-columns:248px minmax(0,1fr) 44px}
+.ctx-rail .icb{width:32px;height:32px}
+.ctx-rail .icb.on{background:var(--accent-soft);color:var(--violet-deep);border-color:var(--violet-line)}
+.ctx-drawer{position:absolute;top:0;right:0;bottom:0;width:min(300px,86%);background:var(--surface);border-left:1px solid var(--line);box-shadow:var(--shadow-3);z-index:30;display:flex;flex-direction:column;transform:translateX(100%);transition:transform var(--t-base);min-width:0}
+.ctx-drawer.open{transform:none}
+.ctx-drawer-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 12px;border-bottom:1px solid var(--line);flex:none;min-width:0}
+.ctx-drawer-head strong{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.ctx-drawer-body{flex:1;min-height:0;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.ctx-block{border:1px solid var(--line);border-radius:10px;padding:9px 10px;min-width:0;background:var(--surface-inset)}
+.ctx-block strong{display:block;font-size:11.5px;margin-bottom:4px}
+.ctx-block p{font-size:10.8px;color:var(--muted);line-height:1.65;overflow-wrap:anywhere}
+.ctx-kv{display:flex;justify-content:space-between;gap:8px;font-size:10.8px;padding:3px 0;min-width:0}
+.ctx-kv span{color:var(--muted);flex:none}
+.ctx-kv b{min-width:0;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+/* 手机底部 tab：替代「分档 + 常驻右栏」 */
+.tabbar{display:none;flex:none;align-items:stretch;gap:2px;padding:5px 6px calc(5px + env(safe-area-inset-bottom));background:var(--surface);border-top:1px solid var(--line)}
+.tabbar button{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:4px 2px;border:0;border-radius:9px;background:transparent;color:var(--muted);font-size:10px;white-space:nowrap}
+.tabbar button.on{background:var(--accent-soft);color:var(--violet-deep);font-weight:700}
+.tabbar svg{width:17px;height:17px}
+
+/* ═══ 手机 / 平板响应（用 device[data-kind] 模拟，几何是真实宽度）═══ */
+.device[data-kind="mobile"] .app-head{padding:8px 10px;gap:7px}
+.device[data-kind="mobile"] .app-mark{font-size:13px}
+.device[data-kind="mobile"] .app-mark i{width:22px;height:22px;font-size:11px}
+.device[data-kind="mobile"] .app-ops .lbl{display:none}
+.device[data-kind="mobile"] .app-ops .btn.hide-m{display:none}
+/* 窄屏把主 CTA 收短，把横向空间让给作品名 */
+.device[data-kind="mobile"] .btn-lg{display:none}
+.device[data-kind="mobile"] .btn-sm{display:inline}
+.device[data-kind="mobile"] .app-state .chip{display:none}
+body[data-vp="320"] .app-mark .mark-name,body[data-vp="360"] .app-mark .mark-name{display:none}
+body[data-vp="320"] .kv-grid{grid-template-columns:minmax(0,1fr)}
+.device[data-kind="mobile"] .flow{grid-template-columns:minmax(0,1fr)}
+/* 手机：稿件卡片上下排，标题不被挤断；步骤条收紧，尽量一屏看全 5 步 */
+.device[data-kind="mobile"] .pick{grid-template-columns:minmax(0,1fr)}
+.device[data-kind="mobile"] .wiz-steps{padding:8px 10px}
+.device[data-kind="mobile"] .wiz-step{font-size:10.5px;gap:4px}
+.device[data-kind="mobile"] .wiz-step i{width:17px;height:17px;font-size:9.5px}
+.device[data-kind="mobile"] .wiz-arrow{width:10px;margin:0 3px}
+.device[data-kind="mobile"] .steps{padding:6px 10px;gap:4px}
+.device[data-kind="mobile"] .steps-note{display:none}
+.device[data-kind="mobile"] .step{font-size:11px;padding:3px 8px 3px 5px}
+.device[data-kind="mobile"] .app-body{grid-template-columns:minmax(0,1fr);padding:9px;gap:0}
+.device[data-kind="mobile"] .ctx-rail{display:none}
+.device[data-kind="mobile"] .toc{display:none}
+.device[data-kind="mobile"] .toc.m-show{display:flex}
+.device[data-kind="mobile"] .work{display:none}
+.device[data-kind="mobile"] .work.m-show{display:flex}
+.device[data-kind="mobile"] .tabbar{display:flex}
+.device[data-kind="mobile"] .ctx-drawer{width:min(300px,92%)}
+.device[data-kind="tablet"] .app-body{grid-template-columns:210px minmax(0,1fr) 44px;gap:10px;padding:11px}
+
+/* ═══ 4b. 「改造前」基线：还原现状的三栏 + 三行顶栏 + 不可收缩条目 ═══ */
+.legacy-right,.legacy-panes{display:none}
+.device[data-tone="legacy"] .app-body{grid-template-columns:248px minmax(0,1fr) 280px}
+.device[data-tone="legacy"] .ctx-rail{display:none}
+.device[data-tone="legacy"] .legacy-right{display:flex;flex-direction:column;gap:9px;min-width:0;min-height:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);padding:11px;overflow:auto}
+.device[data-tone="legacy"] .legacy-right .sec-t{margin-bottom:2px}
+.device[data-tone="legacy"] .legacy-panes{display:flex;gap:4px;flex:none;padding:6px 14px;background:var(--surface);border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none;min-width:0}
+.device[data-tone="legacy"] .legacy-panes button{flex:none;border:1px solid var(--line);border-radius:8px;padding:5px 12px;background:var(--surface);color:var(--muted);font-size:11.5px;white-space:nowrap}
+.device[data-tone="legacy"] .legacy-panes button.on{background:var(--accent-soft);border-color:var(--violet-line);color:var(--violet-deep);font-weight:700}
+/* 现状条目的不可收缩缺陷：让 min-content 顶住整行，体检应能报红 */
+.device[data-tone="legacy"] .app-state .st{min-width:max-content}
+.device[data-tone="legacy"] .app-ops{flex-wrap:nowrap}
+.device[data-tone="legacy"] .row,.device[data-tone="legacy"] .row-copy{min-width:max-content}
+.device[data-tone="legacy"] .row-copy strong,.device[data-tone="legacy"] .row-copy small{overflow:visible;text-overflow:clip}
+.device[data-tone="legacy"] .trace span{white-space:nowrap;overflow-wrap:normal}
+.device[data-tone="legacy"] .card .kv-grid{grid-template-columns:repeat(2,minmax(260px,1fr))}
+.device[data-kind="mobile"][data-tone="legacy"] .app-body{grid-template-columns:minmax(0,1fr)}
+.device[data-kind="mobile"][data-tone="legacy"] .toc{display:none}
+.device[data-kind="mobile"][data-tone="legacy"] .legacy-right{display:none}
+.device[data-kind="mobile"][data-tone="legacy"] .tabbar{display:none}
+.device[data-kind="mobile"][data-tone="legacy"] .legacy-panes{padding:6px 10px}
+.device[data-kind="tablet"][data-tone="legacy"] .app-body{grid-template-columns:210px minmax(0,1fr) 240px}
+
+/* ═══ 5. 续写向导 ═══ */
+.wiz{flex:1;min-height:0;display:flex;flex-direction:column;background:var(--bg)}
+.wiz-top{flex:none;padding:11px 14px;background:var(--surface);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;min-width:0}
+.wiz-top .t{min-width:0;flex:1}
+.wiz-top h3{font-size:13.5px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wiz-top p{font-size:10.8px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wiz-steps{display:flex;align-items:center;gap:0;flex:none;padding:9px 14px;background:var(--surface);border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none;min-width:0}
+.wiz-steps::-webkit-scrollbar{display:none}
+.wiz-step{display:inline-flex;align-items:center;gap:5px;flex:none;font-size:11px;color:var(--muted);white-space:nowrap}
+.wiz-step i{width:19px;height:19px;border-radius:50%;background:var(--surface-2);display:grid;place-items:center;font-size:10px;font-style:normal;font-weight:700;flex:none}
+.wiz-step.on{color:var(--violet-deep);font-weight:700}
+.wiz-step.on i{background:var(--accent-solid);color:#fff}
+.wiz-step.done i{background:var(--success-soft);color:var(--success)}
+.wiz-arrow{width:16px;height:1px;background:var(--line-strong);margin:0 6px;flex:none}
+.wiz-body{flex:1;min-height:0;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.wiz-pane{display:none;flex-direction:column;gap:12px;min-width:0}
+.wiz-pane.on{display:flex}
+.wiz-title{min-width:0}
+.wiz-title h4{font-size:14px;font-weight:750}
+.wiz-title p{font-size:11px;color:var(--muted);line-height:1.65;margin-top:3px}
+.pick{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;min-width:0}
+.pick.one{grid-template-columns:minmax(0,1fr)}
+.pick-card{position:relative;display:flex;flex-direction:column;gap:5px;min-width:0;padding:11px;border:1px solid var(--line-strong);border-radius:12px;background:var(--surface);text-align:left;transition:var(--t-fast)}
+.pick-card:hover{border-color:var(--violet-line)}
+.pick-card.on{border-color:var(--accent-solid);background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent-soft)}
+.pick-card .r{display:flex;align-items:center;gap:7px;min-width:0}
+.pick-card .r b{font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pick-card .r .chip{margin-left:auto}
+.pick-card small{font-size:10.5px;color:var(--muted);line-height:1.55;overflow-wrap:anywhere;min-width:0}
+.pick-card .foot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.radio{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--line-strong);flex:none;display:grid;place-items:center}
+.radio::after{content:"";width:7px;height:7px;border-radius:50%;background:transparent}
+.pick-card.on .radio{border-color:var(--accent-solid)}
+.pick-card.on .radio::after{background:var(--accent-solid)}
+.alert{display:flex;gap:9px;align-items:flex-start;min-width:0;padding:10px 11px;border-radius:10px;background:var(--danger-soft);color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 28%,var(--line))}
+.alert svg{flex:none;margin-top:1px}
+.alert .c{min-width:0}
+.alert b{display:block;font-size:11.5px;font-weight:750}
+.alert p{font-size:10.8px;line-height:1.6;margin-top:2px;overflow-wrap:anywhere}
+.alert ul{margin:5px 0 0;padding-left:16px;font-size:10.8px;line-height:1.7}
+.alert.warn{background:var(--warning-soft);color:var(--warning);border-color:color-mix(in srgb,var(--warning) 28%,var(--line))}
+.note-box{display:flex;gap:8px;align-items:flex-start;min-width:0;padding:9px 10px;border-radius:10px;background:var(--info-soft);color:var(--info);font-size:10.8px;line-height:1.65}
+.note-box svg{flex:none;margin-top:1px}
+.note-box div{min-width:0;overflow-wrap:anywhere}
+.kv-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;min-width:0}
+.field textarea{min-height:66px}
+.wiz-foot{flex:none;display:flex;align-items:center;gap:8px;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--surface);border-top:1px solid var(--line);min-width:0}
+.wiz-foot .sp{flex:1;min-width:0}
+.wiz-foot .hintx{font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;min-width:0}
+.flow-item{position:relative;min-width:0;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.flow-item i{font-style:normal;font-size:10px;font-weight:750;color:var(--accent-solid);display:block;margin-bottom:3px}
+.flow-item b{display:block;font-size:11.5px;min-width:0;overflow-wrap:anywhere}
+.flow-item small{display:block;font-size:10px;color:var(--muted);line-height:1.55;margin-top:3px;overflow-wrap:anywhere}
+
+/* ═══ 6. 溢出对照 / 体检 ═══ */
+.ov-wrap{flex:1;min-height:0;overflow:auto;padding:13px;display:flex;flex-direction:column;gap:12px;min-width:0;background:var(--bg)}
+.ov-summary{display:flex;align-items:center;gap:9px;flex-wrap:wrap;min-width:0;padding:10px 12px;border-radius:11px;background:var(--surface);border:1px solid var(--line)}
+.ov-summary .big{font-size:20px;font-weight:800;color:var(--success);font-variant-numeric:tabular-nums}
+.ov-summary .big.bad{color:var(--danger)}
+.ov-summary .txt{min-width:0;flex:1;font-size:11px;color:var(--muted);line-height:1.55}
+.ov-summary .txt b{color:var(--text)}
+.ov-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
+.device[data-kind="mobile"] .ov-grid{grid-template-columns:minmax(0,1fr)}
+.ov-col{min-width:0;display:flex;flex-direction:column;gap:9px}
+.ov-col-h{display:flex;align-items:center;gap:7px;min-width:0}
+.ov-col-h strong{font-size:12px;font-weight:750;white-space:nowrap}
+.ov-col-h small{font-size:10.3px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-canvas{min-width:0;padding:10px;border:1px dashed var(--line-strong);border-radius:11px;background:var(--surface-2);display:flex;flex-direction:column;gap:9px}
+/* 故意还原现状缺陷：不收缩 + nowrap + 按钮组不换行 + 长元数据 */
+.ov-canvas.legacy{overflow:visible}
+.legacy .s-head{display:flex;align-items:center;gap:10px;white-space:nowrap;min-width:0}
+.legacy .s-head h5{font-size:12.5px;flex:none}
+.legacy .s-head .st{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+.legacy .s-ops{display:flex;gap:5px;white-space:nowrap}
+.legacy .s-row{display:flex;align-items:center;gap:8px;white-space:nowrap;padding:7px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.legacy .s-row .t{font-size:11.5px;font-weight:650;white-space:nowrap}
+.legacy .s-row .m{font-size:10.3px;color:var(--muted);white-space:nowrap}
+.legacy .s-row .n{font-size:9.5px;color:var(--muted);margin-left:auto;flex:none}
+.legacy .s-meta{font-size:10.3px;color:var(--muted);white-space:nowrap;padding:2px 2px 0}
+.legacy .s-path{font:10px/1.5 var(--font-mono);color:var(--muted);white-space:nowrap;overflow-wrap:normal}
+/* 提案：条目契约 */
+.fix .s-head{display:flex;align-items:center;gap:8px;min-width:0;width:100%}
+.fix .s-head h5{font-size:12.5px;flex:none}
+.fix .s-head .st{flex:1 1 auto;min-width:0;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fix .s-head .more{flex:none;width:26px;height:26px;border:1px solid var(--line);border-radius:7px;background:var(--surface);display:grid;place-items:center;color:var(--muted)}
+.fix .s-ops{display:flex;gap:5px;flex-wrap:wrap;min-width:0}
+.fix .s-row{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:7px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.fix .s-row .c{flex:1 1 auto;min-width:0;display:grid;gap:1px}
+.fix .s-row .t{font-size:11.5px;font-weight:650;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fix .s-row .m{font-size:10.3px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fix .s-row .n{flex:none;font-size:9.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.fix .s-row .act{flex:none;width:24px;height:24px;border:0;border-radius:6px;background:transparent;color:var(--muted);display:grid;place-items:center}
+.fix .s-path{font:10px/1.5 var(--font-mono);color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.fix .s-hint{font-size:10.3px;color:var(--muted);line-height:1.6;min-width:0;overflow-wrap:anywhere}
+.ov-bad{outline:2px solid var(--danger)!important;outline-offset:1px;background:color-mix(in srgb,var(--danger) 9%,transparent)!important}
+.ov-list{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ov-item{display:flex;align-items:center;gap:8px;min-width:0;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-size:10.8px}
+.ov-item .n{color:var(--danger);font-weight:750;flex:none;font-variant-numeric:tabular-nums}
+.ov-item .d{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-item .px{flex:none;color:var(--muted);font-family:var(--font-mono)}
+.rules{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0}
+.device[data-kind="mobile"] .rules{grid-template-columns:minmax(0,1fr)}
+.rule{min-width:0;padding:9px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
+.rule b{display:block;font-size:11px;min-width:0;overflow-wrap:anywhere}
+.rule code{display:block;font:10px/1.6 var(--font-mono);color:var(--violet-deep);margin-top:3px;overflow-wrap:anywhere}
+.rule small{display:block;font-size:10px;color:var(--muted);line-height:1.55;margin-top:2px;overflow-wrap:anywhere}
+
+/* ═══ 7. 方案说明 ═══ */
+.spec{flex:1;min-height:0;overflow:auto;padding:16px;background:var(--bg);min-width:0}
+.spec-in{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:14px;min-width:0}
+.spec h2{font-size:17px;font-weight:800}
+.spec h3{font-size:13px;font-weight:750;margin-bottom:8px}
+.spec p,.spec li{font-size:11.5px;line-height:1.75;color:var(--muted)}
+.spec b,.spec strong{color:var(--text)}
+.spec ul,.spec ol{padding-left:18px;margin:5px 0 0;display:flex;flex-direction:column;gap:3px}
+.spec-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
+.device[data-kind="mobile"] .spec-grid{grid-template-columns:minmax(0,1fr)}
+.tbl{width:100%;border-collapse:collapse;min-width:0;table-layout:fixed;font-size:11px}
+.tbl th,.tbl td{border:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top;overflow-wrap:anywhere;line-height:1.6}
+.tbl th{background:var(--surface-2);color:var(--text);font-weight:700}
+.tbl td{color:var(--muted)}
+.tbl td:first-child{color:var(--text);font-weight:650}
+.callout{display:flex;gap:9px;align-items:flex-start;min-width:0;padding:10px 12px;border-radius:10px;background:var(--accent-soft);border:1px solid var(--violet-line);color:var(--violet-deep);font-size:11.5px;line-height:1.7}
+.callout svg{flex:none;margin-top:2px}
+.spec-tag{display:inline-block;padding:1px 7px;border-radius:var(--r-full);font-size:10px;font-weight:700;background:var(--surface-2);color:var(--muted)}
+</style>
+</head>
+<body data-vp="393" data-tone="proposal" data-scene="overflow">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5M3 17l9 5 9-5"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 8"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+</defs></svg>
+
+<div class="pv-bar">
+  <div class="pv-id"><i></i><div>织书台 / 拆书匠 · 重设计预览<small>续写功能 + 手机条目溢出体检 · 只读设计稿</small></div></div>
+  <div class="pv-sep"></div>
+  <div class="seg" id="segScene">
+    <button data-scene="overflow" class="on"><svg><use href="#i-phone"/></svg>溢出对照</button>
+    <button data-scene="novel"><svg><use href="#i-book"/></svg>拆书匠</button>
+    <button data-scene="writer"><svg><use href="#i-pen"/></svg>织书台</button>
+    <button data-scene="continue"><svg><use href="#i-arrow"/></svg>续写向导</button>
+    <button data-scene="spec"><svg><use href="#i-info"/></svg>方案说明</button>
+  </div>
+  <div class="seg" id="segVp">
+    <button data-vp="320">320</button>
+    <button data-vp="360">360</button>
+    <button data-vp="393" class="on">393</button>
+    <button data-vp="412">412</button>
+    <button data-vp="768">768</button>
+    <button data-vp="1440">1440</button>
+  </div>
+  <div class="seg" id="segTone">
+    <button data-tone="legacy">改造前</button>
+    <button data-tone="proposal" class="on">提案</button>
+  </div>
+  <div class="seg" id="segTheme">
+    <button data-theme="light" class="on">亮</button>
+    <button data-theme="dark">暗</button>
+  </div>
+  <div class="pv-spacer"></div>
+  <div class="pv-check" id="ovCheck" data-bad="0"><span id="ovCheckText">体检：0 处溢出</span><button type="button" id="btnRecheck">重新检测</button></div>
+</div>
+
+<div class="pv-stage">
+  <div class="device" id="device" data-kind="mobile">
+    <div class="screen" id="screen">
+
+      <!-- ══════════ 场景 1：溢出对照（默认） ══════════ -->
+      <section class="scene on" data-scene-panel="overflow">
+        <div class="ov-wrap">
+          <div class="ov-summary">
+            <div class="big" id="ovBig">0</div>
+            <div class="txt" id="ovTxt"><b>逐元素几何体检</b>：拿每个条目的 getBoundingClientRect().right 与屏幕右边界比，不用 documentElement.scrollWidth（手机 overflow-x:hidden 会让它恒真）。切视口 / 切「改造前」可实时重跑。</div>
+            <span class="chip acc" id="ovVpChip">393 px</span>
+          </div>
+          <div class="ov-list" id="ovList"></div>
+
+          <div class="ov-grid">
+            <div class="ov-col">
+              <div class="ov-col-h"><strong>改造前</strong><small>页头 + 阶段 + 分档，条目 nowrap 且不可收缩</small></div>
+              <div class="ov-canvas legacy" id="legacyCanvas">
+                <div class="s-head">
+                  <h5>拆书匠</h5>
+                  <span class="st">《恐怖副本：大BOSS是恋爱脑》作者：姜乐你 · 已保存 · 改编大纲</span>
+                </div>
+                <div class="s-ops">
+                  <button class="btn tiny">管理记录</button><button class="btn tiny">导入 TXT</button><button class="btn tiny">作品</button><button class="btn tiny">导出</button><button class="btn tiny primary">新建</button>
+                </div>
+                <div class="s-row"><span class="t">第157章 尾声：当所有副本都关闭之后她终于回到了那间没有窗的出租屋</span><span class="m">3,842 字 · 另有 3 份改编稿</span><span class="n">157</span></div>
+                <div class="s-meta">改编稿 v4 · AI 润色 · 来源：改编稿 v2 · 2026-11-08 14:22 · 文件损坏，需要重新导入或删除</div>
+                <div class="s-row"><span class="t">大纲版本 12 · 长篇悬疑分卷大纲（第三版修订含终局伏笔回收）</span><span class="m">11-08 14:22</span><span class="n">删除</span></div>
+                <div class="s-path">D:\naibachatdata\studio\novel\bk_8f3a21c9\_exports\全书合并_含设定与大纲_20261108.md</div>
+              </div>
+            </div>
+            <div class="ov-col">
+              <div class="ov-col-h"><strong>提案</strong><small>同一批真实条目，走统一「条目契约」</small></div>
+              <div class="ov-canvas fix">
+                <div class="s-head">
+                  <h5>拆书匠</h5>
+                  <span class="st">恐怖副本：大BOSS是恋爱脑 · 改编大纲</span>
+                  <span class="more"><svg><use href="#i-more"/></svg></span>
+                </div>
+                <div class="s-ops">
+                  <button class="btn tiny primary">生成</button><button class="btn tiny">保存版本</button><button class="btn tiny">重试</button><button class="btn tiny">更多</button>
+                </div>
+                <div class="s-row"><span class="c"><span class="t">第157章 尾声：当所有副本都关闭之后她终于回到了那间没有窗的出租屋</span><span class="m">3,842 字 · 3 份改编稿 · <b>原文</b></span></span><span class="n">157</span><span class="act"><svg><use href="#i-more"/></svg></span></div>
+                <div class="s-row"><span class="c"><span class="t">改编稿 v4 · AI 润色</span><span class="m">来源：改编稿 v2 · 文件损坏，需重新导入</span></span><span class="chip bad">坏章</span></div>
+                <div class="s-row"><span class="c"><span class="t">大纲版本 12 · 长篇悬疑分卷大纲（第三版修订）</span><span class="m">11-08 14:22</span></span><span class="act"><svg><use href="#i-more"/></svg></span></div>
+                <div class="s-path">D:\naibachatdata\studio\novel\bk_8f3a21c9\_exports\全书合并_含设定与大纲_20261108.md</div>
+                <div class="s-hint">坏章在导出前会被预检拦下：列出缺失章号并停止导出，不产生「看起来成功」的残本。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="padding:12px">
+            <div class="sec-t"><h3>条目契约（写进 CSS 基线，所有列表共用）</h3><small>min-width:0 必须从外壳贯穿到条目</small></div>
+            <div class="rules">
+              <div class="rule"><b>1 · 收缩链不能断</b><code>.studio-view → .columns → .panel → .list → .row { min-width:0 }</code><small>现状根因：外层缺一条 min-width:0，整条网格列被 min-content 顶到固定宽度，越窄裁得越多。</small></div>
+              <div class="rule"><b>2 · 标题单行省略</b><code>overflow:hidden; text-overflow:ellipsis; white-space:nowrap</code><small>配合 width:0 或 flex:1 1 auto，省略号才真的生效；长书名不再套第二层《》。</small></div>
+              <div class="rule"><b>3 · 元数据第二行</b><code>.row-copy { display:grid; gap:1px } · small 省略</code><small>不再把「来源 · 时间 · 损坏提示」串成一条不可断的 nowrap 长串。</small></div>
+              <div class="rule"><b>4 · 操作不抢宽度</b><code>右侧固定 24–28px 图标 / 更多菜单</code><small>按钮组 flex-wrap:wrap；「删除 / 保存 / 重试」收进 …，不参与标题的宽度竞争。</small></div>
+              <div class="rule"><b>5 · 路径与报错可断行</b><code>overflow-wrap:anywhere</code><small>需要完整可读的长串（本机路径、坏章清单）允许折行，而不是横向溢出。</small></div>
+              <div class="rule"><b>6 · 体检用几何，不用 scrollWidth</b><code>rect.right &gt; screen.right</code><small>320 / 360 / 393 / 412 × 亮暗 × 各阶段逐元素扫描；允许横滑的步骤条单独标记豁免。</small></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════ 场景 2：拆书匠 ══════════ -->
+      <section class="scene" data-scene-panel="novel">
+        <div class="app">
+          <header class="app-head">
+            <div class="app-mark"><i>拆</i><span class="mark-name">拆书匠</span></div>
+            <div class="app-state"><span class="st"><b>恐怖副本：大BOSS是恋爱脑</b> · 已保存 · 改编大纲</span><span class="chip ok">157 章</span></div>
+            <div class="app-ops">
+              <span class="lbl hide-m">原文 / 改编稿</span>
+              <button class="btn tiny hide-m" id="btnNovelToWriter"><svg><use href="#i-arrow"/></svg><span class="btn-lg">导入织书台续写</span><span class="btn-sm">导入</span></button>
+              <button class="btn tiny primary">导出</button>
+              <button class="icb" id="btnNovelMore"><svg><use href="#i-more"/></svg></button>
+            </div>
+          </header>
+          <nav class="steps" data-allow-scroll="1">
+            <button class="step done"><i>1</i>拆章</button>
+            <button class="step done"><i>2</i>要素</button>
+            <button class="step on"><i>3</i>大纲</button>
+            <button class="step"><i>4</i>剧本</button>
+            <button class="step"><i>5</i>分镜</button>
+            <span class="steps-note">右栏已收起 · 点最右图标看上下文</span>
+          </nav>
+          <div class="legacy-panes"><button>章节</button><button class="on">编辑</button><button>预览</button></div>
+          <div class="app-body">
+            <aside class="toc" id="novelToc">
+              <div class="toc-head"><strong>作品与章节</strong><small>已选 6 章</small></div>
+              <div class="book"><div class="book-cover">拆</div><div class="book-copy"><strong>恐怖副本：大BOSS是恋爱脑</strong><small>作者：姜乐你 · 157 章 · 42.6 万字</small></div></div>
+              <div class="stats"><div class="stat"><b>157</b><span>章节</span></div><div class="stat"><b>42.6万</b><span>字数</span></div><div class="stat"><b>3</b><span>改编稿</span></div></div>
+              <div class="filter"><input class="inp" placeholder="筛选章节"><button class="icb"><svg><use href="#i-refresh"/></svg></button></div>
+              <div class="list">
+                <div class="row"><input class="ck" type="checkbox"><span class="row-copy"><strong>第154章 副本关闭前的最后一次广播</strong><small>3,120 字 · 2 份改编稿</small></span><span class="row-no">154</span><span class="row-act"><svg><use href="#i-more"/></svg></span></div>
+                <div class="row"><input class="ck" type="checkbox"><span class="row-copy"><strong>第155章 她说她从来没进过这栋楼</strong><small>2,980 字</small></span><span class="row-no">155</span><span class="row-act"><svg><use href="#i-more"/></svg></span></div>
+                <div class="row"><input class="ck" type="checkbox"><span class="row-copy"><strong>第156章 旧船、合影与多出来的那个人</strong><small>3,410 字 · 1 份改编稿</small></span><span class="row-no">156</span><span class="row-act"><svg><use href="#i-more"/></svg></span></div>
+                <div class="row on"><input class="ck" type="checkbox" checked><span class="row-copy"><strong>第157章 尾声：当所有副本都关闭之后她终于回到了那间没有窗的出租屋</strong><small>3,842 字 · 3 份改编稿</small></span><span class="row-no">157</span><span class="row-act"><svg><use href="#i-more"/></svg></span></div>
+                <div class="row broken"><input class="ck" type="checkbox"><span class="row-copy"><strong>第158章 番外（正文读取失败）</strong><small>文件损坏 · 导出前必须处理</small></span><span class="row-no">158</span><span class="row-act"><svg><use href="#i-warn"/></svg></span></div>
+              </div>
+            </aside>
+            <main class="work m-show" id="novelWork">
+              <div class="work-inner">
+                <div class="trace"><svg><use href="#i-info"/></svg><b>当前稿件</b><span>第157章 · 原文（导入自 TXT）· 3,842 字 · 另有 3 份改编稿未参与本次素材</span></div>
+                <div class="card">
+                  <div class="sec-t"><h3>大纲 · 本次会做什么</h3><small>版本 12</small></div>
+                  <div class="kv-grid">
+                    <div class="field"><span>素材范围</span><select class="inp"><option>已选 6 章 · 原文</option><option>已选 6 章 · 改编稿 v4</option></select></div>
+                    <div class="field"><span>每章正文上限</span><select class="inp"><option>3000 字</option><option>6000 字</option></select></div>
+                  </div>
+                  <div class="divider"></div>
+                  <div class="field"><label>补充要求（可选）</label><textarea class="inp" placeholder="保留终局伏笔，不要引入新角色"></textarea></div>
+                  <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px;min-width:0"><button class="btn primary">生成大纲</button><button class="btn">另存为新版本</button><button class="btn ghost">取消</button></div>
+                </div>
+                <div class="alert"><svg><use href="#i-warn"/></svg><div class="c"><b>导出被拦下：2 个章节读不出来</b><p>第 158 章（正文文件损坏）、第 163 章（稿件缺失）。先修复或从本次导出范围排除，再重新导出；不会产生缺章的残本。</p><ul><li>第158章 番外 · 正文读取失败</li><li>第163章 后记 · 稿件缺失</li></ul></div></div>
+                <div class="card">
+                  <div class="sec-t"><h3>已保存版本</h3><small>当前：版本 12</small></div>
+                  <div class="row"><span class="row-copy"><strong>版本 12 · 终局伏笔回收</strong><small>11-08 14:22 · 当前版本</small></span><span class="chip acc">当前</span><span class="row-act"><svg><use href="#i-more"/></svg></span></div>
+                  <div class="row"><span class="row-copy"><strong>版本 11 · 长篇悬疑分卷大纲（第三版修订）</strong><small>11-07 20:10</small></span><span class="row-act"><svg><use href="#i-more"/></svg></span></div>
+                  <p class="hint" style="margin-top:8px">删除当前版本后，指针会同步落到版本 11；页面、后续生成与导出读同一处裁决点。</p>
+                </div>
+              </div>
+            </main>
+            <div class="ctx-rail">
+              <button class="icb on" id="railNovel"><svg><use href="#i-info"/></svg></button>
+              <button class="icb"><svg><use href="#i-download"/></svg></button>
+            </div>
+            <aside class="legacy-right" aria-label="预览与下一步（现状常驻右栏）">
+              <div class="sec-t"><h3>预览与下一步</h3><small>常驻 280px</small></div>
+              <div class="ctx-block"><strong>这次会做什么</strong><p>按已选章节生成大纲。此栏在现状里长期占位，内容多为静态状态说明，很少需要同时盯着看。</p></div>
+              <div class="ctx-block"><strong>保存状态</strong><p>已保存到本机数据目录。</p></div>
+              <div class="ctx-block"><strong>作品保存在哪里</strong><p>D:\naibachatdata\studio\novel\bk_8f3a21c9</p></div>
+              <div class="ctx-block"><strong>生成进度</strong><p>待开始。</p></div>
+            </aside>
+          </div>
+          <nav class="tabbar" id="tabNovel">
+            <button data-m="toc"><svg><use href="#i-list"/></svg>目录</button>
+            <button data-m="work" class="on"><svg><use href="#i-pen"/></svg>编辑</button>
+            <button data-m="ctx"><svg><use href="#i-layers"/></svg>上下文</button>
+          </nav>
+        </div>
+        <aside class="ctx-drawer" id="drawerNovel">
+          <div class="ctx-drawer-head"><strong>上下文 · 按需展开</strong><button class="icb" data-close><svg><use href="#i-x"/></svg></button></div>
+          <div class="ctx-drawer-body">
+            <div class="ctx-block"><strong>这次会做什么</strong><p>按已选 6 章原文生成大纲版本 13，预计约 3,000 字，不改动任何旧章节与稿件。</p></div>
+            <div class="ctx-block"><div class="ctx-kv"><span>生成进度</span><b>待开始</b></div><div class="ctx-kv"><span>当前版本</span><b>12</b></div><div class="ctx-kv"><span>坏章</span><b>2 章（已拦截导出）</b></div></div>
+            <div class="ctx-block"><strong>保存状态</strong><p>已保存到本机数据目录，路径可复制；路径使用可断行字体，窄屏不会横向溢出。</p></div>
+            <div class="ctx-block"><strong>输入来源</strong><p>第154–157 章 · 原文 · 共 13,352 字；改编稿 3 份不参与。</p></div>
+          </div>
+        </aside>
+      </section>
+
+      <!-- ══════════ 场景 3：织书台 ══════════ -->
+      <section class="scene" data-scene-panel="writer">
+        <div class="app">
+          <header class="app-head">
+            <div class="app-mark"><i>织</i><span class="mark-name">织书台</span></div>
+            <div class="app-state"><span class="st"><b>恐怖副本 · 续写卷</b> · 导入自拆书匠 · 157 章</span><span class="chip info">续写卷</span></div>
+            <div class="app-ops">
+              <button class="btn tiny hide-m" id="btnWriterImportNovel"><svg><use href="#i-download"/></svg><span class="btn-lg">从小说导入</span><span class="btn-sm">导入</span></button>
+              <button class="btn tiny primary" id="btnWriterContinue"><svg><use href="#i-plus"/></svg><span class="btn-lg">末章后开新章</span><span class="btn-sm">开新章</span></button>
+              <button class="icb" id="btnWriterMore"><svg><use href="#i-more"/></svg></button>
+            </div>
+          </header>
+          <nav class="steps" data-allow-scroll="1">
+            <button class="step done"><i>1</i>设定</button>
+            <button class="step done"><i>2</i>大纲</button>
+            <button class="step done"><i>3</i>章节</button>
+            <button class="step on"><i>4</i>正文</button>
+            <span class="steps-note">两种续写入口已分开，不会点错位置</span>
+          </nav>
+          <div class="legacy-panes"><button>作品</button><button class="on">编辑</button><button>说明</button></div>
+          <div class="app-body">
+            <aside class="toc" id="writerToc">
+              <div class="toc-head"><strong>章节目录</strong><small>157 / 158</small></div>
+              <div class="book"><div class="book-cover">织</div><div class="book-copy"><strong>恐怖副本 · 续写卷</strong><small>导入作品 · 原作不覆盖</small></div></div>
+              <div class="stats"><div class="stat"><b>157</b><span>导入章</span></div><div class="stat"><b>1</b><span>新章</span></div><div class="stat"><b>42.6万</b><span>总字数</span></div></div>
+              <div class="filter"><input class="inp" placeholder="筛选章节"><button class="icb"><svg><use href="#i-refresh"/></svg></button></div>
+              <div class="list">
+                <div class="row"><span class="row-copy"><strong>第155章 她说她从来没进过这栋楼</strong><small>导入正文 · 原文</small></span><span class="badge-src">拆书匠</span><span class="row-no">155</span></div>
+                <div class="row"><span class="row-copy"><strong>第156章 旧船、合影与多出来的那个人</strong><small>导入正文 · 原文</small></span><span class="badge-src">拆书匠</span><span class="row-no">156</span></div>
+                <div class="row"><span class="row-copy"><strong>第157章 尾声：当所有副本都关闭之后她终于回到了那间没有窗的出租屋</strong><small>末章 · 导入正文 · 原文 · 只读</small></span><span class="badge-src">拆书匠</span><span class="row-no">157</span></div>
+                <div class="row on"><span class="row-copy"><strong>第158章 新章（待写）</strong><small>末章后新建 · 梗概已确认</small></span><span class="chip acc">新章</span><span class="row-no">158</span></div>
+              </div>
+            </aside>
+            <main class="work m-show" id="writerWork">
+              <div class="work-inner">
+                <div class="callout"><svg><use href="#i-info"/></svg><div><b>两个续写入口，位置不混：</b>「续写本章」接当前章节末尾继续写（现有行为）；「末章后开新章」走导入向导，在最后一章之后新建第 158 章。菜单里各自写明落点。</div></div>
+                <div class="card">
+                  <div class="sec-t"><h3>第 158 章 · 写作前确认</h3><small>人工确认，不自动重构设定</small></div>
+                  <div class="kv-grid">
+                    <div class="field"><span>人物现状</span><textarea class="inp" placeholder="谁还活着、谁在哪、当前目标">姜乐：回到出租屋，副本记忆保留；陆行舟：失联，最后一次出现在旧船。</textarea></div>
+                    <div class="field"><span>关系现状</span><textarea class="inp" placeholder="关系变化、未兑现的承诺">姜乐与陆行舟的合作关系未正式结束，合影里的第三人身份未揭晓。</textarea></div>
+                    <div class="field"><span>剧情现状</span><textarea class="inp" placeholder="末章结束时的状态">所有副本关闭，但旧船的照片仍在，暗示还有未回收的伏笔。</textarea></div>
+                    <div class="field"><span>后续大纲</span><textarea class="inp" placeholder="新章要写什么">第158章：照片背面出现日期，指向二十年前的船员名单。</textarea></div>
+                  </div>
+                  <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px;min-width:0"><button class="btn primary">生成第 158 章</button><button class="btn">保存到草稿</button><button class="btn ghost" id="btnWriterRetry"><svg><use href="#i-refresh"/></svg>失败重试</button></div>
+                </div>
+                <div class="trace"><svg><use href="#i-shield"/></svg><b>来源可追溯</b><span>第1–157 章来自拆书匠作品 bk_8f3a21c9 · 原文 · 稿件 ms_orig · 章号 1–157 · 导入于 2026-11-10；导入正文只读，保留各自版本与来源字段。</span></div>
+                <div class="card">
+                  <div class="sec-t"><h3>导入章节检查</h3><small>多章续写前置</small></div>
+                  <div class="kv-grid">
+                    <div class="field"><span>角色关系覆盖</span><div class="row"><span class="row-copy"><strong>12 人 / 18 条关系</strong><small>末 20 章内出现过 9 人</small></span><span class="chip ok">足够</span></div></div>
+                    <div class="field"><span>剧情状态</span><div class="row"><span class="row-copy"><strong>已确认到末章</strong><small>未回收伏笔 3 条（需人工判断）</small></span><span class="chip wait">待确认</span></div></div>
+                  </div>
+                  <p class="hint" style="margin-top:8px">多章导入只做「够不够支撑续写」的覆盖度提示，不自动替用户重构整本书的设定与伏笔。</p>
+                </div>
+              </div>
+            </main>
+            <div class="ctx-rail"><button class="icb on" id="railWriter"><svg><use href="#i-info"/></svg></button><button class="icb"><svg><use href="#i-layers"/></svg></button></div>
+            <aside class="legacy-right" aria-label="说明与状态（现状常驻右栏）">
+              <div class="sec-t"><h3>这次会做什么</h3><small>常驻 280px</small></div>
+              <div class="ctx-block"><strong>输入来源</strong><p>人物 / 关系 / 剧情现状 / 后续大纲 + 末章正文。</p></div>
+              <div class="ctx-block"><strong>生成进度</strong><p>待开始。失败可重试本步。</p></div>
+              <div class="ctx-block"><strong>章节数量与字数限制</strong><p>每章上限 3000 字。</p></div>
+              <div class="ctx-block"><strong>保存状态</strong><p>已保存到本机数据目录。</p></div>
+            </aside>
+          </div>
+          <nav class="tabbar" id="tabWriter">
+            <button data-m="toc"><svg><use href="#i-list"/></svg>目录</button>
+            <button data-m="work" class="on"><svg><use href="#i-pen"/></svg>编辑</button>
+            <button data-m="ctx"><svg><use href="#i-layers"/></svg>上下文</button>
+          </nav>
+        </div>
+        <aside class="ctx-drawer" id="drawerWriter">
+          <div class="ctx-drawer-head"><strong>上下文 · 按需展开</strong><button class="icb" data-close><svg><use href="#i-x"/></svg></button></div>
+          <div class="ctx-drawer-body">
+            <div class="ctx-block"><strong>生成进度</strong><p>待开始。失败时保留已确认的四项摘要与新章骨架，可原样重试，不重跑导入。</p></div>
+            <div class="ctx-block"><div class="ctx-kv"><span>续写落点</span><b>第 158 章</b></div><div class="ctx-kv"><span>末章</span><b>第 157 章</b></div><div class="ctx-kv"><span>稿件来源</span><b>原文</b></div><div class="ctx-kv"><span>导入章</span><b>157 章 · 只读</b></div></div>
+            <div class="ctx-block"><strong>输入来源</strong><p>人物 / 关系 / 剧情现状 / 后续大纲（人工确认）+ 末章正文 + 角色关系覆盖度提示。</p></div>
+          </div>
+        </aside>
+      </section>
+
+      <!-- ══════════ 场景 4：续写向导 ══════════ -->
+      <section class="scene" data-scene-panel="continue">
+        <div class="wiz">
+          <div class="wiz-top">
+            <div class="t"><h3>从已有小说末尾开新章续写</h3><p>拆书匠 → 织书台 · 新建作品，原作与改编稿都不覆盖</p></div>
+            <button class="icb" id="btnWizClose"><svg><use href="#i-x"/></svg></button>
+          </div>
+          <div class="wiz-steps" data-allow-scroll="1" id="wizSteps">
+            <span class="wiz-step on" data-ws="1"><i>1</i>选作品</span><span class="wiz-arrow"></span>
+            <span class="wiz-step" data-ws="2"><i>2</i>选稿件</span><span class="wiz-arrow"></span>
+            <span class="wiz-step" data-ws="3"><i>3</i>选末章</span><span class="wiz-arrow"></span>
+            <span class="wiz-step" data-ws="4"><i>4</i>确认现状</span><span class="wiz-arrow"></span>
+            <span class="wiz-step" data-ws="5"><i>5</i>建新章</span>
+          </div>
+          <div class="wiz-body">
+            <!-- 1 选作品 -->
+            <div class="wiz-pane on" data-wp="1">
+              <div class="wiz-title"><h4>选择拆书匠里的作品</h4><p>导入会在织书台生成一份新作品；原作品、章节和所有改编稿保持原样。</p></div>
+              <div class="pick one">
+                <button class="pick-card on" data-pick="book"><span class="r"><span class="radio"></span><b>恐怖副本：大BOSS是恋爱脑</b><span class="chip">157 章</span></span><small>作者：姜乐你 · 42.6 万字 · 3 份改编稿 · 最近编辑 11-08</small><span class="foot"><span class="chip info">拆书匠</span><span class="chip">原文完整</span></span></button>
+                <button class="pick-card" data-pick="book"><span class="r"><span class="radio"></span><b>长夜灯</b><span class="chip">32 章</span></span><small>18.2 万字 · 1 份改编稿 · 最近编辑 10-29</small><span class="foot"><span class="chip info">拆书匠</span></span></button>
+              </div>
+            </div>
+            <!-- 2 选稿件 -->
+            <div class="wiz-pane" data-wp="2">
+              <div class="wiz-title"><h4>这次用哪一份稿件续写？</h4><p><b>必须明确选一份，不自动挑。</b>原文与改编稿的剧情走向可能已经分叉，选错会导致新章接不上。</p></div>
+              <div class="pick">
+                <button class="pick-card on" data-pick="src"><span class="r"><span class="radio"></span><b>原文</b><span class="chip ok">推荐</span></span><small>导入 TXT 时的原始正文，157 / 157 章可读，剧情口径与原始小说一致。</small><span class="foot"><span class="chip">157 章</span><span class="chip">0 坏章</span></span></button>
+                <button class="pick-card" data-pick="src"><span class="r"><span class="radio"></span><b>改编稿 v4 · AI 润色</b><span class="chip acc">改编稿</span></span><small>基于改编稿 v2，覆盖 154 / 157 章，第 158 章正文损坏；剧情已与原文分叉。</small><span class="foot"><span class="chip">154 章</span><span class="chip bad">3 坏章</span></span></button>
+              </div>
+              <div class="note-box"><svg><use href="#i-info"/></svg><div>选改编稿时，导入页会显示它与原文的分叉章节数与坏章清单；坏章不会被静默跳过，必须处理后才能继续。</div></div>
+            </div>
+            <!-- 3 选末章 -->
+            <div class="wiz-pane" data-wp="3">
+              <div class="wiz-title"><h4>确认章节范围与末章</h4><p>默认导入全部可读章节，末章就是新章的接续点；新章会建在它<b>之后</b>。</p></div>
+              <div class="card">
+                <div class="sec-t"><h3>章节范围</h3><small>第 1 – 157 章</small></div>
+                <div class="kv-grid">
+                  <div class="field"><span>起始章</span><select class="inp"><option>第 1 章</option><option>第 120 章（只导近段）</option></select></div>
+                  <div class="field"><span>末章（自动定位）</span><select class="inp"><option>第 157 章 尾声：当所有副本都关闭之后…</option></select></div>
+                </div>
+              </div>
+              <div class="alert"><svg><use href="#i-warn"/></svg><div class="c"><b>2 个章节读不出来，导入已停止</b><p>与导出共用同一套预检：列出章号与原因，处理后重新导入，不产生缺章的续写底稿。</p><ul><li>第 158 章 番外 · 正文文件损坏</li><li>第 163 章 后记 · 稿件缺失</li></ul></div></div>
+              <div class="note-box"><svg><use href="#i-info"/></svg><div>章节丢失后从原始 TXT 恢复，排在本轮三项数据修复之后，本版不做。</div></div>
+            </div>
+            <!-- 4 确认现状 -->
+            <div class="wiz-pane" data-wp="4">
+              <div class="wiz-title"><h4>人工确认剧情现状与后续大纲</h4><p>四项都由用户确认或改写；本版<b>不自动重构</b>整本书的设定和伏笔。</p></div>
+              <div class="kv-grid">
+                <div class="field"><span>人物现状</span><textarea class="inp">姜乐：副本记忆保留；陆行舟：失联。</textarea></div>
+                <div class="field"><span>关系现状</span><textarea class="inp">合作关系未正式结束；合影第三人身份未揭晓。</textarea></div>
+                <div class="field"><span>剧情现状</span><textarea class="inp">所有副本关闭，旧船照片仍在。</textarea></div>
+                <div class="field"><span>后续大纲</span><textarea class="inp">第158章：照片背面出现日期，指向二十年前船员名单。</textarea></div>
+              </div>
+              <div class="card">
+                <div class="sec-t"><h3>多章导入后的覆盖度检查</h3><small>只提示，不替你决策</small></div>
+                <div class="kv-grid">
+                  <div class="field"><span>角色关系</span><div class="row"><span class="row-copy"><strong>12 人 / 18 条关系</strong><small>末 20 章出现 9 人</small></span><span class="chip ok">足够</span></div></div>
+                  <div class="field"><span>剧情状态</span><div class="row"><span class="row-copy"><strong>已确认到末章</strong><small>未回收伏笔 3 条</small></span><span class="chip wait">待人工判断</span></div></div>
+                </div>
+              </div>
+            </div>
+            <!-- 5 建新章 -->
+            <div class="wiz-pane" data-wp="5">
+              <div class="wiz-title"><h4>在末章之后新建章节</h4><p>旧章节作为只读导入正文保留版本与来源；新章走织书台现有写作流程，失败可原样重试。</p></div>
+              <div class="flow">
+                <div class="flow-item"><i>01</i><b>新建作品</b><small>不覆盖原作与改编稿</small></div>
+                <div class="flow-item"><i>02</i><b>导入 157 章</b><small>逐章写入来源与版本</small></div>
+                <div class="flow-item"><i>03</i><b>末章 = 157</b><small>接续点写进作品元数据</small></div>
+                <div class="flow-item"><i>04</i><b>建第 158 章</b><small>带已确认的四项摘要</small></div>
+                <div class="flow-item"><i>05</i><b>生成 / 重试</b><small>失败不重跑导入</small></div>
+              </div>
+              <div class="trace"><svg><use href="#i-shield"/></svg><b>来源字段</b><span>source_book_id / source_manuscript_id / source_chapter_no / imported_at / source_kind（原文 | 改编稿）；每章保留自己的版本记录。</span></div>
+              <div class="callout"><svg><use href="#i-check"/></svg><div><b>验收口径：</b>能选对稿件和末章 · 能在末章后建章 · 旧章节不被改写 · 生成失败可重试 · 导入章节来源可追溯 · 多章导入后角色关系与剧情状态足以支持续写。长篇质量不靠单测证明，另做小样本人工验收。</div></div>
+            </div>
+          </div>
+          <div class="wiz-foot">
+            <span class="hintx" id="wizHint">第 1 / 5 步 · 选作品</span>
+            <button class="btn tiny" id="wizPrev" disabled>上一步</button>
+            <button class="btn tiny primary" id="wizNext">下一步<svg><use href="#i-arrow"/></svg></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════ 场景 5：方案说明 ══════════ -->
+      <section class="scene" data-scene-panel="spec">
+        <div class="spec"><div class="spec-in">
+          <div><span class="spec-tag">设计预览 · 未改产品代码</span><h2 style="margin-top:6px">先修数据完整性，再做「从已有小说末尾开新章续写」</h2><p>续写放在织书台，不塞进拆书匠。织书台现有的「续写」只接当前章节往下写，新入口另起一条路径，两者在菜单里写明落点，避免点错位置。</p></div>
+
+          <div class="callout"><svg><use href="#i-info"/></svg><div><b>本轮范围：</b>三项数据完整性修复 + 选稿导入 / 末章后开新章 / 人工确认剧情摘要与大纲。<b>不做：</b>从原始 TXT 恢复丢失章节（排在这三项之后）、不自动重构全书设定与伏笔。</div></div>
+
+          <div class="card"><h3>一 · 先修的三项（续写的前置条件）</h3>
+            <table class="tbl" style="margin-top:9px"><thead><tr><th style="width:22%">问题</th><th style="width:39%">现状</th><th style="width:39%">要求</th></tr></thead><tbody>
+              <tr><td>导出坏章静默漏章</td><td>章节读不出来就跳过，仍返回导出结果；稿件卡片已有 broken 标记但导出链没用上。</td><td>导出前预检；一旦有缺失章，返回明确章号与原因并<b>停止导出</b>，不产生残本。导入共用同一套预检。</td></tr>
+              <tr><td>删版本后指针不同步</td><td>大纲 / 剧本版本删除后，当前指针、页面显示、后续生成、导出可能各读各的。</td><td>删除与指针重算在同一事务内；落到剩余最新版本或空；四处统一读同一个裁决点。</td></tr>
+              <tr><td>批量删除中途失败</td><td>可能删掉前几项才失败，界面看起来像全成或全败。</td><td>二选一：整体事务可回滚；或逐项返回 succeeded / failed 明细，界面按行反馈，并明确「部分成功 N / M」。</td></tr>
+            </tbody></table>
+          </div>
+
+          <div class="spec-grid">
+            <div class="card"><h3>二 · 续写边界（第一轮）</h3><ul>
+              <li>入口：织书台「从已有小说续写」，从拆书匠选<b>作品 → 章节 → 稿件版本</b>。</li>
+              <li>导入为织书台<b>新作品</b>；原作品与全部改编稿保留，不覆盖、不回写。</li>
+              <li><b>稿件来源必须明确选</b>：原文 / 指定改编稿，二选一，不自动挑默认；选改编稿时显示分叉章数与坏章。</li>
+              <li>用户确认<b>人物、关系、剧情现状、后续大纲</b>后再动手，不自动重构设定与伏笔。</li>
+              <li>在<b>末章之后</b>新建章节，走织书台现有写作流程；生成失败保留摘要与骨架，可原样重试。</li>
+              <li>旧章节为只读导入正文，保留各自版本；每章写 source_book_id / source_manuscript_id / source_chapter_no / imported_at / source_kind。</li>
+            </ul></div>
+            <div class="card"><h3>三 · UI 重设计</h3><ul>
+              <li><b>右侧 280px 常驻栏取消</b>：它现在是「说明与状态」静态信息，不是导航。改为按需抽屉 + 44px 图标条，把宽度还给工作区。</li>
+              <li><b>顶部三行压两行</b>：页头（标题 + 可收缩状态 + 主操作 + 更多）、阶段条（带序号可横滑）；桌面不再单独放「分档」条。</li>
+              <li><b>手机底部 3 tab</b>：目录 / 编辑 / 上下文，替代「分档切换 + 右栏」；带安全区内边距。</li>
+              <li><b>条目契约</b>：min-width:0 贯穿、标题单行省略、元数据第二行、操作收进 …、路径与报错可断行、长书名不重复套《》。</li>
+              <li><b>体检</b>：320 / 360 / 393 / 412 逐元素几何判据，亮暗两主题 × 各阶段扫描；允许横滑的步骤条标记豁免。</li>
+            </ul></div>
+          </div>
+
+          <div class="card"><h3>四 · 验收清单</h3>
+            <table class="tbl" style="margin-top:9px"><thead><tr><th style="width:34%">项</th><th style="width:33%">自动化能证明</th><th style="width:33%">需人工</th></tr></thead><tbody>
+              <tr><td>选对稿件与末章</td><td>选原文 / 改编稿各自落到正确章号与接续点</td><td>—</td></tr>
+              <tr><td>末章后建章</td><td>新章序号 = 末章 + 1，位置在末章之后</td><td>—</td></tr>
+              <tr><td>旧章节不被改写</td><td>导入前后旧章正文与版本哈希一致、只读标记存在</td><td>—</td></tr>
+              <tr><td>生成失败可重试</td><td>失败后摘要 / 骨架保留，重试不重跑导入</td><td>—</td></tr>
+              <tr><td>来源可追溯</td><td>每章来源字段完整，指向原作品与稿件</td><td>—</td></tr>
+              <tr><td>多章覆盖度</td><td>角色关系与剧情状态的覆盖度提示能算出</td><td>是否足以支撑续写，需人判断</td></tr>
+              <tr><td>长篇连贯质量</td><td>单测无法证明</td><td>另做小样本真模型人工验收</td></tr>
+            </tbody></table>
+          </div>
+
+          <div class="card"><h3>五 · 与现有实现的对应</h3><p>右栏内容（public/index.html:1140-1178 拆书匠「预览与下一步」、1673-1700 织书台「说明与状态」）不删除，整体搬进按需抽屉；页头 4–5 个按钮收进「更多」；阶段条与手机分档合并为顶部步骤 + 底部 tab。条目契约对应 .novel-chapter-row / .novel-manuscript-card / .writer-chapter-row / 版本行 / 管理记录行五类。溢出根因与几何判据沿用 2026-11-03 修复计划的结论。</p></div>
+
+          <div class="callout"><svg><use href="#i-shield"/></svg><div><b>状态：</b>本文件只是视觉与设计预览，未修改 public/ 或 naiba/ 下任何产品代码。等你确认方案并说「开工」，再按「三项修复 → 导入向导 → UI 落地」的顺序改代码。</div></div>
+        </div></div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var body=document.body, html=document.documentElement, device=document.getElementById("device"), screen=document.getElementById("screen");
+  var VP={320:"mobile",360:"mobile",393:"mobile",412:"mobile",768:"tablet",1440:"desktop"};
+
+  function on(root,sel,ev,fn){root.querySelectorAll(sel).forEach(function(el){el.addEventListener(ev,fn)})}
+  function q(s,r){return (r||document).querySelector(s)}
+  function qa(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))}
+
+  /* ---- 视口 / 主题 / 场景 ---- */
+  function setVp(v){
+    body.dataset.vp=v; device.dataset.kind=VP[v]||"desktop";
+    var stage=q(".pv-stage"), pad=v>=1100?24:(v>=760?18:12);
+    var avail=Math.max(280,(stage?stage.clientWidth:1200)-pad*2);
+    var w=Math.min(v,avail); device.style.width=w+"px";
+    if(v>=760) device.style.height="min(100%,860px)";
+    else device.style.height="min(100%,820px)";
+    qa("#segVp button").forEach(function(b){b.classList.toggle("on",b.dataset.vp===String(v))});
+    var c=q("#ovVpChip"); if(c)c.textContent=v+" px";
+    requestAnimationFrame(runCheck);
+  }
+  function setTheme(t){html.dataset.theme=t;qa("#segTheme button").forEach(function(b){b.classList.toggle("on",b.dataset.theme===t)})}
+  function setScene(s){
+    body.dataset.scene=s;
+    qa("[data-scene-panel]").forEach(function(p){p.classList.toggle("on",p.dataset.scenePanel===s)});
+    qa("#segScene button").forEach(function(b){b.classList.toggle("on",b.dataset.scene===s)});
+    requestAnimationFrame(runCheck);
+  }
+  function setTone(t){
+    body.dataset.tone=t; device.dataset.tone=t;
+    qa("#segTone button").forEach(function(b){b.classList.toggle("on",b.dataset.tone===t)});
+    /* 改造前：产品场景还原三栏常驻右栏 + 分档条 + 不可收缩条目，体检应能报红 */
+    requestAnimationFrame(runCheck);
+  }
+  on(document,"#segVp button","click",function(){setVp(Number(this.dataset.vp))});
+  on(document,"#segTheme button","click",function(){setTheme(this.dataset.theme)});
+  on(document,"#segScene button","click",function(){setScene(this.dataset.scene)});
+  on(document,"#segTone button","click",function(){setTone(this.dataset.tone)});
+
+  /* ---- 溢出体检：逐元素真实几何，跳过允许横滑的容器 ---- */
+  function inScrollable(el){
+    var p=el.parentElement;
+    while(p&&p!==screen){
+      if(p.hasAttribute&&p.hasAttribute("data-allow-scroll")) return true;
+      p=p.parentElement;
+    }
+    return false;
+  }
+  function label(el){
+    var cls=(el.className&&typeof el.className==="string")?el.className.split(/\s+/).filter(function(x){return x&&x.indexOf("ov-")!==0}).slice(0,2).join("."):"";
+    var txt=(el.textContent||"").trim().replace(/\s+/g," ").slice(0,28);
+    return (el.tagName.toLowerCase()+(cls?"."+cls:""))+(txt?" 「"+txt+"…」":"");
+  }
+  function runCheck(){
+    var scene=q(".scene.on"); if(!scene)return;
+    var b=screen.getBoundingClientRect(), found=[];
+    qa(".ov-bad").forEach(function(e){e.classList.remove("ov-bad")});
+    /* 关闭态与过渡中的抽屉都在屏外，属设计内离屏状态；完全展开（transform:none）后才纳入体检 */
+    var skipDrawers=qa(".ctx-drawer",scene).filter(function(d){
+      return !d.classList.contains("open")||getComputedStyle(d).transform!=="none";
+    });
+    qa("*",scene).forEach(function(el){
+      if(el===scene||el.closest(".wiz-steps")||el.closest("[data-allow-scroll]"))return;
+      if(skipDrawers.some(function(d){return d.contains(el)}))return;
+      var cs=getComputedStyle(el);
+      if(cs.display==="none"||cs.visibility==="hidden"||cs.position==="fixed")return;
+      if(el.getClientRects().length===0)return;
+      if(inScrollable(el))return;
+      var r=el.getBoundingClientRect();
+      if(r.width===0&&r.height===0)return;
+      var over=Math.max(r.right-b.right, b.left-r.left);
+      if(over>0.8){found.push({el:el,px:Math.round(over),name:label(el)});el.classList.add("ov-bad")}
+    });
+    found.sort(function(a,b2){return b2.px-a.px});
+    var inOv=scene.dataset.scenePanel==="overflow", legacyN=0, proposalN=0;
+    found.forEach(function(f){
+      if(f.el.closest(".ov-canvas.legacy"))legacyN++;
+      else if(f.el.closest(".ov-canvas.fix"))proposalN++;
+      else proposalN++;
+    });
+    var shown=inOv?proposalN:found.length;
+    var chk=q("#ovCheck"), big=q("#ovBig"), txt=q("#ovTxt"), list=q("#ovList");
+    chk.dataset.bad=shown?"1":"0";
+    q("#ovCheckText").textContent=inOv
+      ? "体检：改造前 "+legacyN+" 处 → 提案 "+shown+" 处"
+      : "体检："+shown+" 处溢出";
+    if(big){big.textContent=shown;big.classList.toggle("bad",shown>0)}
+    if(txt){
+      txt.innerHTML=inOv
+        ? "<b>改造前列 "+legacyN+" 处越界，提案列 "+shown+" 处</b>（红框标出）。来源是长书名状态串、不可断的长元数据与不换行按钮组；判据为逐元素 getBoundingClientRect()，不是 documentElement.scrollWidth。"
+        : (shown
+          ? "<b>检出 "+shown+" 处横向溢出</b>（红框标出）。切到「提案」可看同类条目的收敛效果；改视口宽度会实时重跑体检。"
+          : "<b>0 处溢出</b>：当前场景所有条目都落在屏幕边界内。判据是逐元素 getBoundingClientRect()，不是 documentElement.scrollWidth（手机 overflow-x:hidden 会让它恒真）。");
+    }
+    if(list){
+      list.innerHTML="";
+      var report=inOv?found.filter(function(f){return !f.el.closest(".ov-canvas.legacy")}):found;
+      if(!report.length){var ok=document.createElement("div");ok.className="ov-item";ok.innerHTML='<span class="n" style="color:var(--success)">OK</span><span class="d">提案侧没有条目越界（改造前的 '+legacyN+' 处已单独计入上方数字）</span><span class="px">0 px</span>';list.appendChild(ok)}
+      report.slice(0,8).forEach(function(f){var d=document.createElement("div");d.className="ov-item";d.innerHTML='<span class="n">越界</span><span class="d"></span><span class="px">+'+f.px+' px</span>';q(".d",d).textContent=f.name;list.appendChild(d)});
+      if(report.length>8){var m=document.createElement("div");m.className="hint";m.textContent="另有 "+(report.length-8)+" 处，已用红框在预览中标出。";list.appendChild(m)}
+    }
+  }
+  q("#btnRecheck").addEventListener("click",runCheck);
+  window.addEventListener("resize",function(){var v=Number(body.dataset.vp);setVp(v)});
+
+  /* ---- 抽屉 / 底部 tab ---- */
+  function bindDrawer(railId,drawerId,moreId,tabId,tocId,workId){
+    var d=q("#"+drawerId);
+    function reopen(){setTimeout(runCheck,230)} /* 等 180ms 过渡走完再复检，避免抓到中间态 */
+    function open(){d.classList.add("open");reopen()}
+    function close(){d.classList.remove("open");reopen()}
+    if(railId&&q("#"+railId))q("#"+railId).addEventListener("click",function(){d.classList.toggle("open");reopen()});
+    if(moreId&&q("#"+moreId))q("#"+moreId).addEventListener("click",open);
+    on(d,"[data-close]","click",close);
+    if(tabId){
+      on(q("#"+tabId),"button","click",function(){
+        var m=this.dataset.m;
+        qa("#"+tabId+" button").forEach(function(b){b.classList.toggle("on",b===this)}.bind(this));
+        if(m==="ctx"){open();return}else close();
+        q("#"+tocId).classList.toggle("m-show",m==="toc");
+        q("#"+workId).classList.toggle("m-show",m==="work");
+        requestAnimationFrame(runCheck);
+      });
+    }
+  }
+  bindDrawer("railNovel","drawerNovel","btnNovelMore","tabNovel","novelToc","novelWork");
+  bindDrawer("railWriter","drawerWriter","btnWriterMore","tabWriter","writerToc","writerWork");
+
+  /* ---- 续写向导 ---- */
+  var step=1, total=5;
+  var HINTS=["第 1 / 5 步 · 选作品","第 2 / 5 步 · 选稿件（原文 / 改编稿，必须明确选）","第 3 / 5 步 · 选末章（坏章会拦下）","第 4 / 5 步 · 人工确认剧情现状与后续大纲","第 5 / 5 步 · 末章后开新章"];
+  function setStep(n){
+    step=Math.max(1,Math.min(total,n));
+    qa("[data-wp]").forEach(function(p){p.classList.toggle("on",Number(p.dataset.wp)===step)});
+    qa("[data-ws]").forEach(function(s){var i=Number(s.dataset.ws);s.classList.toggle("on",i===step);s.classList.toggle("done",i<step)});
+    q("#wizHint").textContent=HINTS[step-1];
+    q("#wizPrev").disabled=step===1;
+    q("#wizNext").innerHTML=step===total?'完成导入 <svg><use href="#i-check"/></svg>':'下一步 <svg><use href="#i-arrow"/></svg>';
+    requestAnimationFrame(runCheck);
+  }
+  q("#wizPrev").addEventListener("click",function(){setStep(step-1)});
+  q("#wizNext").addEventListener("click",function(){if(step<total)setStep(step+1);else{q("#wizHint").textContent="已按方案建好第 158 章（预览态，不写数据）"}});
+  on(document,"[data-ws]","click",function(){setStep(Number(this.dataset.ws))});
+  on(document,"[data-pick]","click",function(){
+    var g=this.dataset.pick;
+    qa('[data-pick="'+g+'"]').forEach(function(c){c.classList.remove("on")});
+    this.classList.add("on");
+  });
+  q("#btnWizClose").addEventListener("click",function(){setScene("writer")});
+  ["btnNovelToWriter","btnWriterImportNovel","btnWriterContinue"].forEach(function(id){
+    var el=q("#"+id); if(el)el.addEventListener("click",function(){setScene("continue");setStep(1)});
+  });
+  var retryBtn=q("#btnWriterRetry");
+  if(retryBtn)retryBtn.addEventListener("click",function(){
+    var old=this.innerHTML, self=this;
+    this.innerHTML='<svg><use href="#i-check"/></svg>可原样重试';
+    setTimeout(function(){self.innerHTML=old},2000);
+  });
+
+  /* ---- 初始 ---- */
+  setVp(393);setTheme("light");setScene("overflow");setTone("proposal");setStep(1);
+  setTimeout(runCheck,120);
+})();
+</script>
+</body>
+</html>

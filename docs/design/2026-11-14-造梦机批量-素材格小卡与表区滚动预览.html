@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>造梦机批量 · 素材格与表区滚动预览</title>
+<style>
+  :root{
+    --bg:#0f1219; --panel:#151a24; --panel-2:#1b2130; --inset:#11161f;
+    --line:#252c3b; --line-2:#3a4459;
+    --text:#e7e9f1; --muted:#8e97aa;
+    --accent:#7c6cff; --accent-soft:rgba(124,108,255,.16);
+    --warn:#d9a441; --danger:#e06c75;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font:13px/1.5 "Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  }
+  button{font:inherit;color:inherit;cursor:pointer}
+  input,select,textarea{
+    font:inherit;color:var(--text);background:var(--panel-2);
+    border:1px solid var(--line-2);border-radius:6px;padding:5px 8px;
+  }
+
+  .topbar{
+    height:54px;display:flex;align-items:center;gap:10px;padding:0 16px;
+    border-bottom:1px solid var(--line);background:var(--panel);
+  }
+  .brand{font-weight:600;font-size:14px;margin-right:6px}
+  .tabs{display:flex;gap:4px}
+  .tabs span{padding:5px 12px;border-radius:7px;color:var(--muted);font-size:13px}
+  .tabs .on{background:var(--accent-soft);color:#c9c2ff}
+  .switch{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .switch button{
+    background:transparent;border:1px solid var(--line-2);border-radius:7px;
+    padding:5px 11px;color:var(--muted);
+  }
+  .switch button.on{border-color:var(--accent);background:var(--accent-soft);color:#cfc9ff;font-weight:600}
+  .mode-note{font-size:12px;color:var(--muted);margin-left:2px}
+
+  .page{height:calc(100vh - 54px);overflow:auto;padding:12px 16px 40px}
+  .scheme{
+    width:100%;max-width:1180px;margin:0 auto;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    overflow:hidden;
+  }
+  body[data-mode="b"] .scheme{max-width:none;width:1460px;margin:0 0 0 2px}
+
+  .scheme-head{
+    display:flex;align-items:center;gap:8px;padding:10px 14px;
+    border-bottom:1px solid var(--line);flex-wrap:wrap;
+  }
+  .scheme-head strong{font-size:13px}
+  .scheme-head select{max-width:320px}
+  .head-actions{margin-left:auto;display:flex;gap:6px}
+  .ghost{background:transparent;border:1px solid var(--line-2);border-radius:6px;padding:3px 9px;font-size:12px;color:var(--muted)}
+
+  .mapping{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:12px 14px 4px}
+  .mapping label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
+  .mapping select{width:100%}
+  .hint{margin:0;padding:4px 14px 8px;font-size:12px;line-height:1.6;color:var(--muted)}
+
+  .ports{padding:0 14px 4px;display:flex;flex-direction:column;gap:5px}
+  .port{
+    display:flex;align-items:center;gap:8px;font-size:12.5px;
+    background:var(--inset);border:1px solid var(--line);border-radius:8px;padding:6px 10px;
+  }
+  .port .no{font-weight:600;color:#b7aeff;min-width:38px}
+  .port select{flex:1;min-width:0;max-width:340px;font-size:12.5px}
+  .port .note{color:var(--muted);font-size:12px}
+
+  .fixedbar{
+    display:flex;align-items:center;gap:10px;padding:8px 14px;
+    border-top:1px dashed var(--line);font-size:12.5px;color:var(--muted);
+  }
+  .fixedbar .kv{background:var(--panel-2);border-radius:5px;padding:2px 8px;color:var(--text)}
+
+  /* ---- 条目表 ---- */
+  .table-wrap{border-top:1px solid var(--line)}
+  body[data-mode="a"] .table-wrap{overflow:auto;max-height:340px}
+  .items{border-collapse:collapse;width:100%;min-width:1320px;font-size:13px}
+  .items th{
+    font-weight:500;color:var(--muted);text-align:left;padding:8px 10px;
+    background:var(--panel-2);border-bottom:1px solid var(--line);white-space:nowrap;
+  }
+  body[data-mode="a"] .items thead th{position:sticky;top:0;z-index:3}
+  .items td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  .items tbody tr:last-child td{border-bottom:0}
+  .items input[type="text"],.items input[type="number"]{width:100%;min-width:56px}
+  .items textarea{width:100%;min-width:150px;resize:vertical;line-height:1.45}
+  .items .name{width:112px}
+  .items .media{width:124px}
+  .items .act{white-space:nowrap}
+  .items .act .ghost{margin:1px 2px 1px 0}
+
+  /* ---- 素材小卡 ---- */
+  .cell{position:relative}
+  .mtile{
+    position:relative;width:112px;height:64px;border:1px solid var(--line-2);
+    border-radius:7px;background:var(--inset);overflow:hidden;
+  }
+  .mtile:hover{border-color:var(--accent)}
+  .mtile .thumb{width:100%;height:100%;display:block}
+  .mtile .thumb img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
+  .mtile .thumb.audio{display:grid;place-items:center;background:linear-gradient(135deg,#2e6f74,#1d474d);color:#dff7f5;font-size:22px}
+  .mtile .skip{
+    position:absolute;top:3px;right:3px;width:20px;height:20px;padding:0;
+    border:1px solid rgba(255,255,255,.18);border-radius:5px;
+    background:rgba(17,21,34,.85);color:#fff;font-size:11px;line-height:1;
+  }
+  .mtile .skip:hover{background:var(--accent);border-color:var(--accent)}
+  .mtile .acts{position:absolute;top:27px;right:3px;display:none;gap:4px}
+  .mtile:hover .acts{display:flex}
+  .mtile .acts button{
+    width:21px;height:20px;padding:0;border:0;border-radius:5px;
+    background:rgba(17,21,34,.88);color:#fff;font-size:11px;line-height:1;
+  }
+  .mtile .acts button:hover{background:var(--accent)}
+  .mtile.empty,.mtile.kept{
+    display:flex;align-items:center;justify-content:center;padding:0 6px;
+    font-size:11.5px;color:var(--muted);text-align:center;
+  }
+  .mtile.empty{border-style:dashed}
+  .mtile.kept{border-style:solid;background:var(--panel-2);color:var(--text)}
+  .tip{
+    display:none;position:absolute;left:0;top:calc(100% + 5px);z-index:9;
+    width:max-content;max-width:340px;padding:5px 8px;border:1px solid var(--line-2);border-radius:6px;
+    background:#0a0d13;color:#fff;font-size:11.5px;line-height:1.45;
+    overflow-wrap:anywhere;box-shadow:0 8px 20px rgba(0,0,0,.45);
+  }
+  .mtile:hover + .tip{display:block}
+
+  .add-row{padding:8px 10px}
+  .add-item{
+    width:100%;border:1px dashed var(--line-2);background:transparent;
+    border-radius:8px;padding:7px 14px;font-size:13px;color:var(--muted);
+  }
+  .add-item:hover{color:#c9c2ff;border-color:var(--accent)}
+
+  /* ---- 参数接点 ---- */
+  .connections{margin:0 10px 10px;border:1px solid var(--line);border-radius:8px;background:var(--inset)}
+  .connections summary{
+    cursor:pointer;list-style:none;padding:8px 12px;font-size:12.5px;color:var(--muted);
+    display:flex;align-items:center;gap:7px;
+  }
+  .connections summary::-webkit-details-marker{display:none}
+  .connections summary::before{content:"▶";font-size:9px;color:var(--muted);transition:transform .15s}
+  .connections[open] summary::before{transform:rotate(90deg)}
+  .connections dl{margin:0;padding:2px 12px 12px;display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px}
+  .connections dt{font-size:12px;color:var(--text)}
+  .connections dd{margin:0;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+
+  .submitbar{max-width:1180px;margin:12px auto 0;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  body[data-mode="b"] .submitbar{max-width:none;width:1460px;margin-left:2px}
+  .primary{background:var(--accent);border:none;border-radius:8px;padding:8px 18px;color:#fff;font-weight:600}
+  .submitbar small{color:var(--muted);font-size:12px}
+
+  .lightbox{
+    position:fixed;inset:0;z-index:99;display:flex;align-items:center;justify-content:center;
+    background:rgba(4,6,10,.88);cursor:zoom-out;padding:24px;
+  }
+  .lightbox[hidden]{display:none}
+  .lightbox img{
+    width:auto;height:auto;max-width:calc(100vw - 48px);max-height:calc(100vh - 48px);
+    object-fit:contain;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.6);
+  }
+</style>
+</head>
+<body data-mode="a">
+  <header class="topbar">
+    <span class="brand">造梦机</span>
+    <div class="tabs"><span>工作流</span><span>单次生成</span><span class="on">批量生成</span><span>结果</span></div>
+    <div class="switch">
+      <span>滚动方式</span>
+      <button type="button" data-mode-btn="a" class="on">表区自己滚</button>
+      <button type="button" data-mode-btn="b">整页横滚</button>
+      <span class="mode-note" id="modeNote">横向条贴在表区底边，表格原地左右滑</span>
+    </div>
+  </header>
+
+  <div class="page" id="page">
+    <section class="scheme">
+      <div class="scheme-head">
+        <strong>方案 1</strong>
+        <select aria-label="这个方案用哪份工作流">
+          <option>YZ金鱼-MiniMax_H3_终极篇-文武双全</option>
+        </select>
+        <div class="head-actions">
+          <button class="ghost" type="button">收起</button>
+          <button class="ghost" type="button">复制方案</button>
+          <button class="ghost" type="button">删除</button>
+        </div>
+      </div>
+
+      <div class="mapping">
+        <div><label>剧本/提示词写进</label><select><option>92 · Refreshable Text Box · locked_text → string_b</option></select></div>
+        <div><label>时长写进</label><select><option>不逐条改时长</option></select></div>
+        <div><label>分辨率写进</label><select><option>259 · Aspect Ratio Selector · width/height</option></select></div>
+      </div>
+      <p class="hint">没指认的参数按工作流保存值执行，不会出现在条目里。</p>
+
+      <div class="ports">
+        <div class="port"><input type="checkbox" checked aria-label="启用这个素材口"><span class="no">图 1</span><select><option>425 · 载入图片 · image → image</option></select><span class="note">图片 · 需选择文件</span></div>
+        <div class="port"><input type="checkbox" checked aria-label="启用这个素材口"><span class="no">音 1</span><select><option>14 · 载入音讯 · audio → ref_audios.ref_audio_1</option></select><span class="note">音频 · 沿用原文件</span></div>
+      </div>
+
+      <div class="fixedbar">固定参数（本方案每条相同）：<span class="kv">其余按工作流保存值</span><button class="ghost" type="button" style="margin-left:auto">展开固定参数</button></div>
+
+      <div class="table-wrap" id="tableWrap">
+        <table class="items">
+          <thead>
+            <tr>
+              <th>名称</th><th>图 1</th><th>音 1</th><th>剧本</th><th>提示词</th><th>时长</th><th>分辨率</th><th>条数</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="add-row"><button class="add-item" type="button">＋ 添加一条</button></div>
+
+      <details class="connections">
+        <summary>每个参数接到工作流的哪里</summary>
+        <dl>
+          <dt>剧本/提示词</dt><dd>92 · Refreshable Text Box · locked_text → string_b</dd>
+          <dt>图 1</dt><dd>425 · 载入图片 · image → image</dd>
+          <dt>音 1</dt><dd>14 · 载入音讯 · audio → ref_audios.ref_audio_1</dd>
+          <dt>时长</dt><dd>未指认，按工作流保存值</dd>
+          <dt>分辨率</dt><dd>259 · Aspect Ratio Selector · total_megapixels 输出 0 → width 输出 1 → height</dd>
+        </dl>
+      </details>
+    </section>
+
+    <div class="submitbar">
+      <button class="primary" type="button">开始批量生成</button>
+      <small>共 8 条，逐条出片。</small>
+    </div>
+  </div>
+
+  <div class="lightbox" id="lightbox" hidden><img id="lightboxImg" alt=""></div>
+
+<script>
+const U = '../../data/uploads/';
+const O = '../../data/comfyui/outputs/';
+const img1 = {
+  thumb: U + '2026-10-22/naiba_chat_1792679735_7d72ba__run_girl_catears_thumb.webp',
+  full: U + '2026-10-22/naiba_chat_1792679735_7d72ba__run_girl_catears.jpeg',
+  name: 'naiba_chat_1792679735_7d72ba__run_girl_catears.jpeg',
+};
+const img2 = {
+  thumb: U + '2026-10-24/naiba_chat_1792850842_758392__run_girl_catears_thumb.webp',
+  full: U + '2026-10-24/naiba_chat_1792850842_758392__run_girl_catears.jpeg',
+  name: 'naiba_chat_1792850842_758392__run_girl_catears.jpeg',
+};
+const img3 = {
+  thumb: O + 'cf-20261024-83229f8a021f/001_00_ComfyUI-moss-image_00004_.png',
+  full: O + 'cf-20261024-83229f8a021f/001_00_ComfyUI-moss-image_00004_.png',
+  name: 'naiba_chat_1794663485_6d50b2__run_girl_catears.jpeg',
+};
+const audioName = 'naiba_chat_1794663512_3f2a__voice.mp3';
+
+function imageTile(media) {
+  return `<div class="cell">
+    <div class="mtile">
+      <span class="thumb" data-full="${media.full}"><img src="${media.thumb}" alt=""></span>
+      <button class="skip" type="button" title="跳过这个输入">⊘</button>
+      <span class="acts"><button type="button" title="替换这个文件">⇄</button><button type="button" title="清除这个文件">✕</button></span>
+    </div>
+    <span class="tip">${media.name}</span>
+  </div>`;
+}
+function audioTile(name) {
+  return `<div class="cell">
+    <div class="mtile">
+      <span class="thumb audio">♪</span>
+      <button class="skip" type="button" title="跳过这个输入">⊘</button>
+      <span class="acts"><button type="button" title="替换这个文件">⇄</button><button type="button" title="清除这个文件">✕</button></span>
+    </div>
+    <span class="tip">${name}</span>
+  </div>`;
+}
+function emptyTile(label) {
+  return `<div class="cell"><div class="mtile empty"><span>${label}</span><button class="skip" type="button" title="跳过这个输入">⊘</button></div></div>`;
+}
+function keptTile() {
+  return `<div class="cell"><div class="mtile kept"><span>沿用原文件</span><button class="skip" type="button" title="跳过这个输入">⊘</button></div></div>`;
+}
+
+const rows = [
+  { name: '条目 1', img: imageTile(img1), audio: audioTile(audioName), script: '她坐在花丛里，抬头看镜头，轻声说一句“你来了”。', prompt: '特写，柔和逆光，紫色花海，缓慢推近' },
+  { name: '条目 2', img: imageTile(img2), audio: keptTile(), script: '转身，裙摆带起花瓣，停在半侧脸。', prompt: '中景，跟拍，花瓣飘落，浅景深' },
+  { name: '条目 3', img: emptyTile('点选 / 拖入'), audio: keptTile(), script: '', prompt: '' },
+  { name: '条目 4', img: imageTile(img3), audio: emptyTile('点选 / 拖入'), script: '近景，手指拂过铃铛，金属轻响。', prompt: '近景，侧光，金属反光，轻微手持' },
+  { name: '条目 5', img: keptTile(), audio: keptTile(), script: '远景，人物站起，花海随风起伏。', prompt: '远景，固定机位，风，薄雾' },
+  { name: '条目 6', img: imageTile(img1), audio: keptTile(), script: '低头笑了一下，抬眼。', prompt: '特写，暖调，轻摇镜' },
+  { name: '条目 7', img: emptyTile('点选 / 拖入'), audio: keptTile(), script: '', prompt: '' },
+  { name: '条目 8', img: imageTile(img2), audio: keptTile(), script: '背对镜头走进花海，停下。', prompt: '全景，后拉，花海，夕阳' },
+];
+
+document.getElementById('rows').innerHTML = rows.map((row) => `
+  <tr>
+    <td class="name"><input type="text" value="${row.name}" aria-label="名称"></td>
+    <td class="media">${row.img}</td>
+    <td class="media">${row.audio}</td>
+    <td><textarea rows="2" aria-label="剧本">${row.script}</textarea></td>
+    <td><textarea rows="2" aria-label="提示词">${row.prompt}</textarea></td>
+    <td><input type="number" value="15" style="width:76px" aria-label="时长"></td>
+    <td><input type="text" value="按工作流" aria-label="分辨率"></td>
+    <td><input type="number" value="1" style="width:56px" aria-label="条数"></td>
+    <td class="act">
+      <button class="ghost" type="button">转换</button>
+      <button class="ghost" type="button">复制</button>
+      <button class="ghost" type="button">删除条目</button>
+    </td>
+  </tr>`).join('');
+
+const page = document.getElementById('page');
+const note = document.getElementById('modeNote');
+const notes = {
+  a: '横向条贴在表区底边，表格原地左右滑',
+  b: '横向条在窗口最底部，拖它整页左右平移',
+};
+document.querySelectorAll('[data-mode-btn]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const mode = button.dataset.modeBtn;
+    document.body.dataset.mode = mode;
+    document.querySelectorAll('[data-mode-btn]').forEach((node) => node.classList.toggle('on', node === button));
+    note.textContent = notes[mode];
+    page.scrollTo(0, 0);
+  });
+});
+
+const lightbox = document.getElementById('lightbox');
+const lightboxImg = document.getElementById('lightboxImg');
+document.addEventListener('click', (event) => {
+  const thumb = event.target.closest?.('.thumb[data-full]');
+  if (thumb) {
+    lightboxImg.src = thumb.dataset.full;
+    lightbox.hidden = false;
+    return;
+  }
+  if (event.target === lightbox) lightbox.hidden = true;
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') lightbox.hidden = true;
+});
+</script>
+</body>
+</html>

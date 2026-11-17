@@ -1,0 +1,545 @@
+diff --git a/naiba/app.py b/naiba/app.py
+index d4ef8db..6126d85 100644
+--- a/naiba/app.py
++++ b/naiba/app.py
+@@ -1599,6 +1599,11 @@ class NaibaChatApp:
+             profile, client = self._kvmem_client(provider_id)
+             status = client.readiness(str(profile.get("model") or ""))
+             status["provider_id"] = str(profile.get("id") or provider_id)
++            # 服务在跑时 draft 里有模型选择：顺手记下来，停止后还能从这里启动。
++            if status.get("status") in {"ready", "running"}:
++                from naiba.kvmem import last_start_path, write_last_start
++                write_last_start(last_start_path(self.paths.data_dir), client.manager_url,
++                                 client.last_draft_parameters)
+             return status, HTTPStatus.OK
+         except Exception as exc:  # noqa: BLE001 - adapter returns only safe text
+             return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+@@ -1623,10 +1628,16 @@ class NaibaChatApp:
+             before = client.status()
+             if before.get("status") in {"ready", "running"}:
+                 return {**before, "accepted": False, "message": "KVMem 服务已经在运行"}, HTTPStatus.OK
+-            result = client.start()
++            # 控制台停止后 draft 会丢掉模型选择：用上一次成功启动的参数补齐。
++            from naiba.kvmem import last_start_path, read_last_start, write_last_start
++            cache_path = last_start_path(self.paths.data_dir)
++            cached = read_last_start(cache_path).get(client.manager_url) or None
++            result = client.start(fallback=cached)
++            write_last_start(cache_path, client.manager_url, client.last_draft_parameters)
+             result["status"] = "starting"
+             result["summary"] = {
+-                "backend": before.get("backend"), "model": before.get("model"),
++                "backend": before.get("backend") or client.last_draft_parameters.get("Backend"),
++                "model": before.get("model") or client.last_draft_parameters.get("Model"),
+                 "engine_summary": before.get("engine_summary"), "actual_port": before.get("actual_port"),
+             }
+             return result, HTTPStatus.ACCEPTED
+diff --git a/naiba/kvmem.py b/naiba/kvmem.py
+index 6fbbc97..d688448 100644
+--- a/naiba/kvmem.py
++++ b/naiba/kvmem.py
+@@ -6,9 +6,11 @@ controller API，不扫描端口、不猜 PID、不终止外部进程。
+ from __future__ import annotations
+ 
+ import json
++import os
+ import urllib.error
+ import urllib.parse
+ import urllib.request
++from pathlib import Path
+ from typing import Any
+ 
+ from naiba import net as net_io
+@@ -16,6 +18,9 @@ from naiba import net as net_io
+ DEFAULT_MANAGER_URL = "http://127.0.0.1:18199"
+ DEFAULT_INFERENCE_URL = "http://127.0.0.1:18200/v1"
+ REQUEST_TIMEOUT = 3.0
++# 控制台停止后会把 draft 里的模型选择清空；这四个字段是重开服务必须的。
++FALLBACK_PARAMETER_KEYS = ("Backend", "Model", "Worker", "Gpu")
++LAST_START_FILENAME = "last-start.json"
+ 
+ 
+ class KVMemError(RuntimeError):
+@@ -57,6 +62,55 @@ def _nested(data: dict[str, Any], *keys: str) -> Any:
+     return None
+ 
+ 
++def last_start_path(data_dir: Any) -> Path:
++    return Path(data_dir) / "kvmem" / LAST_START_FILENAME
++
++
++def _pick_parameters(parameters: Any) -> dict[str, str]:
++    if not isinstance(parameters, dict):
++        return {}
++    return {
++        key: str(parameters.get(key) or "")
++        for key in FALLBACK_PARAMETER_KEYS
++        if str(parameters.get(key) or "").strip()
++    }
++
++
++def read_last_start(path: Any) -> dict[str, dict[str, str]]:
++    """读回每个控制台上一次成功启动用的参数；坏文件按「没有缓存」处理。"""
++    try:
++        data = json.loads(Path(path).read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return {}
++    if not isinstance(data, dict):
++        return {}
++    result: dict[str, dict[str, str]] = {}
++    for manager_url, parameters in data.items():
++        picked = _pick_parameters(parameters)
++        if picked.get("Model"):
++            result[str(manager_url)] = picked
++    return result
++
++
++def write_last_start(path: Any, manager_url: str, parameters: Any) -> None:
++    """记住这次成功启动的参数；写失败不影响启动本身。"""
++    picked = _pick_parameters(parameters)
++    if not manager_url or not picked.get("Model"):
++        return
++    target = Path(path)
++    try:
++        data = read_last_start(target)
++        if data.get(str(manager_url)) == picked:
++            return  # 状态轮询会反复走到这里：值没变就不再落盘。
++        data[str(manager_url)] = picked
++        target.parent.mkdir(parents=True, exist_ok=True)
++        temp = target.with_suffix(".tmp")
++        temp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
++        os.replace(temp, target)
++    except OSError:
++        return
++
++
+ class KVMemClient:
+     def __init__(self, manager_url: str, inference_url: str, *, timeout: float = REQUEST_TIMEOUT):
+         self.manager_url = validate_manager_url(manager_url)
+@@ -65,6 +119,8 @@ class KVMemClient:
+         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+             raise ValueError("KVMem 推理地址必须是 http/https URL")
+         self.timeout = max(0.5, min(float(timeout), 10.0))
++        # 最近一次从控制台读到的 draft 参数（含 Model）；成功启动后可写入本地缓存。
++        self.last_draft_parameters: dict[str, str] = {}
+ 
+     def _request(self, path: str, *, method: str = "GET", token: str = "", body: dict[str, Any] | None = None) -> dict[str, Any]:
+         url = f"{self.manager_url}{path}"
+@@ -121,6 +177,10 @@ class KVMemClient:
+         info = self._request("/api/launcher/info")
+         if not self._protocol_ok(info):
+             raise KVMemError("KVMem 控制台协议版本不兼容")
++        draft = info.get("draft")
++        parameters = draft.get("parameters") if isinstance(draft, dict) else None
++        if isinstance(parameters, dict):
++            self.last_draft_parameters = {str(key): str(value) for key, value in parameters.items()}
+         return info
+ 
+     def status(self) -> dict[str, Any]:
+@@ -160,7 +220,7 @@ class KVMemClient:
+             payload["error"] = "KVMem 实际推理端口与 Cat Chat 配置不一致"
+         return payload
+ 
+-    def start(self) -> dict[str, Any]:
++    def start(self, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+         info = self.info()
+         token = self._token(info)
+         if not token:
+@@ -170,12 +230,28 @@ class KVMemClient:
+         params = draft.get("parameters") if draft else None
+         if not isinstance(params, dict):
+             raise KVMemError("KVMem 控制台没有可用的启动配置")
++        # 控制台把模型选择存在自己网页的 localStorage 里，停止后 draft 会被清成
++        # Model=''；用 Cat Chat 上一次成功启动的参数补上，启动闭环不依赖再开控制台。
++        self.fill_missing_parameters(params, fallback)
++        self.last_draft_parameters = {str(key): str(value) for key, value in params.items()}
+         if not str(params.get("Model") or "").strip():
+-            raise KVMemError("KVMem 尚未选择模型，请先在控制台选择模型后再启动")
++            raise KVMemError("KVMem 尚未选择模型，请先在控制台选择模型后再启动（成功启动一次后 Cat Chat 会记住它）")
+         result = self._request("/api/launcher/start", method="POST", token=token, body=draft)
+         return {"ok": True, "accepted": True,
+                 "message": _text(_nested(result, "message", "status"), 240) or "已请求 KVMem 启动"}
+ 
++    @staticmethod
++    def fill_missing_parameters(params: dict[str, Any], fallback: dict[str, Any] | None) -> None:
++        """只补控制台丢掉的空字段，不覆盖它现有的选择。"""
++        if not isinstance(fallback, dict):
++            return
++        for key in FALLBACK_PARAMETER_KEYS:
++            if str(params.get(key) or "").strip():
++                continue
++            value = str(fallback.get(key) or "").strip()
++            if value:
++                params[key] = value
++
+     def stop(self) -> dict[str, Any]:
+         info = self.info()
+         token = self._token(info)
+diff --git a/public/index.html b/public/index.html
+index 2d0a9f1..44cc160 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -873,6 +873,13 @@
+                     </div>
+                   </details>
+                 </div>
++                <div class="comfyui-clear-bar" id="comfyuiClearBar" hidden>
++                  <span class="comfyui-clear-count" role="status">已选 0 条</span>
++                  <small class="comfyui-clear-note">勾选要删除的已结束任务；执行中的任务先取消再清除。</small>
++                  <button class="control-button tiny" id="comfyuiClearSelectAll" type="button" title="只勾选已加载的已结束任务，未加载的更早记录不会勾选">全选</button>
++                  <button class="control-button tiny" id="comfyuiClearDelete" type="button" disabled>删除所选</button>
++                  <button class="control-button tiny" id="comfyuiClearCancel" type="button">取消</button>
++                </div>
+                 <div class="comfyui-task-list" id="comfyuiTaskList" aria-label="任务列表"></div>
+                 <div class="comfyui-history-footer" id="comfyuiTaskHistoryFooter"><span role="status"></span><button type="button" class="control-button tiny" data-comfyui-history-more="tasks">加载更早记录</button></div>
+               </div>
+diff --git a/public/js/07-models-agents.js b/public/js/07-models-agents.js
+index 3d9b6cd..27bb702 100644
+--- a/public/js/07-models-agents.js
++++ b/public/js/07-models-agents.js
+@@ -1392,6 +1392,10 @@ export function applyConversationModel(conversation) {
+   select.value = target;
+   select.title = target && !profiles.some(p => p.model_key === target) ? '历史 API 已失效，请重新选择' : '当前会话的 API';
+   updateUnloadModelButton();
++  // 切会话会换掉当前模型：KVMem 控制的显隐与状态要跟着重算，否则切回 KVMem 会话时
++  // 顶栏图标还停在上一个会话隐藏的状态。
++  renderKvmemControl();
++  void refreshKvmemStatus({ quiet: true });
+   void populateComposerModels(String(conversation?.model_name || ''));
+ }
+ 
+diff --git a/public/js/24-comfyui.js b/public/js/24-comfyui.js
+index 5920548..ff7fae1 100644
+--- a/public/js/24-comfyui.js
++++ b/public/js/24-comfyui.js
+@@ -52,6 +52,9 @@ const comfyui = {
+   mediaGroupsCollapsed: {}, // 媒体分组卡折叠状态 {kind: true}；只存内存，不落盘、不进 visible_params
+   storyboardQueue: [],    // 拆书匠「分镜生图」发来的提示词；只存内存，刷新即清
+   resultsSegment: "single", // 结果页两档：single = 单次任务+产物；batch = 批次列表
++  clearMode: false,        // 单次结果「清除」：进入勾选模式，不再一键全删
++  clearSelection: new Set(), // 清除模式下勾选的任务 id
++  clearDeleting: false,    // 删除所选请求进行中
+ };
+ 
+ // ============================================================
+@@ -362,6 +365,7 @@ export function bindComfyuiEvents() {
+     } else {
+       // 离开造梦机页：再次生成草稿不跨页面保留。
+       if (comfyui.rerun || comfyui.rerunLoading) dropRerunDraft();
++      exitClearMode();
+       stopPolling();
+       stopBackgroundRefresh();
+       stopBatchPolling();
+@@ -378,7 +382,10 @@ export function bindComfyuiEvents() {
+   $("#comfyuiImportConfirm")?.addEventListener("click", () => void confirmImport());
+   $("#comfyuiImportFile")?.addEventListener("change", onImportFile);
+   $("#comfyuiSubmit")?.addEventListener("click", () => void submitTask());
+-  $("#comfyuiClearTasks")?.addEventListener("click", () => void clearFinishedTasks());
++  $("#comfyuiClearTasks")?.addEventListener("click", enterClearMode);
++  $("#comfyuiClearSelectAll")?.addEventListener("click", toggleClearSelectAll);
++  $("#comfyuiClearDelete")?.addEventListener("click", () => void deleteSelectedTasks());
++  $("#comfyuiClearCancel")?.addEventListener("click", exitClearMode);
+   $("#comfyuiFreeModels")?.addEventListener("click", () => void freeModels());
+   $("#comfyuiOpenOutputs")?.addEventListener("click", () => void openOutputsFolder());
+   $("#comfyuiParamsSave")?.addEventListener("click", () => void saveParamsConfig());
+@@ -420,6 +427,7 @@ export function bindComfyuiEvents() {
+     });
+   }
+   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
++  $("#comfyuiTaskList")?.addEventListener("change", onTaskClearToggle);
+   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
+   $("#studioPageComfyui")?.addEventListener("click", (event) => {
+     const button = event.target.closest?.("[data-comfyui-history-more]");
+@@ -492,6 +500,8 @@ function onPaneClick(event) {
+ function setComfyuiPane(pane) {
+   const root = $("#studioPageComfyui");
+   if (!root) return;
++  // 离开结果档就退出单次清除模式，勾选集不跨档位留着。
++  if (pane !== "tasks") exitClearMode();
+   // 离开生成表单就丢弃再次生成草稿；旧任务快照不跨档位复用到别的表单。
+   if (pane !== "run" && (comfyui.rerun || comfyui.rerunLoading)) dropRerunDraft();
+   root.dataset.comfyuiPane = pane;
+@@ -517,6 +527,7 @@ function setComfyuiPane(pane) {
+ // CSS 显隐，与 data-comfyui-pane 同一套口径。
+ function setComfyuiResultsSegment(seg) {
+   comfyui.resultsSegment = seg === "batch" ? "batch" : "single";
++  if (comfyui.resultsSegment === "batch") exitClearMode();
+   const root = $("#studioPageComfyui");
+   if (root) root.dataset.resultsSegment = comfyui.resultsSegment;
+   document.querySelectorAll("#comfyuiResultsSeg [data-comfyui-results-seg]").forEach((node) => {
+@@ -3364,6 +3375,7 @@ function taskFingerprint(row) {
+     (row.result?.outputs || []).length,
+     Number(row.created_at || 0), Number(row.finished_at || 0),
+     Boolean(row.can_retry), Boolean(row.can_cancel),
++    comfyui.clearMode ? (comfyui.clearSelection.has(String(row.id || "")) ? "selected" : "clear") : "idle",
+     comfyui.deleting.has(String(row.id || "")) ? "deleting" : "",
+   ]);
+ }
+@@ -3428,6 +3440,14 @@ function renderTasks() {
+   const list = $("#comfyuiTaskList");
+   if (!list) return;
+   updateStepMeter();
++  if (comfyui.clearMode) {
++    // 轮询/分页会换掉列表内容：勾选集只保留仍在列表里的可清除任务。
++    const allowed = new Set(clearableTaskIds());
++    for (const id of [...comfyui.clearSelection]) {
++      if (!allowed.has(id)) comfyui.clearSelection.delete(id);
++    }
++    renderClearBar();
++  }
+   const rows = comfyui.tasks.filter((row) => !isBatchTaskRow(row));
+   historyViewport("#comfyuiTaskList", {
+     key: (row) => row.id, fingerprint: taskFingerprint, render: renderTaskCard,
+@@ -3452,6 +3472,23 @@ function renderTaskCard(row) {
+   const card = document.createElement("div");
+   card.className = `comfyui-task-card status-${row.status}`;
+   card.dataset.taskId = row.id;
++  // 清除模式：执行中的任务不出勾选框（要清得先取消），已结束的才可勾。
++  if (comfyui.clearMode && !isTaskActive(row)) {
++    const selected = comfyui.clearSelection.has(String(row.id || ""));
++    card.classList.add("is-clear");
++    card.classList.toggle("is-selected", selected);
++    const pick = document.createElement("label");
++    pick.className = "comfyui-task-select";
++    pick.title = "勾选这条任务，配合「删除所选」一起清除";
++    const box = document.createElement("input");
++    box.type = "checkbox";
++    box.dataset.comfyuiTaskCheck = row.id;
++    box.checked = selected;
++    const text = document.createElement("span");
++    text.textContent = "选择";
++    pick.append(box, text);
++    card.append(pick);
++  }
+   const head = document.createElement("div");
+   head.className = "comfyui-task-head";
+   const name = document.createElement("strong");
+@@ -3674,24 +3711,117 @@ async function openOutputsFolder() {
+   }
+ }
+ 
+-async function clearFinishedTasks() {
+-  if (!window.confirm("删除全部已结束的单次任务和它们的产物文件？批量产物请到「批量」档里按批次删。")) return;
++// ---- 单次结果清除模式：逐条勾选，不再一键全删 ----
++
++// 可清除 = 已结束的单次任务（批量条目在「批量」档里按批次删，不在这里动）。
++function clearableTaskRows() {
++  return comfyui.tasks.filter((row) => !isBatchTaskRow(row) && !isTaskActive(row));
++}
++
++function clearableTaskIds() {
++  return clearableTaskRows().map((row) => String(row.id));
++}
++
++function renderClearBar() {
++  const bar = $("#comfyuiClearBar");
++  if (!bar) return;
++  bar.hidden = !comfyui.clearMode;
++  if (!comfyui.clearMode) return;
++  const ids = clearableTaskIds();
++  const selected = ids.filter((id) => comfyui.clearSelection.has(id)).length;
++  const count = bar.querySelector(".comfyui-clear-count");
++  if (count) count.textContent = `已选 ${selected} / ${ids.length} 条`;
++  const selectAll = $("#comfyuiClearSelectAll");
++  if (selectAll) {
++    const all = ids.length > 0 && selected === ids.length;
++    selectAll.textContent = all ? "取消全选" : "全选";
++    selectAll.disabled = !ids.length || comfyui.clearDeleting;
++  }
++  const remove = $("#comfyuiClearDelete");
++  if (remove) {
++    remove.disabled = comfyui.clearDeleting || !selected;
++    remove.textContent = comfyui.clearDeleting ? "正在删除…" : selected ? `删除所选（${selected}）` : "删除所选";
++  }
++  const cancel = $("#comfyuiClearCancel");
++  if (cancel) cancel.disabled = comfyui.clearDeleting;
++}
++
++function enterClearMode() {
++  if (comfyui.clearMode) return;
++  if (!clearableTaskIds().length) {
++    toast("没有可清除的任务；执行中的任务请先取消");
++    return;
++  }
++  comfyui.clearMode = true;
++  comfyui.clearSelection = new Set();
++  $("#comfyuiTasksSection details.comfyui-tasks-actions")?.removeAttribute("open");
++  renderClearBar();
++  renderTasks();
++}
++
++function exitClearMode() {
++  if (!comfyui.clearMode && !comfyui.clearSelection.size) return;
++  comfyui.clearMode = false;
++  comfyui.clearSelection = new Set();
++  comfyui.clearDeleting = false;
++  renderClearBar();
++  renderTasks();
++}
++
++function toggleClearSelectAll() {
++  const ids = clearableTaskIds();
++  if (!ids.length) return;
++  const all = ids.every((id) => comfyui.clearSelection.has(id));
++  comfyui.clearSelection = new Set(all ? [] : ids);
++  renderClearBar();
++  renderTasks();
++}
++
++function onTaskClearToggle(event) {
++  const box = event.target.closest?.("[data-comfyui-task-check]");
++  if (!box || !comfyui.clearMode) return;
++  const id = String(box.dataset.comfyuiTaskCheck || "");
++  if (!id) return;
++  if (box.checked) comfyui.clearSelection.add(id);
++  else comfyui.clearSelection.delete(id);
++  box.closest(".comfyui-task-card")?.classList.toggle("is-selected", box.checked);
++  renderClearBar();
++}
++
++async function deleteSelectedTasks() {
++  if (comfyui.clearDeleting) return;
++  const ids = [...comfyui.clearSelection];
++  if (!ids.length) return;
++  if (!window.confirm(`删除所选的 ${ids.length} 条任务和它们的产物文件？批量产物不在这里删。`)) return;
++  comfyui.clearDeleting = true;
++  renderClearBar();
++  renderTasks();
+   try {
+     // exclude_batch：单次档看不见批量条目，就不能在这里把它们一起删掉。
+     const payload = await api("/api/comfyui/tasks", {
+       method: "DELETE",
+-      body: { exclude_batch: true },
++      body: { task_ids: ids, cancel_active: false, exclude_batch: true },
+     });
+-    const parts = [`已删除 ${payload.deleted || 0} 条任务`];
+-    if (payload.skipped?.length) parts.push(`${payload.skipped.length} 条正在执行，已跳过`);
+     const failed = Array.isArray(payload.failed) ? payload.failed : [];
++    const skipped = Array.isArray(payload.skipped) ? payload.skipped.map(String) : [];
++    const kept = new Set([...skipped, ...failed.map((row) => String(row.id))]);
++    forgetHistoryRows("tasks", ids.filter((id) => !kept.has(id)));
++    comfyui.clearSelection = new Set(ids.filter((id) => kept.has(id)));
++    const parts = [`已删除 ${payload.deleted || 0} 条任务`];
++    if (skipped.length) parts.push(`${skipped.length} 条正在执行，已跳过`);
+     if (failed.length) parts.push(`${failed.length} 条删除失败：${failed[0]?.reason || ""}`);
+-    const kept = new Set([...(payload.skipped || []).map(String), ...failed.map((row) => String(row.id))]);
+-    forgetHistoryRows("tasks", comfyui.tasks.filter((row) => !isTaskActive(row) && !kept.has(String(row.id))).map((row) => row.id));
+     toast(parts.join("；"));
+     await refreshTasks();
++    if (!clearableTaskIds().length) exitClearMode();
++    else {
++      renderClearBar();
++      renderTasks();
++    }
+   } catch (error) {
+     toast(`删除失败：${error.message}`);
++  } finally {
++    comfyui.clearDeleting = false;
++    renderClearBar();
+   }
+ }
+ 
+diff --git a/public/styles.css b/public/styles.css
+index d53983c..8233f0b 100644
+--- a/public/styles.css
++++ b/public/styles.css
+@@ -4865,6 +4865,17 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
+ .comfyui-shots-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+ .comfyui-shots-field input { width: 72px; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 4px 8px; }
+ .comfyui-tasks { flex: none; max-height: 46%; display: flex; flex-direction: column; border-bottom: 1px solid var(--line); }
++/* 单次结果清除模式的选择栏：勾选后方可用「删除所选」，不再一键全删。 */
++.comfyui-clear-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
++.comfyui-clear-bar[hidden] { display: none; }
++.comfyui-clear-count { font-size: 12px; font-weight: 600; }
++.comfyui-clear-note { flex: 1 1 160px; font-size: 11px; line-height: 1.5; color: var(--muted); }
++.comfyui-clear-bar .control-button { margin-left: auto; }
++.comfyui-clear-bar .control-button ~ .control-button { margin-left: 0; }
++/* 44px 触摸命中区；勾选框和说明都算点选范围。 */
++.comfyui-task-select { display: flex; align-items: center; gap: 6px; min-height: 44px; margin: -6px 0 -4px; font-size: 12px; color: var(--muted); cursor: pointer; }
++.comfyui-task-select input { width: 18px; height: 18px; margin: 0; cursor: pointer; }
++.comfyui-task-card.is-selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--violet-line); }
+ .comfyui-task-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
+ .comfyui-task-card { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 8px 10px; display: grid; gap: 4px; }
+ /* 标题必须能收缩：flex 子项默认 min-width:auto，长工作流名会把状态标签挤出卡片
+diff --git a/tests/test_comfyui_frontend_assets.py b/tests/test_comfyui_frontend_assets.py
+index 6232d28..5def55d 100644
+--- a/tests/test_comfyui_frontend_assets.py
++++ b/tests/test_comfyui_frontend_assets.py
+@@ -995,6 +995,20 @@ assert.equal(toggle.checked,false,'成功后复位，不受批量草稿影响');
+         self.assertIn('data-batch-action="open-history"', js)
+         # 单次档的「清除」不碰批量任务：批量产物按批次删。
+         self.assertIn("exclude_batch: true", js)
++        # 单次档「清除」进入勾选模式：逐条勾选后删所选，不再一键全删。
++        self.assertIn('id="comfyuiClearBar"', html)
++        self.assertIn('id="comfyuiClearDelete"', html)
++        self.assertIn('id="comfyuiClearSelectAll"', html)
++        self.assertIn("function enterClearMode(", js)
++        self.assertIn("function exitClearMode(", js)
++        self.assertIn("function deleteSelectedTasks(", js)
++        self.assertIn("function clearableTaskIds(", js)
++        self.assertIn("data-comfyui-task-check", js)
++        self.assertIn("task_ids: ids, cancel_active: false, exclude_batch: true", js)
++        self.assertNotIn("function clearFinishedTasks(", js)
++        self.assertIn(".comfyui-clear-bar", css)
++        self.assertIn(".comfyui-task-card.is-selected", css)
++        self.assertIn(".comfyui-task-select", css)
+         # 转换模板的默认档是自动：普通参考图走参考六字段，首尾帧走基础三字段。
+         self.assertIn("自动（按工作流素材槽位选基础/参考）", js)
+         self.assertIn("BATCH_H3_BASE_TEMPLATE", js)
+diff --git a/tests/test_kvmem.py b/tests/test_kvmem.py
+index 02af03d..6774b49 100644
+--- a/tests/test_kvmem.py
++++ b/tests/test_kvmem.py
+@@ -3,12 +3,15 @@
+ from __future__ import annotations
+ 
+ import json
++import tempfile
+ import threading
+ import unittest
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
+ from urllib.parse import urlsplit
+ 
+-from naiba.kvmem import KVMemClient, KVMemError, validate_manager_url
++from naiba.kvmem import (KVMemClient, KVMemError, last_start_path, read_last_start,
++                         validate_manager_url, write_last_start)
+ 
+ 
+ class _Controller(BaseHTTPRequestHandler):
+@@ -118,6 +121,36 @@ class KVMemTests(unittest.TestCase):
+         finally:
+             _Controller.draft = original
+ 
++    def test_start_fills_lost_model_from_cached_parameters(self):
++        original = _Controller.draft
++        _Controller.draft = {**original, "parameters": {"Model": "", "Backend": "ninfer"}}
++        try:
++            client = KVMemClient(self.url, "http://127.0.0.1:18200/v1")
++            result = client.start(fallback={"Model": "cached-model.gguf", "Backend": "polystrata", "Worker": "w1"})
++            self.assertTrue(result["accepted"])
++            body = json.loads([body for method, path, _headers, body in _Controller.calls
++                               if method == "POST" and path.endswith("/start")][-1].decode("utf-8"))
++            self.assertEqual(body["parameters"]["Model"], "cached-model.gguf")
++            self.assertEqual(body["parameters"]["Worker"], "w1")
++            # 控制台已经选好的字段不能被缓存覆盖。
++            self.assertEqual(body["parameters"]["Backend"], "ninfer")
++            self.assertEqual(client.last_draft_parameters["Model"], "cached-model.gguf")
++        finally:
++            _Controller.draft = original
++
++    def test_last_start_cache_roundtrip_and_corrupt_file(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            path = last_start_path(tmp)
++            # 没有模型的值不落盘：空缓存继续报「尚未选择模型」，不制造假配置。
++            write_last_start(path, "http://127.0.0.1:18199", {"Model": "", "Backend": "ninfer"})
++            self.assertEqual(read_last_start(path), {})
++            write_last_start(path, "http://127.0.0.1:18199",
++                             {"Model": "m.gguf", "Backend": "ninfer", "Extra": "x"})
++            self.assertEqual(read_last_start(path),
++                             {"http://127.0.0.1:18199": {"Backend": "ninfer", "Model": "m.gguf"}})
++            Path(path).write_text("{not json", encoding="utf-8")
++            self.assertEqual(read_last_start(path), {})
++
+     def test_start_surfaces_console_error_text(self):
+         original = _Controller.fail_start_reason
+         _Controller.fail_start_reason = "健康检查未通过：模型文件缺失"

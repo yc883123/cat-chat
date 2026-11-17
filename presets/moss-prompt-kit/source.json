@@ -1,0 +1,56 @@
+{
+ "collection": "MOSS-Image 提示词套件",
+ "author": "OpenMOSS / fisher / 未知（用户本地收集）",
+ "license": "官方增强器为 Apache-2.0（OpenMOSS/MOSS-Image @2b46b1e）；两份规则文本与 fisher 扩写器未附许可证，仅按用户本地导入使用，公开再分发前需原作者授权",
+ "selection": [
+  "vs-221-moss-t2i-rules",
+  "vs-222-fisher-moss-expander",
+  "vs-223-moss-official-enhancer",
+  "vi-121-moss-reverse-rules"
+ ],
+ "files": [
+  {
+   "path": "engines/fisher-moss-prompt-expander-完整版.md",
+   "sha256": "ac4b3c289348e4bc4a1c04cc6b12433f014cd152e595cc079cb09acf8ac253b9",
+   "bytes": 106829
+  },
+  {
+   "path": "official/moss-image-prompt-enhancer/references/layout.md",
+   "sha256": "e3d74ded6ab402ef69131fc7609117affff5ee1c6d14a49752d44c865b79525c",
+   "bytes": 4072
+  },
+  {
+   "path": "official/moss-image-prompt-enhancer/SKILL.md",
+   "sha256": "72cd39883af0b6c6997038b068af2d858dcd968ca43466ebf93fea21833878a0",
+   "bytes": 5909
+  },
+  {
+   "path": "rules/MOSS图像反推规则.txt",
+   "sha256": "b4bb552487d8d6cd9e808fa44b49c51b1c7d46f3de6ca9fb2a44ee849a0ba8dd",
+   "bytes": 6868
+  },
+  {
+   "path": "rules/MOSS提示词优化规则.txt",
+   "sha256": "57ca633d291ba1699d2564b2f0f66005346981d1959c46a08b48feba9b9ce4da",
+   "bytes": 4951
+  }
+ ],
+ "excluded": [
+  {
+   "file": "moss-image-prompt-enhancer/scripts/compile_prompt.py",
+   "reason": "Python 可执行脚本不入库（与合集既有口径一致）；Layout 方向按 references/layout.md 的规则手写，正文已说明脚本未内置"
+  },
+  {
+   "file": "moss-image-prompt-enhancer/agents/openai.yaml",
+   "reason": "Agent 元数据，与提词库预设正文无关"
+  },
+  {
+   "file": "moss-image-prompt-enhancer/scripts/test_compile_prompt.py",
+   "reason": "脚本测试，同上不入库"
+  },
+  {
+   "file": "MOSS人像提示词模板_sfw版_3.0.md",
+   "reason": "与既有 vs-206-gslh-moss-portrait 逐字节相同（md5 ed15c591…），重复入库只增噪声，改用既有条目"
+  }
+ ]
+}

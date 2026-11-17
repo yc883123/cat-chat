@@ -256,6 +256,7 @@ verify/claude-cache-diagnostic/*
 # 转换器可复现地生成 public/studio/ 只读预设；UI 冒烟用隔离实例断言三区视图/追问必选 Agent；
 # live 检查真连模型生成（含 4 万字长正文条目）发版前跑一遍。
 !verify/studio_catalog_build.py
+!verify/studio_creative_presets.py
 !verify/studio_ui_smoke.cjs
 !verify/studio_prompt_feedback_smoke.cjs
 !verify/studio_live_ui_check.cjs

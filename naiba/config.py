@@ -131,7 +131,7 @@ STUDIO_PAGE_VIEWS = ("library", "labeler", "comfyui", "novel", "writer")
 STUDIO_VIEWS = ("chat", "studio")
 STUDIO_VIEW_DEFAULT = "chat"
 STUDIO_PREF_MODULES = frozenset(
-    {"", "vs", "h3", "vi", "ec", "global", "script", "game", "style", "custom"}
+    {"", "vs", "h3", "vi", "ec", "global", "script", "prose", "game", "style", "custom"}
 )
 STUDIO_PREF_MAX_FAVORITES = 200
 # 自定义标题（只覆盖列表显示，不改模板本身）：{kind, id, title}，与收藏同一条来源口径。

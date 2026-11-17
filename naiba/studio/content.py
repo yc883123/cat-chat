@@ -139,7 +139,10 @@ class ContentSnapshots:
             if row is None:
                 raise ValueError(f"Skill 不存在或已被删除：{skill_id}")
             original_root = Path(row["root"]).expanduser()
-            if any(_linked(parent) for parent in (original_root, *original_root.parents)):
+            # 只查根自身：父级允许出现联接（GitHub runner / 本机 harness 的 TEMP 都可能
+            # 挂在 junction 下，父级误判会让所有临时目录里的 Skill 全部无法冻结）。
+            # 读取安全由下方 resolve(strict=True) + walk followlinks=False + 子路径链接检查保证。
+            if _linked(original_root):
                 raise ValueError("Skill 根目录不能是链接")
             try:
                 root = original_root.resolve(strict=True)

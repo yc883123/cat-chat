@@ -306,6 +306,46 @@ class StudioContentTests(unittest.TestCase):
         view = ContentSnapshots(self.app.paths.data_dir).view(data["skill_snapshot"])
         self.assertFalse(view.execute("read_file", {"path": str(link)})[0])
 
+    def test_junction_skill_root_itself_is_rejected(self):
+        """Skill 根自身是联接仍然拒绝；父级挂联接（harness 的 TEMP）不再误伤。"""
+        target = self.root / "skill-root-target"
+        target.mkdir()
+        (target / "SKILL.md").write_text("---\nname: linked\n---\nlinked完整规则。", encoding="utf-8")
+        link = self.root / "skill-root-link"
+        if not _junction(link, target):
+            self.skipTest("无法创建目录联接")
+        app = SimpleNamespace(paths=self.app.paths, config=self.config, models=self.models,
+                              catalog=SkillCatalog([link]))
+        service = StudioService(app, lambda **kw: {}, lambda **kw: {})
+        service._runner.submit = lambda task_id: None
+        self.addCleanup(service.shutdown)
+        ids = {row["name"]: row["id"] for row in app.catalog.scan()}
+        payload, status = service.api_generate(self.body(prompt_source="skill", skill_ids=[ids["linked"]]))
+        self.assertEqual(status, 400)
+        self.assertIn("不能是链接", payload["error"])
+
+    def test_skill_root_under_junction_ancestor_still_freezes(self):
+        """复现 ci_short_path_check 条件：TEMP 是 junction 时夹具根的父级带联接，冻结必须照常成功。"""
+        parent = self.root / "parent-real"
+        folder = parent / "outer"
+        (folder / "references").mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\nname: outer\n---\nouter完整规则。\n请读 references/note.md。", encoding="utf-8")
+        (folder / "references" / "note.md").write_text("outer私有参考。", encoding="utf-8")
+        link = self.root / "parent-link"
+        if not _junction(link, parent):
+            self.skipTest("无法创建目录联接")
+        app = SimpleNamespace(paths=self.app.paths, config=self.config, models=self.models,
+                              catalog=SkillCatalog([link / "outer"]))
+        service = StudioService(app, lambda **kw: {}, lambda **kw: {})
+        service._runner.submit = lambda task_id: None
+        self.addCleanup(service.shutdown)
+        ids = {row["name"]: row["id"] for row in app.catalog.scan()}
+        data = service.prepare_generation(self.body(prompt_source="skill", skill_ids=[ids["outer"]]))
+        view = ContentSnapshots(app.paths.data_dir).view(data["skill_snapshot"])
+        ok, text = view.execute("read_file", {"path": str(link / "outer" / "SKILL.md")})
+        self.assertTrue(ok)
+        self.assertIn("outer完整规则", str(text))
+
     def test_skill_agent_tools_then_three_turns_replay_once(self):
         def behavior(messages, options, event):
             self.assertEqual({spec["name"] for spec in options["tools"]}, set(READ_TOOLS))

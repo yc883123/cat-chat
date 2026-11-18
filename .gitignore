@@ -301,6 +301,9 @@ verify/claude-cache-diagnostic/*
 !verify/comfyui_navigation_smoke.cjs
 !verify/comfyui_history_smoke.cjs
 !verify/_serve_comfyui_history.py
+!verify/comfyui_chat_config_smoke.cjs
+!verify/comfyui_chat_config_smoke.py
+!verify/_serve_chat_config_smoke.py
 !verify/novel_outline_continue_smoke.cjs
 !verify/_serve_novel_outline_continue.py
 !verify/novel_storyboard_versions_smoke.cjs

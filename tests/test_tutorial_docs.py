@@ -205,6 +205,29 @@ class GuideMirrorTests(unittest.TestCase):
             "`python scripts/backfill_guide_references.py`：\n  " + "\n  ".join(stale),
         )
 
+    def test_manual_builtin_agent_table_matches_config(self) -> None:
+        """手册要点 §7.1 的内置 Agent 表必须列全出厂 Agent（含新加的造梦机助手）。
+
+        教程助手只会照 `00-手册要点.md` 答。以前新增第 7 个内置 Agent（dreamer）时
+        这份表还停在「六个」，用户问「造梦机助手是什么」它就答不出——把表名单一并
+        钉到 `built_in_agents()`，以后加内置 Agent 忘了更手册就变红。
+        """
+        from naiba.config import built_in_agents
+
+        manual = read_text(REFS / "00-手册要点.md")
+        section = manual.split("### 7.1", 1)
+        self.assertEqual(len(section), 2, "手册要点里找不到 §7.1 内置 Agent 表")
+        table = section[1].split("## 八", 1)[0]
+        # 表格行形如 `| 7 | **造梦机助手** 🌙 | … |`：加粗内容就是 config 里的 Agent 名。
+        listed = set(re.findall(r"^\|\s*\d+\s*\|\s*\*\*(.+?)\*\*", table, re.MULTILINE))
+        expected = {str(a["name"]) for a in built_in_agents()}
+        self.assertEqual(
+            sorted(listed), sorted(expected),
+            "手册要点 §7.1 的 Agent 表与出厂 Agent 不一致"
+            "（缺的会让你问教程助手时它答不出，多的会误导）："
+            f"\n  手册列出={sorted(listed)}\n  出厂实际={sorted(expected)}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

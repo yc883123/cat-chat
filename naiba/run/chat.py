@@ -604,7 +604,7 @@ class ConversationRunMixin:
         事务级防重复在 ``create_chat_run(job_wait_dispatch=...)`` 里：等待行状态、人工代次、
         会话运行位与消息/Run 的插入共享同一个事务。本方法只负责核对配置并把结果正文交进去。
         """
-        from naiba.run.job_waits import JOB_WAIT_RESULT_TOOLS, build_resume_message
+        from naiba.run.job_waits import JOB_WAIT_RESULT_TOOLS, build_resume_message, resolve_wait_target
 
         wait = self.app.storage.get_job_wait(wait_id)
         if not wait:
@@ -636,14 +636,16 @@ class ConversationRunMixin:
             raise RuntimeError(f"原模型配置不可用：{exc}") from exc
         if resolved != model_key:
             raise RuntimeError("原模型配置已删除或不可用")
-        jobs: list[dict[str, Any]] = []
+        targets: list[dict[str, Any]] = []
         missing: list[str] = []
         for target in wait.get("target_job_ids") or []:
-            job = self.app.jobs.get(str(target))
-            if job is None:
+            # 类型化目标解析（计划 2026-11-17 §7.5）：普通 Job 走 app.jobs，
+            # 造梦机原生任务/批次走 app.comfyui；各自服务查真实状态，不造假镜像。
+            resolved = resolve_wait_target(self.app, str(target))
+            if resolved is None:
                 missing.append(str(target))
             else:
-                jobs.append(job)
+                targets.append(resolved)
         source = {
             "wait_id": wait_id,
             "origin_run_id": str(wait.get("origin_run_id") or ""),
@@ -653,7 +655,7 @@ class ConversationRunMixin:
         }
         body = {
             "conversation_id": conversation_id,
-            "message": build_resume_message(wait, jobs, missing),
+            "message": build_resume_message(wait, targets, missing),
             # 气泡只显示固定来源说明：完整结果摘要是给模型的载荷，不铺在用户消息里。
             "display_message": "已登记等待的后台任务已结束，下面是结果汇报。",
             "attachments": [],

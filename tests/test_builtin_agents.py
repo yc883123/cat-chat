@@ -47,7 +47,7 @@ from naiba.skills.catalog import SkillCatalog  # noqa: E402
 
 BUNDLED_SKILLS_DIR = ROOT / "skills"
 
-EXPECTED_ORDER = ("tutor", "master", "director", "prompter", "coder", "skills")
+EXPECTED_ORDER = ("tutor", "master", "director", "prompter", "coder", "skills", "dreamer")
 # 老三样（已退役的出厂 Agent）：id 不能与内置 id 撞车（撞了会把老用户改过的 Agent 顶掉）。
 LEGACY_AGENT_IDS = {"general", "coding", "drama"}
 
@@ -106,6 +106,8 @@ EXPECTED_BINDINGS = {
     "prompter": {"h3-prompt-writing"},
     "coder": set(),
     "skills": set(),
+    # 造梦机助手默认不挂 Skill：参数指认与生成流程全部由专用工具承载（计划 2026-11-17 §7.3）。
+    "dreamer": set(),
 }
 # 一律不许出现在出厂工具档里的工具（含 MCP 动态工具前缀）。
 FORBIDDEN_TOOLS = {
@@ -207,11 +209,29 @@ class BuiltInAgentScopeTests(unittest.TestCase):
                          "提示词优化 = 只读 + 写稿 + 指名出卡（8 件）")
 
     def test_every_builtin_agent_can_show_media(self) -> None:
-        """六个内置 Agent 必须都带 show_media（升级后老用户主会话也要能用）。"""
+        """内置 Agent 必须都带 show_media（升级后老用户主会话也要能用）。
+
+        例外：造梦机助手（dreamer）的有效工具名单严格为七个 dream_* 工具（计划
+        2026-11-17 §7.3）——它的生成产物经 dream_task_status 的结构化媒体声明自动
+        出卡，不需要也不允许再扩大这份窄名单。
+        """
         for agent in built_in_agents():
+            if agent["id"] == "dreamer":
+                continue
             with self.subTest(agent=agent["id"]):
                 self.assertIn(SHOW_MEDIA, agent["tool_scope"],
                               "内置 Agent 缺 show_media ⇒ 用户说「把刚才那张图展示出来」时无卡可出")
+
+    def test_dreamer_scope_is_exactly_the_dream_toolset(self) -> None:
+        """造梦机助手的工具名单严格等于七个 dream_* 工具，且整组 opt-in 授权。"""
+        from naiba.config import _DREAM_TOOLS
+
+        agents = {agent["id"]: agent for agent in built_in_agents()}
+        self.assertEqual(set(agents["dreamer"]["tool_scope"]), set(_DREAM_TOOLS))
+        self.assertEqual(
+            set(agents["dreamer"].get("tool_opt_ins") or []), set(_DREAM_TOOLS),
+            "dreamer 必须自带整组 opt-in 授权（预设展开与「未限制」回退都带不上它们）",
+        )
 
     def test_show_media_is_not_in_any_tool_preset(self) -> None:
         """show_media 只随内置 Agent 出厂，不得被显式列进通用预设（否则点一下预设就扩权）。
@@ -263,7 +283,7 @@ class BuiltInAgentScopeTests(unittest.TestCase):
         """个数是对外说明（教程/手册会写"N 件"），与计划书 §3.1/§3.2 逐项对齐。"""
         # 2026-10-26 加拆书匠三件套（novel_outline / novel_chunks / novel_split_text）：
         # 除 prompter（只读 + 写稿，未收拆书匠）外各档 +3。
-        expected = {"tutor": 10, "master": 26, "director": 24, "prompter": 8, "coder": 22, "skills": 25}
+        expected = {"tutor": 10, "master": 26, "director": 24, "prompter": 8, "coder": 22, "skills": 25, "dreamer": 7}
         for agent in built_in_agents():
             with self.subTest(agent=agent["id"]):
                 self.assertEqual(len(agent["tool_scope"]), expected[agent["id"]])

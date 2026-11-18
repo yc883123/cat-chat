@@ -5,7 +5,7 @@ from typing import Any
 
 from naiba.core.contracts import (SUPER_AGENT_EXECUTION_KEY, SUPERVISED_ACCEPT_COMPLETION_ACTION,
                                   SuperAgentChatConfirmation)
-from naiba.super_agent.adapters import AdapterResult
+from naiba.super_agent.adapters import AdapterResult, ComfyNativeAdapter
 from naiba.super_agent.domain_adapters import NovelStageAdapter, WriterPipelineAdapter
 from naiba.super_agent.router import AdapterRegistry, FastPathRequest, FastPathRouter
 
@@ -65,6 +65,9 @@ class DomainCoordinator:
         self.registry = AdapterRegistry([
             WriterPipelineAdapter(self.service, app),
             NovelStageAdapter(self.service, app),
+            # 造梦机原生薄适配（计划 2026-11-17 §7.2）：确定性提交路径已可用；
+            # 总管派发造梦机助手受管 Run 的闭环未接线，UI 不会创建 comfy_native 节点。
+            ComfyNativeAdapter(self.service, app),
         ])
         self.router = FastPathRouter(self.service, self.registry)
         from naiba.super_agent.runtime import ExecutionCoordinator

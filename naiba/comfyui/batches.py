@@ -236,10 +236,41 @@ class ComfyUIBatchManager:
         payload.setdefault("items", [])
         return payload
 
+    # ---- 外层幂等（计划 2026-11-17 §7.1：原生批次 create 补 owner/request_key） ----
+
+    def lookup_request(self, request_key: str, *, owner_id: str = "") -> dict[str, Any] | None:
+        """按外层请求键查批次主记录；主记录带 owner_id 一起核对。"""
+        if not request_key:
+            return None
+        with self._lock:
+            for path in self._dir.glob(f"{COMFYUI_BATCH_PREFIX}-*.json"):
+                if path.name.endswith(".schemes.json"):
+                    continue
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if (str(payload.get("request_key") or "") == request_key
+                        and str(payload.get("owner_id") or "") == owner_id):
+                    return self._sanitize(payload)
+        return None
+
     # ---- 创建 ----
 
-    def create(self, body: dict[str, Any]) -> dict[str, Any]:
+    def create(self, body: dict[str, Any], *, request_key: str = "",
+               owner_id: str = "") -> dict[str, Any]:
         body = body if isinstance(body, dict) else {}
+        # 外层幂等：同 request_key + 同内容 → 返回已有批次（重试不重建）；
+        # 同 request_key + 不同内容 → 拒绝。digest 对语义请求体计算（sort_keys 归一）。
+        if request_key:
+            existing = self.lookup_request(request_key, owner_id=owner_id)
+            if existing is not None:
+                digest = self.store.payload_hash(body)
+                if str(existing.get("request_digest") or "") != digest:
+                    raise ComfyUIBatchError("request_key 已绑定不同的批量内容")
+                return existing
         title = str(body.get("title") or "").strip()[:120] or "未命名批次"
         unload_after = bool(body.get("unload_after"))
         raw_convert = body.get(COMFYUI_BATCH_CONVERT_KEY) or {}
@@ -322,8 +353,19 @@ class ComfyUIBatchManager:
             COMFYUI_BATCH_CONVERT_KEY: convert,
             "items": items,
         }
+        if request_key:
+            # 外层幂等回执：与条目级 request_key（<批次id>-<序号>）独立并存。
+            record["request_key"] = request_key
+            record["owner_id"] = owner_id
+            record["request_digest"] = self.store.payload_hash(body)
         try:
             with self._lock:
+                if request_key:
+                    # 竞态兜底：并发同键提交时，后到者回滚自己的条目、返回先到批次。
+                    raced = self.lookup_request(request_key, owner_id=owner_id)
+                    if raced is not None:
+                        self._rollback(batch_id)
+                        return raced
                 # 先写主记录再写快照：万一只落了主记录，批次仍可见、可删；
                 # 快照缺失时详情会退回任务输入兜底。
                 _write_json(self.batch_path(batch_id), record)

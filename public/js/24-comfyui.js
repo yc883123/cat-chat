@@ -56,6 +56,7 @@ const comfyui = {
   clearSelection: new Set(),
   clearEpoch: 0,
   clearRequest: null, // 与模式生命周期分离：切页不会解除仍在执行的删除请求。
+  chatConfig: null,   // 「对话参数」弹窗草稿 {workflowId, workflowName, fingerprint, bindings, params}；关弹窗即弃
 };
 
 // ============================================================
@@ -315,6 +316,11 @@ export function bindComfyuiEvents() {
   });
   watchWorkbenchSize($("#studioPageComfyui"), () => {});
   bindWorkbenchDetails($("#studioPageComfyui"));
+  // 造梦机助手会话专属「对话参数」入口（A6b）：点击打开同一个配置弹窗；
+  // 显示状态随会话切换同步。只在初始化绑一次，切会话不重复绑定。
+  $("#dreamerChatConfigEntry")?.addEventListener("click", () => void openDreamerChatConfigFromComposer());
+  document.addEventListener("naiba:conversation-changed", syncDreamerChatConfigEntry);
+  syncDreamerChatConfigEntry();
   $("#comfyuiSaveCurrentAs")?.addEventListener("click", openSaveAsDialog);
   $("#comfyuiSaveAsCancel")?.addEventListener("click", closeSaveAsDialog);
   $("#comfyuiSaveAsConfirm")?.addEventListener("click", () => void confirmSaveAs());
@@ -391,6 +397,16 @@ export function bindComfyuiEvents() {
   $("#comfyuiOpenOutputs")?.addEventListener("click", () => void openOutputsFolder());
   $("#comfyuiParamsSave")?.addEventListener("click", () => void saveParamsConfig());
   $("#comfyuiParamsCancel")?.addEventListener("click", closeParamsDialog);
+  // 「对话参数」弹窗（造梦机助手）：行是每次打开重建的，删除走容器事件委托。
+  $("#comfyuiChatConfigAddBtn")?.addEventListener("click", addChatConfigBinding);
+  $("#comfyuiChatConfigSave")?.addEventListener("click", () => void saveChatConfig());
+  $("#comfyuiChatConfigReset")?.addEventListener("click", () => void resetChatConfig());
+  $("#comfyuiChatConfigCancel")?.addEventListener("click", closeChatConfigDialog);
+  $("#comfyuiChatConfigPurpose")?.addEventListener("change", onChatConfigPurposeChange);
+  $("#comfyuiChatConfigList")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-chat-config-remove]");
+    if (button) removeChatConfigBinding(button.dataset.chatConfigRemove);
+  });
   // 参数清单搜索：边输边滤（行是每次打开重建的，过滤只藏不删）。
   $("#comfyuiParamsSearch")?.addEventListener("input", filterParamsPicker);
   $("#comfyuiParamsPicker")?.addEventListener("change", () => {
@@ -697,12 +713,25 @@ function renderWorkflowList() {
     del.dataset.comfyuiDeleteWorkflow = row.id;
     del.title = "删除这份工作流";
     del.textContent = "删除";
-    card.append(title, meta, del);
+    // 「对话参数」入口（计划 2026-11-17 §5.4：不新增造梦机分页，入口放工作流卡上；
+    // 对话里缺配置时，造梦机助手也是引导到这同一个弹窗）。
+    const chat = document.createElement("button");
+    chat.type = "button";
+    chat.className = "comfyui-workflow-chat-config";
+    chat.dataset.comfyuiChatConfig = row.id;
+    chat.title = "指认允许造梦机助手在对话里修改的参数";
+    chat.textContent = "对话参数";
+    card.append(title, meta, chat, del);
     list.append(card);
   }
 }
 
 async function onWorkflowListClick(event) {
+  const chatBtn = event.target.closest("[data-comfyui-chat-config]");
+  if (chatBtn) {
+    await openChatConfigDialog(chatBtn.dataset.comfyuiChatConfig);
+    return;
+  }
   const del = event.target.closest("[data-comfyui-delete-workflow]");
   if (del) {
     const id = del.dataset.comfyuiDeleteWorkflow;
@@ -729,6 +758,318 @@ async function onWorkflowListClick(event) {
     await selectWorkflow(id);
     // 四档互斥整页：选好工作流直接跳到单次生成档填参数。
     setComfyuiPane("run");
+  }
+}
+
+// ============================================================
+// 对话参数（造梦机助手；计划 2026-11-17 §5.4）
+// ============================================================
+// 指认表按工作流 ID + 指纹保存在服务端；这里只负责编辑与保存，不解释节点地址。
+// 对话侧的工具（dream_*）按用途 ID 引用这里的绑定；未指认的参数对话不能改。
+
+// 用途 → 允许的槽位 field_type（与 naiba/comfyui/dream.py::_PURPOSE_SLOT_TYPES 同口径）。
+const CHAT_CONFIG_PURPOSE_TYPES = {
+  positive_prompt: new Set(["text"]),
+  negative_prompt: new Set(["text"]),
+  size: new Set(["number", "text"]),
+  seed: new Set(["seed"]),
+  number: new Set(["number"]),
+  enum: new Set(["text", "number", "bool"]),
+  text: new Set(["text"]),
+  bool: new Set(["bool"]),
+  media: new Set(["image", "audio", "video"]),
+};
+const CHAT_CONFIG_PURPOSE_LABELS = {
+  positive_prompt: "正向提示词", negative_prompt: "负向提示词", size: "输出尺寸",
+  seed: "随机种子", number: "数值参数", enum: "枚举参数", text: "文本参数",
+  bool: "开关参数", media: "参考素材",
+};
+const CHAT_CONFIG_ASK_LABELS = {
+  always: "每次必答", on_mention: "提到再改", keep_default: "保持默认",
+};
+// enum 用途只允许带候选的下拉槽（避免指认成自由文本却按枚举解释）。
+function chatConfigSlotAllowed(purpose, slot) {
+  const allowed = CHAT_CONFIG_PURPOSE_TYPES[purpose];
+  if (!allowed) return false;
+  const type = String(slot.field_type || "");
+  if (!allowed.has(type)) return false;
+  if (purpose === "enum" && String(slot.control || "") !== "combo") return false;
+  if (purpose === "size" && type === "text" && String(slot.control || "") !== "combo") {
+    return false; // 原生比例/MP 槽是带候选的文本/数字槽，自由文本不算
+  }
+  return true;
+}
+
+async function openChatConfigDialog(workflowId) {
+  const dialog = $("#comfyuiChatConfigDialog");
+  if (!dialog || !workflowId) return;
+  const error = $("#comfyuiChatConfigError");
+  if (error) error.textContent = "";
+  comfyui.chatConfig = { workflowId, workflowName: "", fingerprint: "", bindings: [], params: [] };
+  try {
+    // 详情与配置并行拉：详情给槽位清单（可能触发懒升级重扫，与页面行为一致）。
+    const [detailPayload, configPayload] = await Promise.all([
+      api(`/api/comfyui/workflows/${encodeURIComponent(workflowId)}`),
+      api(`/api/comfyui/workflows/${encodeURIComponent(workflowId)}/chat-config`).catch(() => null),
+    ]);
+    const entry = detailPayload.workflow || {};
+    comfyui.chatConfig.workflowName = entry.name || "";
+    comfyui.chatConfig.params = Array.isArray(entry.params) ? entry.params : [];
+    comfyui.chatConfig.fingerprint = String(configPayload?.workflow_fingerprint || entry.workflow_fingerprint || "");
+    const config = configPayload?.chat_config;
+    if (config && Array.isArray(config.bindings)) {
+      comfyui.chatConfig.bindings = JSON.parse(JSON.stringify(config.bindings));
+    }
+  } catch (error) {
+    toast(`读取对话参数失败：${error.message}`);
+    return;
+  }
+  renderChatConfigDialog();
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeChatConfigDialog() {
+  const dialog = $("#comfyuiChatConfigDialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+  comfyui.chatConfig = null;
+}
+
+// ---- 造梦机助手会话：对话侧「对话参数」宿主入口（设计 §5.4 / 口径 A6b）----
+// 仅当前会话 Agent 是 dreamer 时显示；点开的是造梦机工作流卡同一个配置弹窗。
+// 会话切换靠 08 广播的 naiba:conversation-changed 广播同步，不反向 import 08。
+function currentConversationIsDreamer() {
+  const conversation = state.conversations.find((item) => item.id === state.conversationId);
+  let agentId = String(conversation?.agent_id || '');
+  if (!agentId) agentId = String(state.bootstrap?.default_agent_id || '');
+  return agentId === 'dreamer';
+}
+
+export function syncDreamerChatConfigEntry() {
+  const button = $("#dreamerChatConfigEntry");
+  if (!button) return;
+  button.hidden = !currentConversationIsDreamer();
+}
+
+async function openDreamerChatConfigFromComposer() {
+  let workflowId = String(comfyui.selectedId || '');
+  if (!workflowId && Array.isArray(comfyui.workflows) && comfyui.workflows.length) {
+    workflowId = String(comfyui.workflows[0].id || '');
+  }
+  if (!workflowId) {
+    // 造梦机页还没打开过、工作流目录未加载：现拉一次再取第一份。
+    await refreshWorkflows().catch(() => {});
+    if (Array.isArray(comfyui.workflows) && comfyui.workflows.length) {
+      workflowId = String(comfyui.workflows[0].id || '');
+    }
+  }
+  if (!workflowId) {
+    toast('请先到造梦机导入一份工作流，再打开「对话参数」指认');
+    return;
+  }
+  await openChatConfigDialog(workflowId);
+}
+
+function chatConfigSlotLabel(slot) {
+  const base = String(slot.label || `${slot.node_id} · ${slot.field_name}`);
+  const current = slot.field_type === "seed"
+    ? "随机"
+    : String(slot.default ?? "").slice(0, 40);
+  return current ? `${base}（当前：${current}）` : base;
+}
+
+function renderChatConfigDialog() {
+  const draft = comfyui.chatConfig;
+  if (!draft) return;
+  const title = $("#comfyuiChatConfigTitle");
+  if (title) title.textContent = `对话参数 · ${draft.workflowName || draft.workflowId}`;
+  const fingerprintRow = $("#comfyuiChatConfigFingerprint");
+  if (fingerprintRow) {
+    fingerprintRow.textContent = draft.fingerprint
+      ? `绑定指纹 ${draft.fingerprint.slice(0, 12)}…（工作流被修改后这份配置会整体失效）`
+      : "尚未取得工作流指纹";
+  }
+  renderChatConfigList();
+  renderChatConfigSlotOptions();
+}
+
+function renderChatConfigList() {
+  const box = $("#comfyuiChatConfigList");
+  if (!box) return;
+  box.textContent = "";
+  const bindings = comfyui.chatConfig?.bindings || [];
+  if (!bindings.length) {
+    const empty = document.createElement("p");
+    empty.className = "comfyui-chat-config-empty";
+    empty.textContent = "还没有指认任何参数。造梦机助手在对话里只能填写下面指认过的用途；至少建议指认「正向提示词」。";
+    box.append(empty);
+    return;
+  }
+  for (const binding of bindings) {
+    const row = document.createElement("div");
+    row.className = "comfyui-chat-config-row";
+    const head = document.createElement("div");
+    head.className = "comfyui-chat-config-row-head";
+    const badge = document.createElement("span");
+    badge.className = `comfyui-chat-config-purpose is-${binding.purpose}`;
+    badge.textContent = CHAT_CONFIG_PURPOSE_LABELS[binding.purpose] || binding.purpose;
+    const name = document.createElement("strong");
+    name.textContent = binding.display_name;
+    head.append(badge, name);
+    const slots = document.createElement("div");
+    slots.className = "comfyui-chat-config-row-slots";
+    const params = comfyui.chatConfig?.params || [];
+    slots.textContent = (binding.slots || []).map((slot) => {
+      const found = params.find((item) => item.node_id === slot.node_id && item.field_name === slot.field_name);
+      const label = found ? String(found.label || `${slot.node_id} · ${slot.field_name}`) : `${slot.node_id} · ${slot.field_name}`;
+      return slot.name ? `${slot.name}＝${label}` : label;
+    }).join("；");
+    const meta = document.createElement("div");
+    meta.className = "comfyui-chat-config-row-meta";
+    const tags = [CHAT_CONFIG_ASK_LABELS[binding.ask] || binding.ask];
+    if (binding.per_item) tags.push("批量可逐条");
+    if (binding.description) tags.push(binding.description);
+    meta.textContent = tags.join(" · ");
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "comfyui-chat-config-remove";
+    del.dataset.chatConfigRemove = binding.id;
+    del.textContent = "移除";
+    row.append(head, slots, meta, del);
+    box.append(row);
+  }
+}
+
+function renderChatConfigSlotOptions() {
+  const picker = $("#comfyuiChatConfigSlots");
+  const purposeSelect = $("#comfyuiChatConfigPurpose");
+  if (!picker || !purposeSelect) return;
+  picker.textContent = "";
+  const purpose = String(purposeSelect.value || "positive_prompt");
+  const params = comfyui.chatConfig?.params || [];
+  let shown = 0;
+  for (const slot of params) {
+    if (!chatConfigSlotAllowed(purpose, slot)) continue;
+    shown += 1;
+    // 行 = label>checkbox+文字：整行可点。checkbox 已按 §九.169 作用域还原原生尺寸。
+    const row = document.createElement("label");
+    row.className = "comfyui-chat-config-slot-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = `${slot.node_id}|${slot.field_name}`;
+    const text = document.createElement("span");
+    text.className = "comfyui-chat-config-slot-text";
+    text.textContent = chatConfigSlotLabel(slot);
+    row.append(box, text);
+    picker.append(row);
+  }
+  if (!shown) {
+    const empty = document.createElement("p");
+    empty.className = "comfyui-chat-config-empty";
+    empty.textContent = "这份工作流没有匹配该用途的槽位";
+    picker.append(empty);
+  }
+}
+
+function onChatConfigPurposeChange() {
+  const name = $("#comfyuiChatConfigName");
+  const purpose = String($("#comfyuiChatConfigPurpose")?.value || "");
+  if (name && !name.value.trim()) {
+    name.value = CHAT_CONFIG_PURPOSE_LABELS[purpose] || "";
+  }
+  renderChatConfigSlotOptions();
+}
+
+function addChatConfigBinding() {
+  const draft = comfyui.chatConfig;
+  if (!draft) return;
+  const error = $("#comfyuiChatConfigError");
+  const purpose = String($("#comfyuiChatConfigPurpose")?.value || "");
+  const name = String($("#comfyuiChatConfigName")?.value || "").trim();
+  const ask = String($("#comfyuiChatConfigAsk")?.value || "on_mention");
+  const perItem = Boolean($("#comfyuiChatConfigPerItem")?.checked);
+  const description = String($("#comfyuiChatConfigDesc")?.value || "").trim();
+  const picker = $("#comfyuiChatConfigSlots");
+  const picked = picker ? Array.from(picker.querySelectorAll('input[type="checkbox"]:checked') || [])
+    .map((box) => String(box.value || ""))
+    .filter(Boolean) : [];
+  const fail = (message) => { if (error) error.textContent = message; };
+  if (!name) return fail("请给这条参数起个显示名（对话里按这个名字交流）");
+  if (!picked.length) return fail("请在参数槽位里勾选至少一个槽位");
+  if (purpose === "size" && picked.length > 2) return fail("输出尺寸最多指认宽高两个槽位");
+  const bindings = draft.bindings;
+  if (bindings.length >= 32) return fail("一份配置最多 32 条绑定");
+  if (bindings.some((item) => item.display_name === name)) {
+    return fail(`已经有叫「${name}」的绑定了，换个名字或先移除旧条目`);
+  }
+  const id = `b${Date.now().toString(36)}${Math.floor(Math.random() * 1000)}`;
+  bindings.push({
+    id,
+    purpose,
+    display_name: name,
+    description,
+    slots: picked.map((key) => {
+      const [nodeId, fieldName] = key.split("|");
+      return { node_id: nodeId, field_name: fieldName, name: "" };
+    }),
+    ask,
+    per_item: perItem && purpose !== "positive_prompt" && purpose !== "negative_prompt",
+  });
+  if (error) error.textContent = "";
+  const nameInput = $("#comfyuiChatConfigName");
+  if (nameInput) nameInput.value = "";
+  const descInput = $("#comfyuiChatConfigDesc");
+  if (descInput) descInput.value = "";
+  renderChatConfigList();
+}
+
+function removeChatConfigBinding(bindingId) {
+  const draft = comfyui.chatConfig;
+  if (!draft) return;
+  draft.bindings = draft.bindings.filter((item) => item.id !== bindingId);
+  renderChatConfigList();
+}
+
+async function saveChatConfig() {
+  const draft = comfyui.chatConfig;
+  if (!draft) return;
+  const error = $("#comfyuiChatConfigError");
+  const save = $("#comfyuiChatConfigSave");
+  if (save) save.disabled = true;
+  try {
+    await api(`/api/comfyui/workflows/${encodeURIComponent(draft.workflowId)}/chat-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflow_fingerprint: draft.fingerprint,
+        bindings: draft.bindings,
+      }),
+    });
+    toast(`已保存对话参数（${draft.bindings.length} 条绑定），造梦机助手可以按这份指认填参`);
+    closeChatConfigDialog();
+    await refreshWorkflows();
+  } catch (err) {
+    if (error) error.textContent = `保存失败：${err.message}`;
+  } finally {
+    if (save) save.disabled = false;
+  }
+}
+
+async function resetChatConfig() {
+  const draft = comfyui.chatConfig;
+  if (!draft) return;
+  if (!window.confirm("重置这份工作流的对话参数？已保存的指认会被删除，工作流本身不受影响。")) return;
+  try {
+    await api(`/api/comfyui/workflows/${encodeURIComponent(draft.workflowId)}/chat-config`, { method: "DELETE" });
+    toast("已重置对话参数");
+    comfyui.chatConfig.bindings = [];
+    renderChatConfigList();
+    await refreshWorkflows();
+  } catch (error) {
+    const box = $("#comfyuiChatConfigError");
+    if (box) box.textContent = `重置失败：${error.message}`;
   }
 }
 

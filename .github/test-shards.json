@@ -141,6 +141,8 @@
   "test_aux_chat",
   "test_choices",
   "test_comfyui_async_state",
+  "test_comfyui_dream",
+  "test_comfyui_dream_acceptance",
   "test_comfyui_json_editor",
   "test_comfyui_native_submission",
   "test_comfyui_provider_tools",

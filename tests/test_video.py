@@ -272,11 +272,11 @@ class VideoServiceTests(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 video_svc.probe_video(FIXTURE)
             message = str(ctx.exception)
-            self.assertIn("视频解码依赖未安装", message)
+            self.assertIn("视频解码组件", message)
             self.assertIn("pip install av", message)
             with self.assertRaises(ValueError) as ctx2:
                 video_svc.extract_frames(FIXTURE, self.data_dir)
-            self.assertIn("视频解码依赖未安装", str(ctx2.exception))
+            self.assertIn("视频解码组件", str(ctx2.exception))
 
     def test_missing_av_becomes_tool_failure_text(self) -> None:
         """缺依赖在工具边界必须变成"失败 + 明确文案"，而不是抛裸异常打断整轮。"""
@@ -285,7 +285,22 @@ class VideoServiceTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"av": None}):
             ok, out = spec.execute({"path": str(FIXTURE)}, [], None)
         self.assertFalse(ok)
-        self.assertIn("视频解码依赖未安装", out)
+        self.assertIn("视频解码组件", out)
+        self.assertIn("pip install av", out)
+
+    def test_frozen_av_failure_hints_restart_not_reinstall(self) -> None:
+        """冻结版包里必有 av；加载失败应引导「退出重开重新解包」，不许再说未安装/重装。"""
+        with mock.patch.dict(sys.modules, {"av": None}):
+            with mock.patch.object(sys, "frozen", True, create=True):
+                with self.assertRaises(ValueError) as ctx:
+                    video_svc.probe_video(FIXTURE)
+        message = str(ctx.exception)
+        self.assertIn("视频解码组件无法加载", message)
+        self.assertIn("重新打开", message)
+        self.assertNotIn("pip install", message)
+        self.assertNotIn("未安装", message)
+        # 重装只是「重开仍失败」的兜底，不能抢在重开前面当主引导。
+        self.assertLess(message.index("重新打开"), message.index("重装最新版"))
 
     # ---- 工具层 ----
     def _provider(self) -> VideoToolProvider:

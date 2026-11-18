@@ -389,6 +389,10 @@ class SchemaAndEnrichTests(unittest.TestCase):
         self.assertEqual(parse_input_decl(["INT", {}])["kind"], "number")
         self.assertEqual(parse_input_decl(["FLOAT", {}])["kind"], "number")
         self.assertEqual(parse_input_decl(["BOOLEAN", {}])["kind"], "bool")
+        # step（步长）：真实 ComfyUI 声明里带（EmptyLatentImage step=8），必须解析保留；
+        # 缺省为 None，调用方据此判断是否可对齐，不硬编码倍数。
+        self.assertEqual(parse_input_decl(["INT", {"min": 16, "max": 16384, "step": 8}])["step"], 8)
+        self.assertIsNone(parse_input_decl(["INT", {}])["step"])
 
     def test_parse_decl_connections_and_unknown_rejected(self):
         # 连线端口（IMAGE/MODEL/…）与没有 options 的未知自定义类型：不是可编辑控件。

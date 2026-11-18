@@ -44,6 +44,7 @@ KEEP = {
     "chat_composer_layout_smoke.cjs",
     "comfyui_navigation_smoke.cjs",
     "comfyui_history_smoke.cjs", "_serve_comfyui_history.py",
+    "comfyui_chat_config_smoke.cjs", "comfyui_chat_config_smoke.py", "_serve_chat_config_smoke.py",
     "novel_outline_continue_smoke.cjs", "_serve_novel_outline_continue.py",
     "novel_storyboard_versions_smoke.cjs", "_serve_novel_storyboard_versions.py",
     "comfyui_preview_delete_smoke.cjs",

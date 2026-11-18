@@ -264,6 +264,29 @@ def comfyui_script_guide_text(allowed_tools: set[str]) -> str:
     )
 
 
+def dream_tools_guide_text(allowed_tools: set[str]) -> str:
+    """造梦机对话域（dream_*）的编排指引；**条件不满足返回空串**（计划 2026-11-17 §7.4）。
+
+    编排规则不写在 dreamer 的出厂提示词之外也不能只写在里面：其他 Agent 单独授权
+    这组工具时同样要看到核心流程（读目录 → 读参数配置 → 预检 → 提交）。只点名本会话
+    真实可用的工具；工具集不完整时明确说 submit 会被拒绝，不暗示缺的工具能被补上。
+    """
+    if "dream_submit" not in allowed_tools:
+        return ""
+    if {"dream_workflows", "dream_workflow_details", "dream_prepare", "dream_task_status"} <= allowed_tools:
+        return (
+            "造梦机对话生成按「读目录 → 读参数配置 → 预检 → 提交」走：新生成需求先 dream_workflows "
+            "列实时目录（选择编号只对当轮列表有效，引用工作流用 id 与指纹）；dream_workflow_details 读"
+            "该工作流的对话参数配置，只填已指认的绑定，缺绑定或缺必答项就向用户说明并引导到造梦机工作流页"
+            "「对话参数」弹窗，禁止猜节点地址或重写工作流。比例与 MP 交给 dream_prepare 换算，按工具返回的"
+            "实际尺寸汇报；只接受 dream_submit 提交快照 ID，通知登记成功才承诺完成或失败后回复。"
+        )
+    return (
+        "造梦机对话工具集不完整：dream_submit 必须与 dream_prepare / dream_workflow_details / "
+        "dream_task_status 同组启用才能提交（提交时会拒绝并说明缺哪件）。"
+    )
+
+
 # 能创建后台任务的工具（闭包由 run/session.JOB_CREATOR_TOOL_DEPS 保证：创建器在、查询工具就在）。
 BACKGROUND_CREATOR_TOOLS: tuple[str, ...] = (
     "run_in_background", "comfyui_batch", "subagent", "subagent_spawn",
@@ -996,6 +1019,11 @@ class SkillAgent:
             )
         if {"comfyui_prepare_workflow", "comfyui_batch"} <= allowed:
             guide_parts.append("若已有多个 API 工作流，优先一次调用 comfyui_batch，不要让模型逐节点手工拼 JSON 或逐段手工轮询。")
+        # 造梦机对话域（计划 2026-11-17 §7.4）：编排提示按会话实际工具集条件注入，
+        # 不能只写在 dreamer 的出厂提示词里——其他 Agent 单独授权这组工具时同样要看到核心规则。
+        dream_guide = dream_tools_guide_text(allowed)
+        if dream_guide:
+            guide_parts.append(dream_guide)
         if any(str(t).startswith("mcp__") for t in allowed):
             guide_parts.append(
                 "会话内可用工具在首条消息时固化；若你调用 MCP 服务后发现其具体工具不在当前会话可用集内，"

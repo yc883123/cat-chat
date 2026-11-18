@@ -29,6 +29,10 @@ def main():
                   "service_manager": "kvmem", "service_manager_url": f"http://127.0.0.1:{19000 + index}",
                   "base_url": f"http://127.0.0.1:{19100 + index}/v1", "request_format": "openai"}
                  for index, key in enumerate(("kv-a", "kv-b"))]
+    # kv-a 预存完整启动配置：设置表单反显、保存持久化都按真实结构验证。
+    providers[0]["kvmem_install_dir"] = "D:/kvmem-fixture"
+    providers[0]["kvmem_launch_config"] = {"schema_version": 1, "parameters": {
+        "Model": "D:/models/kv-a.gguf", "Backend": "ninfer", "Port": 18200, "Context": 262144}}
     config.data.update({"host": "127.0.0.1", "port": 0, "access_token": "",
                         "data_dir": str(runtime / "data"), "workspace_dir": str(runtime / "workspace"),
                         "providers": providers, "skills_dirs": [], "mcp_servers": []})
@@ -37,7 +41,15 @@ def main():
     app.super_agent_domain.runtime.shutdown()
     store = app.comfyui.store
 
+    # KVMem 替身状态机：start 后先 starting 两次状态查询再 ready，让前端轮询可见。
+    kvmem_state = {"kv-a": "stopped", "kv-b": "ready"}
+    kvmem_polls = {"kv-a": 0, "kv-b": 0}
+    initial_providers = json.loads(json.dumps(providers))  # 桌面轮保存后 375px 轮要还原。
+
     def reset():
+        # app 在初始化时自建 ConfigStore；供应商还原必须改它引用的那份内存数据。
+        app.config.data["providers"] = json.loads(json.dumps(initial_providers))
+        app.config.save()
         for task in list(store.iter_tasks()):
             store.delete_task(task["id"])
         now = int(time.time() * 1000)
@@ -72,7 +84,13 @@ def main():
                 self.end_headers()
             elif route.endswith("/kvmem/status"):
                 key = route.split("/")[-3]
-                self._json({"status": "ready" if key == "kv-b" else "stopped", "model": key + "-model"})
+                kvmem_now = kvmem_state.get(key, "stopped")
+                if kvmem_now == "starting":
+                    kvmem_polls[key] += 1
+                    if kvmem_polls[key] >= 2:
+                        kvmem_state[key] = "ready"
+                        kvmem_now = "ready"
+                self._json({"status": kvmem_now, "model": key + "-model", "backend": "ninfer", "actual_port": 18200})
             elif route == "/api/comfyui/health":
                 self._json({"ok": True, "url": "http://127.0.0.1:8188", "devices": []})
             elif route == "/api/comfyui/models":
@@ -88,6 +106,23 @@ def main():
             elif route == "/api/providers/models":
                 self._read_json()
                 self._json({"models": ["kv-a-model", "kv-b-model"]})
+            elif route.endswith("/kvmem/start"):
+                key = route.split("/")[-3]
+                kvmem_state[key] = "starting"
+                kvmem_polls[key] = 0
+                self._json({"ok": True, "accepted": True, "status": "starting",
+                            "summary": {"model": key + "-model", "backend": "ninfer", "config_source": "provider"}}, 202)
+            elif route.endswith("/kvmem/stop"):
+                key = route.split("/")[-3]
+                kvmem_state[key] = "stopped"
+                self._json({"ok": True, "status": "stopped", "accepted": True,
+                            "message": "已停止 KVMem 托管模型并释放其显存"}, 202)
+            elif route == "/api/kvmem/capture":
+                self._read_json()
+                self._json({"ok": True, "source": "active",
+                            "parameters": {"Model": "D:/models/captured.gguf", "Backend": "ninfer",
+                                           "Port": 18200, "Context": 131072, "FastPrefill": True,
+                                           "VisionResidency": "resident"}})
             else:
                 super().do_POST()
 

@@ -338,7 +338,6 @@ class FakeAdapter(BaseAdapter):
 
 class JobAdapter(BaseAdapter):
     """Adapter that delegates execution to the existing ``JobRegistry``."""
-
     executor_type = "job"
     capabilities = AdapterCapabilities(can_retry=True, can_resume=True)
 
@@ -564,3 +563,189 @@ class JobAdapter(BaseAdapter):
                 expected_attempt=node.attempt,
             )
         return self.status(owner_id, thread_id, node_id)
+
+
+class ComfyNativeAdapter(BaseAdapter):
+    """造梦机原生任务/批次的薄适配（计划 2026-11-17 §7.2/§7.7）。
+
+    节点 executor_id 直接是造梦机原生 ID（``cf-…`` / ``cfb-…``）；start 只接受
+    已确定的提交体（单次 body 或预检快照展开后的批次 body），确定性提交交给
+    造梦机既有服务（jobs.submit / batches.create，owner/request_key 由宿主传入），
+    不复制任何参数解释逻辑。总管派发「造梦机助手」受管 Run 的闭环尚未接线：
+    当前只有直接调用本 Adapter 的确定性路径（与对应测试）。
+    """
+
+    executor_type = "comfy_native"
+    capabilities = AdapterCapabilities(can_retry=False, can_resume=False, has_checkpoint=False)
+
+    def __init__(self, service: SuperAgentService, app: Any):
+        super().__init__(service)
+        self.app = app
+
+    # ---- 状态映射：造梦机终态词汇与节点域对齐（interrupted 属终态词汇外的例外） ----
+
+    @staticmethod
+    def _node_status(comfy_status: str) -> str:
+        return {
+            "queued": "running", "running": "running",
+            "completed": "succeeded", "failed": "failed",
+            "cancelled": "cancelled", "interrupted": "interrupted",
+        }.get(comfy_status, "running")
+
+    def _comfy(self) -> Any:
+        comfy = getattr(self.app, "comfyui", None)
+        if comfy is None:
+            raise AdapterError("造梦机服务不可用")
+        return comfy
+
+    def _native_status(self, owner_id: str, node: TaskNode) -> AdapterResult:
+        comfy = self._comfy()
+        executor_id = str(node.executor_id or "")
+        if executor_id.startswith("cfb-"):
+            batch = comfy.batches.get(executor_id)
+            if batch is None:
+                raise LookupError("批次不存在或已被删除")
+            from naiba.run.job_waits import comfy_batch_status
+            raw = dict(batch)
+            raw["status"] = comfy_batch_status(batch)
+            return self._result(node, status=self._node_status(raw["status"]), raw=raw)
+        task = comfy.jobs.task(executor_id)
+        if task is None:
+            raise LookupError("任务不存在或已被删除")
+        return self._result(node, status=self._node_status(str(task.get("status") or "")), raw=task)
+
+    def start(
+        self,
+        owner_id: str,
+        thread_id: str,
+        node_id: str,
+        *,
+        attempt: int | None = None,
+        source_event_id: str = "",
+        idempotency_key: str = "",
+        submit_body: dict[str, Any] | None = None,
+        request_key: str = "",
+        **_: Any,
+    ) -> AdapterResult:
+        node = self._node(owner_id, thread_id, node_id, attempt=attempt)
+        if node.executor_id:
+            return self._native_status(owner_id, node)
+        if node.status != "ready":
+            raise AdapterError(f"Node 当前不能启动: {node.status}")
+        if not isinstance(submit_body, dict):
+            raise AdapterError("缺少已确定的提交体 submit_body（不接受模型自由构造）")
+        comfy = self._comfy()
+        kind = str(submit_body.get("kind") or "single")
+        if kind == "batch":
+            batch = comfy.batches.create(
+                dict(submit_body.get("batch") or {}),
+                request_key=str(request_key or ""), owner_id=str(owner_id),
+            )
+            executor_id = str(batch.get("id") or "")
+        else:
+            task = comfy.jobs.submit(
+                dict(submit_body.get("single") or submit_body),
+                request_key=str(request_key or ""), owner_id=str(owner_id),
+            )
+            executor_id = str(task.get("id") or "")
+        if not executor_id:
+            raise AdapterError("造梦机没有返回执行 ID")
+        checkpoint = dict(node.checkpoint or {})
+        checkpoint["comfy_kind"] = kind
+        node = self.service.store.update_node(
+            node.node_id,
+            owner_id=owner_id,
+            executor_id=executor_id,
+            checkpoint=checkpoint,
+            expected_attempt=node.attempt,
+        )
+        self._start_event(
+            node,
+            source="comfy-native-adapter",
+            source_event_id=source_event_id,
+            idempotency_key=idempotency_key,
+        )
+        return self._native_status(owner_id, self.service.get_node(owner_id, node.node_id))
+
+    def status(self, owner_id: str, thread_id: str, node_id: str, **_: Any) -> AdapterResult:
+        node = self._node(owner_id, thread_id, node_id)
+        if not node.executor_id:
+            return self._result(node)
+        return self._native_status(owner_id, node)
+
+    def sync(self, owner_id: str, thread_id: str, node_id: str, **_: Any) -> AdapterResult:
+        """把已知的原生终态经事件闸门写入节点（输出引用 comfy-task://comfy-batch://）。"""
+        node = self._node(owner_id, thread_id, node_id)
+        if not node.executor_id:
+            return self._result(node)
+        result = self._native_status(owner_id, node)
+        status = result.status
+        if status == "succeeded":
+            self.service.emit_event(
+                owner_id, thread_id, "job_completed",
+                node_id=node_id, source="comfy-native-adapter",
+                payload={"executor_id": node.executor_id, "status": result.status},
+                source_event_id=f"comfy-native-completed:{node.executor_id}",
+                idempotency_key=f"comfy-native-completed:{node.executor_id}",
+                attempt=node.attempt,
+            )
+        elif status == "failed":
+            raw = result.raw if isinstance(result.raw, dict) else {}
+            self.service.emit_event(
+                owner_id, thread_id, "job_failed",
+                node_id=node_id, source="comfy-native-adapter",
+                payload={"error": str(raw.get("error") or "造梦机任务失败"), "executor_id": node.executor_id},
+                source_event_id=f"comfy-native-failed:{node.executor_id}",
+                idempotency_key=f"comfy-native-failed:{node.executor_id}",
+                attempt=node.attempt,
+            )
+        elif status == "cancelled" and node.status == "stopping":
+            self.service.store.update_node(
+                node.node_id, owner_id=owner_id, status="cancelled",
+                expected_attempt=node.attempt,
+            )
+        return self.status(owner_id, thread_id, node_id)
+
+    def cancel(
+        self,
+        owner_id: str,
+        thread_id: str,
+        node_id: str,
+        *,
+        attempt: int | None = None,
+        request_id: str = "",
+        idempotency_key: str = "",
+        **_: Any,
+    ) -> AdapterResult:
+        node = self._node(owner_id, thread_id, node_id, attempt=attempt)
+        command_key = self._action_key(request_id, idempotency_key)
+        previous = self._command_result(node, "cancel", command_key)
+        if previous is not None:
+            return previous
+        comfy = self._comfy()
+        executor_id = str(node.executor_id or "")
+        if not executor_id:
+            node = self.service.store.update_node(
+                node.node_id, owner_id=owner_id, status="cancelled", cancel_requested=True,
+                expected_attempt=node.attempt,
+            )
+            return self._remember_command(node, "cancel", command_key, self._result(node))
+        if executor_id.startswith("cfb-"):
+            batch = comfy.batches.get(executor_id) or {}
+            for item in batch.get("items") or []:
+                task_id = str((item or {}).get("task_id") or "")
+                if task_id:
+                    comfy.jobs.cancel(task_id)
+        else:
+            comfy.jobs.cancel(executor_id)
+        node = self.service.store.update_node(
+            node.node_id, owner_id=owner_id, status="stopping", cancel_requested=True,
+            expected_attempt=node.attempt,
+        )
+        return self._remember_command(node, "cancel", command_key, self.status(owner_id, thread_id, node_id))
+
+    def retry(self, owner_id: str, thread_id: str, node_id: str, **_: Any) -> AdapterResult:
+        raise AdapterError("造梦机原生任务不支持总管重试：请在造梦机页面操作")
+
+    def resume(self, owner_id: str, thread_id: str, node_id: str, **_: Any) -> AdapterResult:
+        raise AdapterError("造梦机原生任务不支持总管恢复：请在造梦机页面操作")

@@ -25,6 +25,7 @@ from naiba.comfyui import (
 )
 from naiba.comfyui import client
 from naiba.comfyui.batches import ComfyUIBatchError, ComfyUIBatchManager
+from naiba.comfyui.dream import DreamConfigError, DreamService, check_bindings_against_params
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError
 from naiba.comfyui.history import history_record_missing, parse_history_ids
 from naiba.comfyui.params import enrich_slots, scan_params
@@ -68,11 +69,16 @@ def _open_folder(target: Path) -> None:
 class ComfyUIService:
     def __init__(self, app: Any):
         self.app = app
+        # DreamService.__init__ 读取 app.comfyui.*（store/jobs/batches），先挂引用再构造，
+        # 否则组合根赋值 ``self.comfyui = ComfyUIService(app)`` 完成前属性不存在，启动即崩。
+        app.comfyui = self
         data_dir = Path(app.paths.data_dir)
         self.store = ComfyUIStore(data_dir)
         self.runner = ComfyUIRunner(app, self.store)
         self.jobs = ComfyUIJobManager(app, self.store, self.runner)
         self.batches = ComfyUIBatchManager(app, self.store, self.jobs)
+        # 对话生成域（dream_* 工具与「对话参数」弹窗共用）：只依赖上面的既有层。
+        self.dream = DreamService(app)
 
     # ---- 生命周期 ----
 
@@ -446,6 +452,52 @@ class ComfyUIService:
         if not ok:
             return {"error": reason or "工作流删除被拒绝"}, 409
         return {"ok": True}, 200
+
+    # ---- 对话参数配置（「对话参数」弹窗；计划 2026-11-17 §5.4） ----
+
+    def api_chat_config_get(self, workflow_id: str) -> tuple[dict[str, Any], int]:
+        entry = self.store.get_workflow(workflow_id)
+        if entry is None:
+            return {"error": "工作流不存在或已被删除"}, 404
+        fingerprint = ComfyUIStore.payload_hash(entry.get("prompt") or {})
+        config = self.dream.chat_configs.load(workflow_id)
+        problems: list[str] = []
+        if config and str(config.get("workflow_fingerprint") or "") != fingerprint:
+            problems.append("对话参数配置与当前工作流指纹不一致（工作流已被修改），请重新保存")
+            config = None
+        elif config:
+            problems = check_bindings_against_params(config.get("bindings") or [], entry.get("params") or [])
+        return {
+            "workflow_id": workflow_id,
+            "workflow_name": str(entry.get("name") or ""),
+            "workflow_fingerprint": fingerprint,
+            "chat_config": config,
+            "problems": problems,
+        }, 200
+
+    def api_chat_config_set(self, workflow_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        entry = self.store.get_workflow(workflow_id)
+        if entry is None:
+            return {"error": "工作流不存在或已被删除"}, 404
+        body = body if isinstance(body, dict) else {}
+        fingerprint = str(body.get("workflow_fingerprint") or "")
+        current = ComfyUIStore.payload_hash(entry.get("prompt") or {})
+        if fingerprint and fingerprint != current:
+            return {"error": "工作流版本已变化，请刷新弹窗后重新保存"}, 409
+        try:
+            record = self.dream.chat_configs.save(
+                workflow_id, current, body.get("bindings"),
+                workflow_name=str(entry.get("name") or ""),
+            )
+        except DreamConfigError as exc:
+            return {"error": str(exc)}, 400
+        return {"ok": True, "chat_config": record}, 200
+
+    def api_chat_config_delete(self, workflow_id: str) -> tuple[dict[str, Any], int]:
+        if self.store.get_workflow(workflow_id) is None:
+            return {"error": "工作流不存在或已被删除"}, 404
+        ok = self.dream.chat_configs.delete(workflow_id)
+        return {"ok": True, "deleted": ok}, 200
 
     # ---- 任务 ----
 

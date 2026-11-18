@@ -25,6 +25,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -71,18 +72,31 @@ VIDEO_EXTS: tuple[str, ...] = tuple(MEDIA_EXTS_BY_KIND["video"])
 
 MODES: tuple[str, ...] = ("times", "interval", "keyframes")
 
-_AV_HINT = (
-    "视频解码依赖未安装（av）；冻结版请重装最新版，"
+# 两种形态的引导必须分开（2026-11-18 误报教训）：冻结版**包里一定有 av**（spec 的
+# hiddenimports + hook-av 收 DLL，CI 的 --self-check 也逐版验过），加载失败是
+# onefile 解包目录被外部清理、文件不在了 —— 正解是「退出重开」重新解包，让用户
+# 重装最新版是错方向。源码模式才可能是真没装，才该给 pip 命令。
+_AV_HINT_SOURCE = (
+    "视频解码组件未安装或无法加载（av）；"
     "源码模式执行 .venv\\Scripts\\python.exe -m pip install av"
+)
+_AV_HINT_FROZEN = (
+    "视频解码组件无法加载（解包文件可能已被清理）；"
+    "请先完全退出 Cat Chat 再重新打开（会重新解包），若仍失败再重装最新版"
 )
 
 
+def _av_hint() -> str:
+    """按运行形态选引导文案，别把「解包文件丢了」误报成「依赖没装」。"""
+    return _AV_HINT_FROZEN if getattr(sys, "frozen", False) else _AV_HINT_SOURCE
+
+
 def _load_av() -> Any:
-    """惰性导入 PyAV；缺失/损坏时抛**明确业务文案**（不是裸 ImportError）。"""
+    """惰性导入 PyAV；缺失/解包损坏时抛**明确业务文案**（不是裸 ImportError）。"""
     try:
         import av  # noqa: PLC0415 - 惰性导入是本模块的硬要求（见模块 docstring）
     except ImportError as exc:  # 含 DLL load failed（同为 ImportError）
-        raise ValueError(_AV_HINT) from exc
+        raise ValueError(_av_hint()) from exc
     return av
 
 

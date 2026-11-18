@@ -172,7 +172,7 @@
         <select class="turn-jump-select" id="turnJumpSelect" aria-label="跳转到对话轮次" title="跳转到对话轮次" hidden></select>
         <div class="kvmem-control" id="kvmemControl" hidden aria-live="polite">
           <button class="kvmem-status-button" id="kvmemStatusButton" type="button" title="KVMem 服务状态">
-            <i id="kvmemStatusDot" aria-hidden="true"></i><span id="kvmemStatusLabel">KVMem</span>
+            <i id="kvmemStatusDot" class="kvmem-dot" aria-hidden="true"></i><span id="kvmemStatusLabel">KVMem</span>
           </button>
           <div class="kvmem-popover" id="kvmemPopover" hidden>
             <p class="kvmem-popover-title">KVMem 本地服务</p>
@@ -191,7 +191,7 @@
           <p>把 Agent 理解成一个「岗位角色」：它有自己的人设（提示词）、自己的工具箱（工具集）和技能包（Skill）。
             切换 Agent 就像换了一个不同岗位的助手——它能干什么、不能干什么，完全由工具箱决定：
             没勾选的工具，它一律用不了。工具箱在会话开始时就锁定，中途不能换（要改去「设置 → Agent」）。</p>
-          <strong>内置 6 个 Agent，按用途挑一个就行</strong>
+          <strong>内置 7 个 Agent，按用途挑一个就行</strong>
           <ul>
             <li><b>教程助手 Agent</b>（下拉里排第一位）：不会用 Cat Chat 就问它。它只读、不改你的文件，
               回答一律是「一句话结论 + 编号点击步骤 + 这个功能在哪个页面」。</li>
@@ -202,8 +202,11 @@
               动笔前先问你给哪个模型、要不要英文、出图还是出视频。</li>
             <li><b>编程助手 Agent</b>：写代码、改脚本、看报错找它；动手改文件前会先说要改哪几个。</li>
             <li><b>Skill 助手 Agent</b>：帮你发现、安装、用好 Skill——你说想做什么，它去已装清单里找对口的。</li>
+            <li><b>造梦机助手</b>：在对话里用造梦机（工作台）已导入的工作流出图出片。先在造梦机工作流页
+              「对话参数」里指认提示词/尺寸等槽位，再回对话说需求：它预检参数、提交造梦机原生任务，
+              完成或失败后自动回来说结果。整套工具单独授权，只装在这一预设上。</li>
           </ul>
-          <small>这 6 个是内置的：能改能复制，但删不掉（卡片上没有 ×）。
+          <small>这 7 个是内置的：能改能复制，但删不掉（卡片上没有 ×）。
             早期版本预置的「通用 Agent / 编程 Agent / 短剧 Agent」已退役：升级时
             会自动清掉你没改过的那几个；改过的原样留着，去留由你决定。</small>
           <strong>想用 ComfyUI 出图？两条路任选其一</strong>
@@ -976,6 +979,60 @@
                 <button class="control-button" type="button" id="comfyuiSaveAsCancel">取消</button>
               </div>
               <p class="comfyui-import-error" id="comfyuiSaveAsError" role="alert"></p>
+            </form>
+          </dialog>
+          <dialog class="comfyui-import-dialog comfyui-params-dialog comfyui-chat-config-dialog" id="comfyuiChatConfigDialog" aria-label="对话参数">
+            <form method="dialog" class="comfyui-import-form">
+              <h3 id="comfyuiChatConfigTitle">对话参数</h3>
+              <p class="comfyui-import-reminder">指认这份工作流允许「造梦机助手」在对话里修改哪些参数：每个用途绑定一个或几个参数槽位，对话按用途 ID 填值，程序负责写进真实地址。未指认的参数一律保持工作流原值；这份配置只服务对话生成，不影响页面上的单次/批量表单。</p>
+              <p class="comfyui-chat-config-fingerprint" id="comfyuiChatConfigFingerprint" role="status"></p>
+              <div class="comfyui-chat-config-list" id="comfyuiChatConfigList" aria-label="已指认的对话参数"></div>
+              <div class="comfyui-chat-config-add">
+                <strong>添加参数</strong>
+                <div class="comfyui-chat-config-add-grid">
+                  <label>用途
+                    <select id="comfyuiChatConfigPurpose">
+                      <option value="positive_prompt">正向提示词</option>
+                      <option value="negative_prompt">负向提示词</option>
+                      <option value="size">输出尺寸（宽高两槽或原生比例/MP 槽）</option>
+                      <option value="seed">随机种子</option>
+                      <option value="number">数值参数</option>
+                      <option value="enum">枚举参数（下拉候选）</option>
+                      <option value="text">文本参数</option>
+                      <option value="bool">开关参数</option>
+                      <option value="media">参考素材（图片/音频/视频槽）</option>
+                    </select>
+                  </label>
+                  <label>显示名（对话里叫它什么）
+                    <input id="comfyuiChatConfigName" type="text" maxlength="60" placeholder="例：主体提示词 / 输出尺寸 / 参考图">
+                  </label>
+                  <label>询问策略
+                    <select id="comfyuiChatConfigAsk">
+                      <option value="on_mention">用户提到再改（默认）</option>
+                      <option value="always">每次生成前必答</option>
+                      <option value="keep_default">保持默认，不问</option>
+                    </select>
+                  </label>
+                  <label class="comfyui-chat-config-peritem">
+                    <input type="checkbox" id="comfyuiChatConfigPerItem">
+                    <span>批量生成时允许逐条变化</span>
+                  </label>
+                  <label class="comfyui-chat-config-desc">用途说明（可选，帮对话理解这个参数）
+                    <input id="comfyuiChatConfigDesc" type="text" maxlength="200" placeholder="例：画面的主体内容，不包含风格词">
+                  </label>
+                </div>
+                <div class="comfyui-chat-config-slots-label">参数槽位（勾选一个或多个；用途与槽位类型不匹配的不会列出）
+                  <!-- 勾选框列表由 JS 渲染（行 = label>input[type=checkbox]+文字，§九.169 已做作用域还原） -->
+                  <div class="comfyui-chat-config-slot-picker" id="comfyuiChatConfigSlots"></div>
+                </div>
+                <button class="control-button" type="button" id="comfyuiChatConfigAddBtn">＋ 把这条加入配置</button>
+              </div>
+              <div class="comfyui-import-actions">
+                <button class="control-button" type="button" id="comfyuiChatConfigSave">保存</button>
+                <button class="control-button" type="button" id="comfyuiChatConfigReset">重置</button>
+                <button class="control-button" type="button" id="comfyuiChatConfigCancel">取消</button>
+              </div>
+              <p class="comfyui-import-error" id="comfyuiChatConfigError" role="alert"></p>
             </form>
           </dialog>
           <dialog class="comfyui-import-dialog comfyui-json-dialog" id="comfyuiJsonDialog" aria-label="编辑 JSON 参数">
@@ -2300,6 +2357,12 @@
                 </button>
               </div>
             </div>
+            <!-- 造梦机助手会话专属：对话侧直达「对话参数」配置弹窗（设计文档 §5.4；仅 agent_id=dreamer 显示）。
+                 确定性界面操作，不新增分页/弹窗，复用造梦机工作流卡的同一个 #comfyuiChatConfigDialog。 -->
+            <button type="button" class="composer-meta-more-button dreamer-chat-config-entry" id="dreamerChatConfigEntry" title="指认造梦机助手在对话里可修改的参数" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h7"></path></svg>
+              对话参数
+            </button>
             <div class="composer-meta-more">
               <button type="button" class="composer-meta-more-button" id="quickMessageButton" aria-haspopup="menu" aria-expanded="false" title="快捷消息：点击插入常用提示词">快捷消息</button>
               <div class="quick-msg-panel" id="quickMessagePanel" hidden>
@@ -3525,7 +3588,7 @@
         </label>
         <input id="providerKind" type="hidden" value="0">
         <p class="hint provider-field" id="providerKindHint">在线 API 使用远程模型服务。</p>
-        <label class="provider-field">请求格式
+        <label class="provider-field" id="providerFormatField">请求格式
           <select id="providerFormat">
             <option value="openai_chat">OpenAI 兼容（OpenAI / DeepSeek / Grok）/v1/chat/completions</option>
             <option value="codex_responses">Codex /v1/responses</option>
@@ -3539,9 +3602,45 @@
         </label>
         <p class="provider-format-guide" id="providerFormatGuide" hidden></p>
         <div class="provider-field kvmem-provider-fields" id="kvmemProviderFields" hidden>
-          <label class="checkbox-field"><input id="providerKvmemEnabled" type="checkbox"><span class="checkbox-text"><b>由 KVMem 控制台管理</b><small class="hint">仅适用于本机 KVMem 服务；启动/停止按钮会出现在对话顶栏 Agent 右侧。</small></span></label>
+          <label class="checkbox-field"><input id="providerKvmemEnabled" type="checkbox"><span class="checkbox-text"><b>由 KVMem 管理（本机启停模型）</b><small class="hint">启动/停止按钮会出现在对话顶栏 Agent 右侧；不需要先打开 KVMem 控制台。</small></span></label>
+          <div class="kvmem-service-row" id="providerKvmemServiceRow">
+            <span class="kvmem-service-status"><i id="providerKvmemServiceDot" class="kvmem-dot" aria-hidden="true"></i><span id="providerKvmemServiceText">状态：未知</span></span>
+            <button class="control-button tiny" id="providerKvmemServiceRefresh" type="button">刷新</button>
+            <button class="control-button tiny" id="providerKvmemServiceStart" type="button">启动</button>
+            <button class="control-button tiny" id="providerKvmemServiceStop" type="button">停止</button>
+            <small class="hint" id="providerKvmemServiceHint"></small>
+          </div>
           <label>控制台地址<input id="providerKvmemManagerUrl" type="url" placeholder="http://127.0.0.1:18199"></label>
-          <small class="hint">只允许本机回环地址；普通 llama.cpp 不会显示启停控制。</small>
+          <small class="hint">只允许本机回环地址；控制程序没开时 Cat Chat 会后台拉起，不弹窗口。</small>
+          <label>KVMem 安装目录<input id="providerKvmemInstallDir" type="text" placeholder="例如 D:\kvmem-v0.19.1-windows-x64-nvidia-50-unified" spellcheck="false"></label>
+          <small class="hint">KVMem 解压后的根目录（里面有 runtime、scripts、workers）。</small>
+          <label>模型文件路径<input id="providerKvmemModelPath" type="text" placeholder="例如 D:\models\Qwen3-32B.gguf" spellcheck="false"></label>
+          <div class="kvmem-config-row">
+            <label>后端
+              <select id="providerKvmemBackend">
+                <option value="">自动（跟随安装包）</option>
+                <option value="ninfer">ninfer</option>
+                <option value="llamacpp">llamacpp</option>
+                <option value="polystrata">polystrata</option>
+              </select>
+            </label>
+            <label>GPU（可选）<input id="providerKvmemGpu" type="text" list="providerKvmemGpuList" placeholder="留空自动检测；多卡时可从候选选择"><datalist id="providerKvmemGpuList"></datalist></label>
+            <label>视觉模块驻留
+              <select id="providerKvmemVisionResidency">
+                <option value="cpu">CPU（默认，省显存）</option>
+                <option value="resident">常驻 GPU（快，占显存）</option>
+              </select>
+            </label>
+          </div>
+          <div class="kvmem-config-actions">
+            <button class="control-button" id="providerKvmemCapture" type="button">读取当前运行配置</button>
+            <small class="hint" id="providerKvmemCaptureHint">模型运行时导入它的完整参数；未运行时读取默认参数（需后台拉起控制程序，不启动模型）。</small>
+          </div>
+          <details class="kvmem-config-details" id="providerKvmemDetails">
+            <summary>完整启动参数（可选，已懂参数再改）</summary>
+            <textarea id="providerKvmemConfigJson" rows="7" spellcheck="false" placeholder='{"schema_version": 1, "parameters": {"Context": 262144}}'></textarea>
+            <small class="hint">JSON 结构 {schema_version: 1, parameters: {...}}；上方填写的模型路径、后端、GPU、视觉驻留保存时优先。API Key 不保存在这里，启动时自动使用本供应商的 API Key。</small>
+          </details>
         </div>
         <label class="provider-field">模型名称
           <span class="model-picker">

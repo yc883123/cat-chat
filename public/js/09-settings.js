@@ -3,7 +3,7 @@
 // ============================================================
 
 import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, notifyProvidersChanged, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
-import { applyConversationAgent, invalidateModelCatalogs, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
+import { applyConversationAgent, invalidateModelCatalogs, KVMEM_FAIL_STATES, KVMEM_POLL_INTERVAL_MS, KVMEM_POLL_LIMITS, kvmemLabel, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
 import { playDoneSound } from "./20-sound.js";
@@ -616,6 +616,8 @@ export function applyProviderPreset(presetId) {
   syncProviderKindOptions();
   setProviderModelOptions([], preset.model || '');
   updateProviderFormatGuide();
+  // 预设是程序赋值，不触发 checkbox 的 change 事件——KVMem 区块必须在这里显式展开。
+  updateProviderKvmemFields();
   updateProviderContextField();
   updateUnloadModelButton();
   setProviderPresetSelection(preset.id);
@@ -808,6 +810,7 @@ export function copyProvider(providerId) {
     'kind', 'base_url', 'request_format', 'model', 'preset_id', 'local_backend',
     'service_manager', 'service_manager_url', 'max_output_tokens', 'temperature',
     'reasoning_effort', 'supports_images_explicit',
+    'kvmem_install_dir', 'kvmem_launch_config',
   ]) {
     if (source[field] !== undefined) copy[field] = source[field];
   }
@@ -838,6 +841,20 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   state.providerKvmemEnabled = provider.service_manager === 'kvmem';
   $('#providerKvmemEnabled').checked = state.providerKvmemEnabled;
   $('#providerKvmemManagerUrl').value = provider.service_manager_url || 'http://127.0.0.1:18199';
+  const kvmemParams = (provider.kvmem_launch_config && provider.kvmem_launch_config.parameters) || {};
+  $('#providerKvmemInstallDir').value = provider.kvmem_install_dir || '';
+  $('#providerKvmemModelPath').value = kvmemParams.Model || '';
+  $('#providerKvmemBackend').value = kvmemParams.Backend || '';
+  $('#providerKvmemGpu').value = kvmemParams.Gpu ?? '';
+  // 视觉驻留只有合法两值；旧配置/外部导入缺键或带垃圾值时一律落回 CPU 默认。
+  $('#providerKvmemVisionResidency').value = kvmemParams.VisionResidency === 'resident' ? 'resident' : 'cpu';
+  $('#providerKvmemConfigJson').value = provider.kvmem_launch_config
+    ? JSON.stringify(provider.kvmem_launch_config, null, 2)
+    : '';
+  $('#providerKvmemDetails').open = false;
+  $('#providerKvmemCaptureHint').textContent = '';
+  // 已保存的卡自动带出服务状态；新卡没 id，按钮提示先保存。
+  void refreshProviderKvmemService();
   $('#providerContextWindow').value = provider.context_window || provider.context_size || '';
   $('#providerMaxOutputTokens').value = provider.max_output_tokens || '';
   $('#providerTemperature').value = provider.temperature ?? '';
@@ -893,14 +910,186 @@ export function syncProviderKindOptions(previousFormat = '') {
   if (hint) hint.textContent = local ? '本地 API 可使用 llama.cpp、Unsloth、Ollama 或 LM Studio 服务。' : '在线 API 使用远程模型服务。';
 }
 
+// KVMem 接管后的格式说明：线路就是 OpenAI 兼容 /v1（与 llama.cpp server 同一套），
+// 固定走 llama_cpp，不再让用户手选请求格式——解绑「必须先选 llama.cpp 才出现 KVMem」。
+const KVMEM_FORMAT_GUIDE = 'KVMem 固定走 OpenAI 兼容 /v1 接口，无需选择请求格式。在下方填写安装目录和模型文件路径，即可在对话顶栏启动/停止模型。';
+
+// 设置页 KVMem 服务启停：与顶栏共用后端 API 和轮询常量，但状态独立——编辑中的卡
+// 不一定是会话当前供应商。新卡未保存没有 id，按钮可用但点击提示先保存。
+const providerKvmemServiceState = { busy: false, request: 0 };
+
+function providerKvmemServiceTarget() {
+  const id = $('#providerId')?.value.trim();
+  return id ? `/api/providers/${encodeURIComponent(id)}/kvmem` : null;
+}
+
+function renderProviderKvmemService(payload) {
+  const dot = $('#providerKvmemServiceDot');
+  if (!dot) return;
+  const status = payload?.status || 'unknown';
+  dot.dataset.status = status;
+  $('#providerKvmemServiceText').textContent = `状态：${kvmemLabel(status)}`;
+  const noTarget = !providerKvmemServiceTarget();
+  $('#providerKvmemServiceHint').textContent = noTarget ? '先保存供应商，才能在这里启停本机模型。' : '';
+  $('#providerKvmemServiceRefresh').disabled = providerKvmemServiceState.busy;
+  $('#providerKvmemServiceStart').disabled = providerKvmemServiceState.busy || noTarget || ['ready', 'running', 'starting'].includes(status);
+  $('#providerKvmemServiceStop').disabled = providerKvmemServiceState.busy || noTarget || ['stopped', 'stopping', 'unknown', 'error'].includes(status);
+}
+
+export async function refreshProviderKvmemService({ quiet = true } = {}) {
+  const request = ++providerKvmemServiceState.request;
+  const target = providerKvmemServiceTarget();
+  if (!target) { renderProviderKvmemService({ status: 'unknown' }); return null; }
+  try {
+    const payload = await api(`${target}/status`);
+    if (request !== providerKvmemServiceState.request) return null;
+    renderProviderKvmemService(payload);
+    return payload;
+  } catch (error) {
+    if (request !== providerKvmemServiceState.request) return null;
+    renderProviderKvmemService({ status: 'error', error: error.message });
+    if (!quiet) toast(`KVMem 状态读取失败：${error.message}`);
+    return null;
+  }
+}
+
+export async function providerKvmemServiceAction(action) {
+  if (providerKvmemServiceState.busy) return;
+  const target = providerKvmemServiceTarget();
+  if (!target) { toast('先保存供应商，再操作本机模型启停'); return; }
+  const current = await refreshProviderKvmemService();
+  if (!current) return;
+  // 按钮本身就是明确意图，不再弹 confirm 复核；发起前刷新是为了拿最新状态，失败即中止。
+  const request = ++providerKvmemServiceState.request;
+  const alive = () => providerKvmemServiceState.busy && request === providerKvmemServiceState.request;
+  providerKvmemServiceState.busy = true;
+  renderProviderKvmemService({ ...current, status: action === 'start' ? 'starting' : 'stopping' });
+  try {
+    await api(`${target}/${action}`, { method: 'POST', body: { confirm: true } });
+    // 有界轮询：直到目标状态、明确失败或超时；偶发状态读取失败继续等，不提前判负。
+    const targetStates = action === 'start' ? ['ready', 'running'] : ['stopped'];
+    const deadline = Date.now() + KVMEM_POLL_LIMITS[action];
+    let final = null;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, KVMEM_POLL_INTERVAL_MS));
+      if (!alive()) return;
+      const payload = await api(`${target}/status`).catch(() => null);
+      if (!alive()) return;
+      if (payload) renderProviderKvmemService(payload);
+      if (payload && (targetStates.includes(payload.status) || KVMEM_FAIL_STATES.includes(payload.status))) { final = payload; break; }
+    }
+    if (!alive()) return;
+    if (final && targetStates.includes(final.status)) {
+      toast(action === 'start' ? 'KVMem 模型已就绪' : 'KVMem 模型已停止，显存已释放');
+    } else if (final && KVMEM_FAIL_STATES.includes(final.status)) {
+      toast(`KVMem ${action === 'start' ? '启动' : '停止'}未完成：${final.error || kvmemLabel(final.status)}`);
+    } else {
+      toast(action === 'start'
+        ? 'KVMem 启动仍在进行，可稍后点「刷新」查看状态'
+        : 'KVMem 停止仍未确认，可稍后点「刷新」查看状态');
+    }
+  } catch (error) {
+    toast(`KVMem 操作失败：${error.message}`);
+  } finally {
+    providerKvmemServiceState.busy = false;
+    if (request === providerKvmemServiceState.request) void refreshProviderKvmemService();
+  }
+}
+
 export function updateProviderKvmemFields() {
   const local = $('#providerKind')?.value === '1';
-  const format = $('#providerFormat')?.value || '';
+  const enabled = $('#providerKvmemEnabled')?.checked;
   const fields = $('#kvmemProviderFields');
-  const active = local && format === 'llama_cpp';
+  const active = Boolean(local && enabled);
   if (fields) fields.hidden = !active;
+  if (active) {
+    // 勾选即渲染服务行基态：已存卡随后由反显的自动刷新覆盖；新卡没 id，直接提示先保存。
+    renderProviderKvmemService({ status: 'unknown' });
+  }
   const url = $('#providerKvmemManagerUrl');
   if (url && active && !url.value) url.value = 'http://127.0.0.1:18199';
+  const format = $('#providerFormat');
+  const guide = $('#providerFormatGuide');
+  const formatField = $('#providerFormatField');
+  if (active) {
+    // KVMem 是独立预设项，不挂在 llama.cpp 名下：整个「请求格式」字段隐藏，
+    // 线路在底层固定（存储值仍 llama_cpp，与已存卡片兼容），说明文案换成 KVMem 自己的。
+    if (format) format.value = 'llama_cpp';
+    if (formatField) formatField.hidden = true;
+    if (guide) {
+      guide.textContent = KVMEM_FORMAT_GUIDE;
+      guide.hidden = false;
+    }
+  } else {
+    if (formatField) formatField.hidden = false;
+    if (format) format.disabled = !state.providerEditing;
+    updateProviderFormatGuide();
+  }
+}
+
+// 「读取当前运行配置」：把控制程序的 active_config / 默认参数回填进表单。
+// 不绑定供应商（新卡也能用）；控制程序没开时先征得同意再后台拉起（不启动模型）。
+// 回包异步到达时核对表单代次，避免覆盖用户已切换的另一张卡。
+let kvmemCaptureInFlight = false;
+export async function captureProviderKvmem() {
+  const fields = $('#kvmemProviderFields');
+  if (!fields || fields.hidden || kvmemCaptureInFlight) return;
+  const managerUrl = $('#providerKvmemManagerUrl').value.trim() || 'http://127.0.0.1:18199';
+  const installDir = $('#providerKvmemInstallDir').value.trim();
+  const generation = providerFormGeneration;
+  const button = $('#providerKvmemCapture');
+  const hint = $('#providerKvmemCaptureHint');
+  kvmemCaptureInFlight = true;
+  if (button) button.disabled = true;
+  if (hint) hint.textContent = '正在读取运行配置……';
+  const showHint = (text) => { if (hint && generation === providerFormGeneration) hint.textContent = text; };
+  try {
+    let payload;
+    try {
+      payload = await api('/api/kvmem/capture', { method: 'POST', body: { manager_url: managerUrl, install_dir: installDir } });
+    } catch (error) {
+      if (error.status !== 409 || !error.payload?.needs_confirm) throw error;
+      if (!confirm('KVMem 控制程序未运行。要后台拉起它读取默认参数吗？\n不会启动模型，也不会弹控制台窗口。')) {
+        showHint('');
+        return;
+      }
+      payload = await api('/api/kvmem/capture', {
+        method: 'POST',
+        body: { manager_url: managerUrl, install_dir: installDir, confirm: true },
+      });
+    }
+    if (generation !== providerFormGeneration) return;
+    applyKvmemCapture(payload);
+    showHint(payload.source === 'active' ? '已导入当前运行配置；记得保存供应商。' : '已导入默认参数；记得填写模型路径并保存。');
+  } catch (error) {
+    showHint(`读取失败：${error.message}`);
+  } finally {
+    kvmemCaptureInFlight = false;
+    if (button) button.disabled = false;
+  }
+}
+
+function applyKvmemCapture(payload) {
+  const params = (payload && payload.parameters) || {};
+  $('#providerKvmemModelPath').value = params.Model || '';
+  $('#providerKvmemBackend').value = params.Backend || '';
+  $('#providerKvmemGpu').value = params.Gpu ?? '';
+  $('#providerKvmemVisionResidency').value = params.VisionResidency === 'resident' ? 'resident' : 'cpu';
+  $('#providerKvmemConfigJson').value = JSON.stringify({ schema_version: 1, parameters: params }, null, 2);
+  // GPU 自动检测：候选进 datalist；只有一块卡就直接带入，不用手敲 UUID。
+  const gpus = Array.isArray(payload?.gpus) ? payload.gpus : [];
+  const list = $('#providerKvmemGpuList');
+  if (list) {
+    list.replaceChildren(...gpus.map((gpu) => {
+      const option = document.createElement('option');
+      option.value = gpu.uuid || '';
+      option.label = gpu.name ? `${gpu.name}（${gpu.memory_mib || '?'} MiB）` : '';
+      return option;
+    }));
+  }
+  if (!$('#providerKvmemGpu').value && gpus.length === 1) {
+    $('#providerKvmemGpu').value = gpus[0].uuid || '';
+  }
 }
 
 export function updateProviderFormatGuide() {
@@ -1019,6 +1208,36 @@ export function providerFormValue() {
     return raw ? Number(raw) : undefined;
   };
   const imageChoice = $('#providerSupportsImages').value;
+  const kvmemEnabled = kind === 'local' && Boolean($('#providerKvmemEnabled')?.checked);
+  // KVMem 启动配置：专用字段（模型路径/后端/GPU/视觉驻留）保存时覆盖 JSON 里的同名键；
+  // JSON 其余键（上下文、显存预算等）原样保留。非法 JSON 直接报错，不静默丢弃。
+  let kvmemInstallDir;
+  let kvmemLaunchConfig;
+  if (kvmemEnabled) {
+    kvmemInstallDir = $('#providerKvmemInstallDir').value.trim();
+    const rawJson = $('#providerKvmemConfigJson').value.trim();
+    let params = {};
+    if (rawJson) {
+      let parsed;
+      try {
+        parsed = JSON.parse(rawJson);
+      } catch {
+        throw new Error('完整启动参数不是合法 JSON，请修正或清空后再保存');
+      }
+      if (!parsed || typeof parsed !== 'object' || parsed.schema_version !== 1 || typeof parsed.parameters !== 'object' || !parsed.parameters) {
+        throw new Error('完整启动参数必须是 {schema_version: 1, parameters: {...}} 结构');
+      }
+      params = { ...parsed.parameters };
+    }
+    params.Model = $('#providerKvmemModelPath').value.trim();
+    params.Backend = $('#providerKvmemBackend').value || params.Backend || '';
+    const gpu = $('#providerKvmemGpu').value.trim();
+    if (gpu) params.Gpu = gpu;
+    else delete params.Gpu;
+    // 视觉驻留总是显式写入（控制程序草稿默认 cpu），显式键优先于 JSON 里的同名键。
+    params.VisionResidency = $('#providerKvmemVisionResidency').value === 'resident' ? 'resident' : 'cpu';
+    kvmemLaunchConfig = { schema_version: 1, parameters: params };
+  }
   return {
     id: $('#providerId').value,
     // 来源模板（可空）：服务端据此回填空字段，也让卡片记住自己是哪个模板来的。
@@ -1030,8 +1249,10 @@ export function providerFormValue() {
     kind,
     local_backend: kind === 'local' ? $('#providerFormat').value : undefined,
     request_format: $('#providerFormat').value,
-    service_manager: kind === 'local' && $('#providerKvmemEnabled')?.checked ? 'kvmem' : undefined,
-    service_manager_url: kind === 'local' && $('#providerKvmemEnabled')?.checked ? $('#providerKvmemManagerUrl').value.trim() : undefined,
+    service_manager: kvmemEnabled ? 'kvmem' : undefined,
+    service_manager_url: kvmemEnabled ? $('#providerKvmemManagerUrl').value.trim() : undefined,
+    kvmem_install_dir: kvmemInstallDir,
+    kvmem_launch_config: kvmemLaunchConfig,
     context_window: numberOrUndefined('#providerContextWindow'),
     max_output_tokens: numberOrUndefined('#providerMaxOutputTokens'),
     temperature: numberOrUndefined('#providerTemperature'),
@@ -1046,11 +1267,24 @@ export function providerFormValue() {
 let providerModelCheckGeneration = 0;
 export async function loadProviderModels({ automatic = false } = {}) {
   if (!state.providerEditing) return;
-  const values = providerFormValue();
+  let values;
+  try {
+    values = providerFormValue();
+  } catch (error) {
+    // KVMem JSON 参数非法时不再继续检查模型，把原因写进表单错误行。
+    if (!automatic) $('#providerError').textContent = error.message;
+    return;
+  }
   const generation = ++providerModelCheckGeneration;
   const snapshot = JSON.stringify(values);
-  const current = () => state.providerEditing && generation === providerModelCheckGeneration
-    && JSON.stringify(providerFormValue()) === snapshot;
+  const current = () => {
+    if (!(state.providerEditing && generation === providerModelCheckGeneration)) return false;
+    try {
+      return JSON.stringify(providerFormValue()) === snapshot;
+    } catch {
+      return false; // 表单变为非法（如 JSON 被改坏）视为已改动，停止本次检查。
+    }
+  };
   const localFormat = ['lm_studio', 'ollama', 'llama_cpp', 'unsloth'].includes(values.request_format);
   if (!values.base_url || (!values.api_key && !values.id && !localFormat)) {
     if (!automatic) $('#providerError').textContent = '请先填写 API URL 和 API Key';

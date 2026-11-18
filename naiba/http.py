@@ -794,6 +794,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             with_schemes = str(query.get("with_schemes", [""])[0]).lower() in {"1", "true", "yes"}
             self._json(*self.app.comfyui.api_batch(
                 path.rsplit("/", 1)[-1], with_schemes=with_schemes))
+        elif path.startswith("/api/comfyui/workflows/") and path.endswith("/chat-config"):
+            # 造梦机「对话参数」：读取按工作流指纹绑定的对话用途指认。
+            self._json(*self.app.comfyui.api_chat_config_get(path.split("/")[-2]))
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow(path.rsplit("/", 1)[-1]))
         elif path == "/api/comfyui/tasks":
@@ -1386,6 +1389,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/providers/") and path.endswith("/kvmem/stop"):
             provider_id = path[len("/api/providers/"):-len("/kvmem/stop")].strip("/")
             self._json(*self.app.api_kvmem_stop(provider_id, body))
+        elif path == "/api/kvmem/capture":
+            # 读取控制程序当前运行配置/默认参数回填表单；不绑定供应商（新卡也能用）。
+            self._json(*self.app.api_kvmem_capture(body))
         elif path == "/api/providers/pricing":
             # 定价弹层专用入口：只提交 {id, kind, pricing}，不碰连接配置。
             self._json(*self.app.api_update_provider_pricing(body))
@@ -1907,6 +1913,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+        if path.startswith("/api/comfyui/workflows/") and path.endswith("/chat-config"):
+            # 造梦机「对话参数」：保存按工作流指纹绑定的对话用途指认（计划 2026-11-17 §5.4）。
+            self._json(*self.app.comfyui.api_chat_config_set(path.split("/")[-2], body))
+            return
         self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 
     def do_DELETE(self) -> None:
@@ -1953,6 +1963,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             self._json(*self.app.labeler.api_annotations_clear())
+        elif path.startswith("/api/comfyui/workflows/") and path.endswith("/chat-config"):
+            # 造梦机「对话参数」：重置（删除）这份工作流的对话用途指认；不改工作流本体。
+            self._json(*self.app.comfyui.api_chat_config_delete(path.split("/")[-2]))
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow_delete(path.rsplit("/", 1)[-1]))
         # ---- 创作场（小说改编） ----

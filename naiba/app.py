@@ -45,6 +45,7 @@ from naiba.core.conv_files import (
 from naiba.core.paths import normalized_path_key, path_within, resolved_path_key
 from naiba.core.usage_stats import cost_for, tokens_from_summary
 from naiba.jobs import JobRegistry
+from naiba.kvmem import KVMemError, KVMemClient, last_start_path, read_last_run, write_last_run
 from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_url, provider_presets_payload
 from naiba.llm.runtime import ModelRuntime
 from naiba.mcp import MCPRegistry
@@ -304,6 +305,11 @@ class NaibaChatApp:
             self._paths.rebind_data_dir(configured_data_dir)
         self._paths.data_dir.mkdir(parents=True, exist_ok=True)
         self.storage = ChatStorage(self._paths.data_dir / "chat.db")
+        # KVMem 后台控制程序管理对象与按控制地址隔离的操作锁（组合根持有）。
+        from naiba.kvmem import ConsoleLauncher
+        self.kvmem_launcher = ConsoleLauncher()
+        self._kvmem_locks: dict[str, threading.RLock] = {}
+        self._kvmem_locks_guard = threading.Lock()
         # Super-agent P0 只装配独立任务域和假 Worker；不接管现有 Chat/Job/Studio 流程。
         from naiba.super_agent import SuperAgentService
 
@@ -487,6 +493,11 @@ class NaibaChatApp:
         from naiba.tools.providers.comfyui import ComfyUIProvider
 
         self.tool_registry.register_provider(ComfyUIProvider(self))
+        # 造梦机对话域 Provider（计划 2026-11-17）：七个 dream_* 工具（普通工具，
+        # 走 ToolExecutor 真实权限链；仅限「造梦机对话」工具集的会话启用）。
+        from naiba.tools.providers.dream import DreamToolProvider
+
+        self.tool_registry.register_provider(DreamToolProvider(self))
         from naiba.capability import CapabilityRuntime
 
         self.capabilities = CapabilityRuntime(self)
@@ -1618,15 +1629,116 @@ class NaibaChatApp:
         profile, manager_url = self._kvmem_provider(provider_id)
         return profile, KVMemClient(manager_url, str(profile.get("base_url") or ""))
 
+    def _kvmem_manager_lock(self, manager_url: str) -> threading.RLock:
+        with self._kvmem_locks_guard:
+            lock = self._kvmem_locks.get(manager_url)
+            if lock is None:
+                lock = self._kvmem_locks[manager_url] = threading.RLock()
+            return lock
+
+    @staticmethod
+    def _kvmem_backend_defaults(params: dict[str, Any], client) -> dict[str, Any]:
+        """缺省键按所选后端从控制程序草稿补默认值（Vision/Context 等）。
+
+        控制程序只在新草稿上套 ENGINE 默认值，/api/launcher/start 不会补——最小保存
+        配置直接启动会丢视觉等模块。草稿后端与配置后端一致才合并；显式保存的键一律
+        优先，另一后端的参数绝不混入。
+        """
+        try:
+            info = client.info()
+        except KVMemError:
+            return dict(params)
+        draft = info.get("draft") if isinstance(info.get("draft"), dict) else {}
+        draft_params = draft.get("parameters") if isinstance(draft.get("parameters"), dict) else {}
+        if str(draft_params.get("Backend") or "").strip().casefold() != str(params.get("Backend") or "").strip().casefold():
+            return dict(params)
+        merged = dict(draft_params)
+        merged.update(params)
+        merged.pop("ApiKey", None)
+        return merged
+
+    def _kvmem_start_config(self, profile: dict[str, Any], manager_url: str, client) -> tuple[dict[str, Any], str]:
+        """启动配置取用顺序：供应商明确保存 → 自动记录的最近运行配置 → 控制程序有效草稿。
+
+        完整参数按类型原样使用；旧四项缓存只作有限迁移来源（端口/监听地址由推理
+        地址推断，其余交给控制程序默认值）。不拿另一后端的默认值补缺。
+        """
+        from naiba.kvmem import KVMemError, _port_from_url, read_last_run
+        saved = profile.get("kvmem_launch_config")
+        if isinstance(saved, dict) and saved.get("schema_version") == 1:
+            params = saved.get("parameters")
+            if isinstance(params, dict) and str(params.get("Model") or "").strip():
+                return {"schema_version": 1, "parameters": self._kvmem_backend_defaults(dict(params), client)}, "provider"
+        provider_id = str(profile.get("id") or "")
+        record = read_last_run(last_start_path(self.paths.data_dir), provider_id, manager_url)
+        if record:
+            params = dict(record["config"].get("parameters") or {})
+            if record["source"] == "legacy":
+                params.setdefault("ListenHost", "127.0.0.1")
+                port = _port_from_url(str(profile.get("base_url") or ""))
+                if port:
+                    params.setdefault("Port", port)
+            if str(params.get("Model") or "").strip():
+                return {"schema_version": 1, "parameters": params}, record["source"]
+        try:
+            info = client.info()
+        except KVMemError:
+            info = None
+        if isinstance(info, dict):
+            draft = info.get("draft") if isinstance(info.get("draft"), dict) else {}
+            params = draft.get("parameters") if isinstance(draft.get("parameters"), dict) else {}
+            backends = info.get("backends") if isinstance(info.get("backends"), list) else []
+            if (isinstance(params, dict) and str(params.get("Model") or "").strip()
+                    and str(params.get("Backend") or "") in backends):
+                return {"schema_version": 1, "parameters": dict(params)}, "draft"
+        raise KVMemError("没有可用的 KVMem 启动配置：请在 Cat Chat 设置里填写 KVMem 安装目录和模型文件路径，"
+                         "或通过「读取当前运行配置」导入一次")
+
+    def _kvmem_ensure_console(self, profile: dict[str, Any], manager_url: str, client) -> None:
+        """控制地址明确不可达时后台拉起 KVMem 控制程序（不打开窗口）。"""
+        from naiba.kvmem import _nested, _port_from_url, wait_for_console
+        if self.kvmem_launcher.owned_running(manager_url):
+            handle = self.kvmem_launcher.handle(manager_url) or {}
+            info = wait_for_console(client, handle.get("process"))
+        else:
+            install_dir = str(profile.get("kvmem_install_dir") or "").strip()
+            if not install_dir:
+                raise KVMemError("KVMem 控制程序未运行，且本供应商没有配置安装目录；"
+                                 "请在 Cat Chat 设置中填写 KVMem 安装目录后重试")
+            port = _port_from_url(manager_url) or 18199
+            state_dir = Path(self.paths.data_dir) / "kvmem" / "console-state" / str(port)
+            log_path = Path(self.paths.data_dir) / "kvmem" / "console-logs" / f"console-{port}.log"
+            process = self.kvmem_launcher.launch(install_dir, manager_url, state_dir=state_dir, log_path=log_path)
+            info = wait_for_console(client, process, log_path=log_path)
+        backend_root = str(_nested(info if isinstance(info, dict) else {}, "backend_root") or "")
+        try:
+            match = bool(backend_root) and Path(backend_root).resolve() == Path(install_dir).expanduser().resolve()
+        except OSError:
+            match = False
+        if not match:
+            raise KVMemError("拉起的 KVMem 控制程序与配置的安装目录不一致，请检查设置中的安装目录")
+
     def api_kvmem_status(self, provider_id: str) -> tuple[dict[str, Any], int]:
         try:
-            profile, client = self._kvmem_client(provider_id)
-            status = client.readiness(str(profile.get("model") or ""))
+            profile, manager_url = self._kvmem_provider(provider_id)
+            from naiba.kvmem import KVMemError
+            client = self._kvmem_client(provider_id)[1]
+            status = client.readiness(str(profile.get("model") or ""),
+                                      auth_token=str(profile.get("api_key") or ""))
             status["provider_id"] = str(profile.get("id") or provider_id)
             if status.get("status") in {"ready", "running"}:
-                from naiba.kvmem import last_start_path, write_last_start
-                write_last_start(last_start_path(self.paths.data_dir), client.manager_url,
-                                 client.last_draft_parameters)
+                # 就绪后自动记录完整运行参数（不含 ApiKey）；失败不影响状态返回。
+                write_last_run(last_start_path(self.paths.data_dir), str(profile.get("id") or ""),
+                               manager_url, client.last_active_parameters)
+            elif status.get("status") == "stopped" and not status.get("model"):
+                # 停止态摘要可使用本供应商保存的配置，顶栏不至于一片空白。
+                try:
+                    config, _source = self._kvmem_start_config(profile, manager_url, client)
+                    params = config.get("parameters") or {}
+                    status["backend"] = str(params.get("Backend") or "")[:100]
+                    status["model"] = str(params.get("Model") or "")[:300]
+                except KVMemError:
+                    pass
             return status, HTTPStatus.OK
         except Exception as exc:  # noqa: BLE001 - adapter returns only safe text
             return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
@@ -1647,41 +1759,165 @@ class NaibaChatApp:
         if body.get("confirm") is not True:
             return {"error": "启动 KVMem 服务需要用户确认"}, HTTPStatus.CONFLICT
         try:
-            profile, client = self._kvmem_client(provider_id)
-            before = client.status()
-            if before.get("status") in {"ready", "running"}:
-                return {**before, "accepted": False, "message": "KVMem 服务已经在运行"}, HTTPStatus.OK
-            from naiba.kvmem import last_start_path, read_last_start, write_last_start
-            cache_path = last_start_path(self.paths.data_dir)
-            cached = read_last_start(cache_path).get(client.manager_url)
-            result = client.start(fallback=cached)
-            write_last_start(cache_path, client.manager_url, client.last_draft_parameters)
-            result["status"] = "starting"
-            result["summary"] = {
-                "backend": client.last_draft_parameters.get("Backend") or before.get("backend"),
-                "model": client.last_draft_parameters.get("Model") or before.get("model"),
-                "engine_summary": before.get("engine_summary"), "actual_port": before.get("actual_port"),
-            }
-            return result, HTTPStatus.ACCEPTED
+            profile, manager_url = self._kvmem_provider(provider_id)
+        except ValueError as exc:
+            return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        from naiba.kvmem import KVMemError, KVMemClient
+        client = KVMemClient(manager_url, str(profile.get("base_url") or ""))
+        try:
+            with self._kvmem_manager_lock(manager_url):
+                return self._kvmem_start_locked(profile, manager_url, client)
+        except KVMemError as exc:
+            return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    @staticmethod
+    def _kvmem_console_gpus(client) -> list[dict[str, Any]]:
+        """控制程序报告的 GPU 清单（uuid/name/显存）；不可达时为空。"""
+        info = client.console_info if isinstance(client.console_info, dict) and client.console_info else None
+        if info is None:
+            try:
+                info = client.info()
+            except KVMemError:
+                return []
+        gpus = info.get("gpus") if isinstance(info, dict) and isinstance(info.get("gpus"), list) else []
+        return [item for item in gpus if isinstance(item, dict) and str(item.get("uuid") or "").strip()]
+
+    def _kvmem_autofill_gpu(self, params: dict[str, Any], client) -> None:
+        """配置没写 Gpu 时自动检测：单卡直接填，多卡/无卡给出能落地的指引。"""
+        if str(params.get("Gpu") or "").strip():
+            return
+        gpus = self._kvmem_console_gpus(client)
+        if len(gpus) == 1:
+            params["Gpu"] = str(gpus[0].get("uuid") or "")
+            return
+        if len(gpus) > 1:
+            names = "、".join(str(item.get("name") or item.get("uuid") or "")[:40] for item in gpus[:4])
+            raise KVMemError(f"检测到 {len(gpus)} 块 GPU（{names}），请在设置里选择一块"
+                             "——「读取当前运行配置」会带出候选")
+        raise KVMemError("未检测到可用 GPU；请确认显卡驱动与 KVMem 安装目录后重试")
+
+    def _kvmem_start_locked(self, profile: dict[str, Any], manager_url: str, client):
+        probe = client.probe()
+        if probe.get("kind") == "foreign":
+            raise KVMemError(probe.get("error") or "控制地址被其他程序占用")
+        if probe.get("kind") == "unreachable":
+            self._kvmem_ensure_console(profile, manager_url, client)
+        current = client.status()
+        if current.get("status") in {"ready", "running"}:
+            return {**current, "accepted": False, "message": "KVMem 模型已在运行"}, HTTPStatus.OK
+        if current.get("status") == "starting":
+            # 有序锁只串行本进程；控制程序自己加载中时不能重复提交第二个模型进程。
+            return {**current, "accepted": False, "status": "starting",
+                    "message": "KVMem 模型正在加载，请等待当前启动完成"}, HTTPStatus.OK
+        config, source = self._kvmem_start_config(profile, manager_url, client)
+        params = dict(config.get("parameters") or {})
+        self._kvmem_autofill_gpu(params, client)
+        api_key = str(profile.get("api_key") or "")
+        if api_key and not str(params.get("ApiKey") or "").strip():
+            params["ApiKey"] = api_key
+        client.start({"schema_version": 1, "parameters": params})
+        # 自动记录本次完整参数（不含 ApiKey）；失败不阻断已受理的启动。
+        write_last_run(last_start_path(self.paths.data_dir), str(profile.get("id") or ""),
+                       manager_url, params)
+        return {"ok": True, "accepted": True, "status": "starting",
+                "message": "已请求启动 KVMem 模型，等待就绪",
+                "summary": {
+                    "backend": str(params.get("Backend") or "")[:100] or current.get("backend"),
+                    "model": str(params.get("Model") or "")[:300] or current.get("model"),
+                    "actual_port": params.get("Port") or current.get("actual_port"),
+                    "config_source": source,
+                }}, HTTPStatus.ACCEPTED
 
     def api_kvmem_stop(self, provider_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         if body.get("confirm") is not True:
             return {"error": "停止 KVMem 服务需要用户确认"}, HTTPStatus.CONFLICT
         try:
-            active = self._kvmem_active_usage(provider_id)
-            if active:
-                return {"ok": False, "status": "blocked", "error": "当前仍有任务使用该 KVMem 配置，请先等待或取消任务", "active_task_ids": active[:20]}, HTTPStatus.CONFLICT
-            _profile, client = self._kvmem_client(provider_id)
-            current = client.status()
-            if current.get("status") == "stopped":
-                return {**current, "accepted": False, "message": "KVMem 服务已经停止"}, HTTPStatus.OK
-            result = client.stop()
-            result["status"] = "stopping"
-            return result, HTTPStatus.ACCEPTED
+            profile, manager_url = self._kvmem_provider(provider_id)
+        except ValueError as exc:
+            return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        active = self._kvmem_active_usage(provider_id)
+        if active:
+            return {"ok": False, "status": "blocked", "error": "当前仍有任务使用该 KVMem 配置，请先等待或取消任务", "active_task_ids": active[:20]}, HTTPStatus.CONFLICT
+        from naiba.kvmem import KVMemError, KVMemClient
+        client = KVMemClient(manager_url, str(profile.get("base_url") or ""))
+        try:
+            with self._kvmem_manager_lock(manager_url):
+                return self._kvmem_stop_locked(profile, manager_url, client)
+        except KVMemError as exc:
+            return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def _kvmem_has_remembered_config(self, profile: dict[str, Any], manager_url: str, model: str) -> bool:
+        """当前模型参数是否已有其他可靠来源（明确保存的配置或既有的完整记录）。"""
+        saved = profile.get("kvmem_launch_config")
+        if isinstance(saved, dict) and isinstance(saved.get("parameters"), dict):
+            if str(saved["parameters"].get("Model") or "").strip() == model:
+                return True
+        record = read_last_run(last_start_path(self.paths.data_dir), str(profile.get("id") or ""), manager_url)
+        if record and str(record["config"].get("parameters", {}).get("Model") or "").strip() == model:
+            return True
+        return False
+
+    def _kvmem_stop_locked(self, profile: dict[str, Any], manager_url: str, client):
+        current = client.status()
+        if current.get("status") == "stopped":
+            return {**current, "accepted": False, "message": "KVMem 模型已经停止"}, HTTPStatus.OK
+        if current.get("status") == "starting":
+            return {"ok": False, "status": "busy",
+                    "error": "KVMem 模型正在加载，请等待启动完成或失败后再停止"}, HTTPStatus.CONFLICT
+        # 停止前保存当前完整运行配置；保存不成功且没有其他已记住的完整参数时，
+        # 明确拒绝停止，避免静默丢掉可恢复参数。
+        params = client.last_active_parameters
+        warning = ""
+        if params and str(params.get("Model") or "").strip():
+            model = str(params.get("Model") or "").strip()
+            if not write_last_run(last_start_path(self.paths.data_dir), str(profile.get("id") or ""),
+                                  manager_url, params):
+                if self._kvmem_has_remembered_config(profile, manager_url, model):
+                    warning = "停止前保存运行配置失败，恢复时将使用已保存的配置"
+                else:
+                    raise KVMemError("停止前无法保存当前运行配置（写入失败），为避免丢失参数未执行停止；"
+                                     "请检查数据目录磁盘后重试，或改用 KVMem 控制台停止")
+        result = client.stop()
+        if result.get("state") != "stopped":
+            # 控制程序没有确认模型进程退出，不能报成功。
+            return {"ok": False, "status": "stopping",
+                    "error": "KVMem 未确认模型已退出，请稍后刷新状态确认"}, HTTPStatus.BAD_REQUEST
+        payload = {"ok": True, "status": "stopped", "accepted": True,
+                   "message": "已停止 KVMem 托管模型并释放其显存"}
+        if warning:
+            payload["warning"] = warning
+        return payload, HTTPStatus.ACCEPTED
+
+    def api_kvmem_capture(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """读取控制程序当前运行配置或默认参数，回填设置表单；不启动模型。"""
+        from naiba.kvmem import DEFAULT_INFERENCE_URL, KVMemError, KVMemClient, validate_manager_url
+        try:
+            manager_url = validate_manager_url(str(body.get("manager_url") or ""))
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        install_dir = str(body.get("install_dir") or "").strip()
+        client = KVMemClient(manager_url, DEFAULT_INFERENCE_URL)
+        try:
+            probe = client.probe()
+            if probe.get("kind") == "foreign":
+                raise KVMemError(probe.get("error") or "控制地址被其他程序占用")
+            if probe.get("kind") == "unreachable":
+                if body.get("confirm") is not True:
+                    return {"ok": False, "needs_confirm": True,
+                            "error": "KVMem 控制程序未运行。需要后台拉起它来读取默认参数（不会启动模型）"}, HTTPStatus.CONFLICT
+                if not install_dir:
+                    raise KVMemError("控制程序未运行，且没有填写安装目录；请先填写安装目录再读取")
+                self._kvmem_ensure_console({"kvmem_install_dir": install_dir}, manager_url, client)
+            capture = client.capture()
+        except KVMemError as exc:
+            return {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        return {"ok": True, **capture}, HTTPStatus.OK
 
     def api_update_provider_pricing(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """只改一张卡片的三档单价（用量统计页「费用单价」弹层）。

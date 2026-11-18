@@ -171,8 +171,11 @@ def parse_input_decl(spec: Any) -> dict[str, Any] | None:
         return {"kind": "text", "candidates": None,
                 "multiline": bool(config.get("multiline"))}
     if upper in ("INT", "FLOAT", "NUMBER"):
+        # step（步长）：真实 ComfyUI 数字声明常带（如 EmptyLatentImage 的 width/height
+        # step=8）。缺省 None 表示节点没声明，调用方不得硬编码倍数；按声明对齐即可。
         return {"kind": "number", "candidates": None, "multiline": False,
-                "number_type": upper, "min": config.get("min"), "max": config.get("max")}
+                "number_type": upper, "min": config.get("min"), "max": config.get("max"),
+                "step": config.get("step")}
     if upper in ("BOOLEAN", "BOOL"):
         return {"kind": "bool", "candidates": None, "multiline": False}
     return None

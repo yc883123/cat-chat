@@ -282,7 +282,12 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         "key_url": "",
         "service_manager": "kvmem",
         "service_manager_url": "http://127.0.0.1:18199",
-        "hint": "本机 KVMem（免 Key）：① 启动 KVMem 控制台；② 控制台默认地址 http://127.0.0.1:18199，推理 API 默认 http://127.0.0.1:18200/v1；③ 保存后可在对话顶栏查看并控制 KVMem 服务。",
+        "hint": (
+            "本机 KVMem（免 Key）：① 保存后在供应商设置里填写 KVMem 安装目录和模型文件路径"
+            "（模型运行时可用「读取当前运行配置」导入完整参数）；② 启动/停止都在对话顶栏，"
+            "控制程序没开时 Cat Chat 会后台拉起，不需要打开 KVMem 控制台；"
+            "③ 推理 API 默认 http://127.0.0.1:18200/v1。"
+        ),
     },
     {
         "id": "unsloth",

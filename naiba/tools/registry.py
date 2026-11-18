@@ -132,6 +132,15 @@ MEDIA_DECLARATIONS: dict[str, dict[str, str]] = {
     # comfyui 域（wait=true 返回快照：completed_shots[].files 为产物 URL）
     "comfyui_prepare_workflow": {"policy": "never", "extract": "none"},
     "comfyui_batch": {"policy": "inline", "extract": "structured"},
+    # 造梦机对话域（dream_*）：目录/详情/预检/提交回执不产媒体；状态与等待的结果
+    # 含产物文件路径（data/comfyui/outputs），按结构化口径出卡。
+    "dream_workflows": {"policy": "never", "extract": "none"},
+    "dream_workflow_details": {"policy": "never", "extract": "none"},
+    "dream_prepare": {"policy": "never", "extract": "none"},
+    "dream_submit": {"policy": "never", "extract": "none"},
+    "dream_task_status": {"policy": "inline", "extract": "structured"},
+    "dream_task_cancel": {"policy": "never", "extract": "none"},
+    "dream_task_wait": {"policy": "inline", "extract": "structured"},
     # capability 域
     "inspect_installed_skill": {"policy": "never", "extract": "none"},
     "install_skill": {"policy": "never", "extract": "none"},
@@ -1133,6 +1142,227 @@ def build_comfyui_tool_specs() -> list[ToolSpec]:
     ]
 
 
+def _dream_readonly_policy(
+    tool: str,
+    arguments: dict[str, Any],
+    active_skills: list[dict[str, Any]],
+    permission_mode: str,
+    run_context: dict[str, Any] | None,
+    workspace: Any = None,
+) -> str:
+    """dream_* 只读/预检五件的 def 级策略：三档权限都不弹动作确认（计划 §7.8）。
+
+    目录/详情/预检/状态查询/等候登记是宿主预检设施，不启动生成、不改工作流、
+    不保存用户配置；真正的门在 execute 内部（执行归属、会话归属任务、快照校验）。
+    """
+    return ""
+
+
+def _make_dream_side_effect_policy(summary_lookup: Any = None) -> Any:
+    """dream_submit / dream_task_cancel 的 def 级策略：与引擎默认同语义、显式声明。
+
+    confirm 弹一张动作确认卡；auto/full 按计划 §7.8 直接执行。白名单之外的
+    能力（未启用的工具、未指认的绑定）由 execute 内部拒绝，full 也不放行。
+
+    ``summary_lookup(snapshot_id) -> str`` 由 provider 注入（§7.8 B9b）：把预检
+    快照里的工作流 / 条目 / 总执行次数 / 参数摘要带进确认理由，让用户批准前看得见
+    这次到底生成什么。拿不到快照（已过期 / 快照删除 / 注入缺失）时退回仅工具名，
+    绝不为凑摘要编造内容。registry 默认不注入，形状守门与裸定义行为不变。
+    """
+    def policy(
+        tool: str,
+        arguments: dict[str, Any],
+        active_skills: list[dict[str, Any]],
+        permission_mode: str,
+        run_context: dict[str, Any] | None,
+        workspace: Any = None,
+    ) -> str:
+        if permission_mode != "confirm":
+            return ""
+        base = f"执行工具需要确认：{tool}"
+        if tool != "dream_submit" or not callable(summary_lookup):
+            return base
+        snapshot_id = str((arguments or {}).get("snapshot_id") or "").strip()
+        if not snapshot_id:
+            return base
+        try:
+            detail = str(summary_lookup(snapshot_id) or "").strip()
+        except Exception:  # noqa: BLE001 - 摘要只是展示增强，失败不影响确认链本身
+            return base
+        return f"{base}；{detail}" if detail else base
+    return policy
+
+
+def build_dream_tool_specs() -> list[ToolSpec]:
+    """造梦机对话域七件套（计划 2026-11-17 §3；提供方 naiba/tools/providers/dream.py）。
+
+    全部为普通工具（非 system）：submit / cancel 有副作用，走 ToolExecutor 的
+    真实权限链；prepare 虽会落一份预检快照，但它是宿主预检设施（不启动生成、
+    不改工作流、不保存用户配置），三档权限都不为它弹动作确认（计划 §7.8）。
+    dream_submit 必须 retryable=False：受理结果未知时宁可如实回报，绝不自动
+    重发造成第二次生成。
+    """
+    return [
+        ToolSpec(
+            name="dream_workflows",
+            description=(
+                "分页列出造梦机已导入的工作流（实时目录）：返回 id、名称、指纹与"
+                "是否已有对话参数配置。引用工作流用 id，列表编号只在当轮有效。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer", "description": "页码（从 1 起；每页最多 10 项）", "minimum": 1, "default": 1},
+                },
+                "required": [],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=60,
+            permission="confirm",
+            policy=_dream_readonly_policy,
+        ),
+        ToolSpec(
+            name="dream_workflow_details",
+            description=(
+                "查看一个工作流的对话参数配置、参数槽位（分页）、默认值与媒体槽；"
+                "只读，不触发重新扫描。绑定缺失或失效时按返回的问题清单引导用户去"
+                "造梦机工作流页保存「对话参数」。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string", "description": "工作流 id（dream_workflows 返回）"},
+                    "param_page": {"type": "integer", "description": "参数清单页码（每页 60 项，按需续读）", "minimum": 1, "default": 1},
+                },
+                "required": ["workflow_id"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=60,
+            permission="confirm",
+            policy=_dream_readonly_policy,
+        ),
+        ToolSpec(
+            name="dream_prepare",
+            description=(
+                "无副作用预检：按对话参数配置解析本次要改的参数（提示词/尺寸/张数/"
+                "素材），计算实际宽高与总执行次数，返回可提交快照或缺失项。只接受"
+                "配置过的绑定 ID 与用户值，不接受节点地址。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string", "description": "工作流 id"},
+                    "mode": {"type": "string", "description": "single=单次（含同提示词多张）/ batch=不同提示词或逐条素材的原生批次", "default": "single"},
+                    "values": {
+                        "type": "object",
+                        "description": "绑定 ID → 值（来自 dream_workflow_details 的 chat_config）；沿用默认填 {\"keep_default\": true}",
+                    },
+                    "items": {
+                        "type": "array",
+                        "description": "批量模式的条目：[{\"name\", \"values\": {绑定ID→值}, \"shots\"}]；条目数=提示词数，不等于图片数",
+                        "items": {"type": "object"},
+                    },
+                    "shots": {"type": "integer", "description": "单次模式的生成段数（同提示词多张）", "minimum": 1, "default": 1},
+                    "title": {"type": "string", "description": "批量标题（可缺省）", "default": ""},
+                    "unload_after": {"type": "boolean", "description": "完成后是否释放模型", "default": False},
+                },
+                "required": ["workflow_id"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=120,
+            permission="confirm",
+            policy=_dream_readonly_policy,
+        ),
+        ToolSpec(
+            name="dream_submit",
+            description=(
+                "按 dream_prepare 返回的快照 ID 提交造梦机原生单次任务或批次；幂等，"
+                "同一快照重复调用返回同一任务。成功回执含任务/批次 ID 与通知登记状态。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "snapshot_id": {"type": "string", "description": "dream_prepare 返回的快照 ID（唯一受理入口）"},
+                },
+                "required": ["snapshot_id"],
+            },
+            side_effect=True,
+            retryable=False,
+            timeout=120,
+            permission="confirm",
+            policy=_make_dream_side_effect_policy(),
+        ),
+        ToolSpec(
+            name="dream_task_status",
+            description=(
+                "查询当前对话发起的造梦机任务/批次状态：进度、产物与错误。只能查本"
+                "对话提交的目标；跨会话或页面提交的任务一律不可见。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target_ids": {
+                        "type": "array",
+                        "description": "目标数组（提交回执的 targets；1–20 个）",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["target_ids"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=60,
+            permission="confirm",
+            policy=_dream_readonly_policy,
+        ),
+        ToolSpec(
+            name="dream_task_cancel",
+            description=(
+                "取消当前对话发起且允许取消的造梦机任务/批次；批次逐条取消并如实"
+                "回报结果。不扩大到造梦机全库。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target_id": {"type": "string", "description": "要取消的任务/批次 ID（提交回执里的）"},
+                },
+                "required": ["target_id"],
+            },
+            side_effect=True,
+            retryable=False,
+            timeout=120,
+            permission="confirm",
+            policy=_make_dream_side_effect_policy(),
+        ),
+        ToolSpec(
+            name="dream_task_wait",
+            description=(
+                "登记「造梦机任务结束后在本对话自动回复一次结果」；已全部终态时当场"
+                "返回状态。登记成功即本轮收尾，不需要继续轮询；不要重复登记。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target_ids": {
+                        "type": "array",
+                        "description": "目标数组（提交回执的 targets；1–20 个）",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["target_ids"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=120,
+            permission="confirm",
+            policy=_dream_readonly_policy,
+        ),
+    ]
+
+
 def build_capability_tool_specs() -> list[ToolSpec]:
     """Skill 安装/解压/定位类工具。"""
     return [
@@ -1419,6 +1649,7 @@ def build_tool_registry() -> ToolRegistry:
     registry.register_many(build_harness_alias_specs())
     registry.register_many(build_job_tool_specs())
     registry.register_many(build_comfyui_tool_specs())
+    registry.register_many(build_dream_tool_specs())
     registry.register_many(build_capability_tool_specs())
     registry.register_many(build_vision_tool_specs())
     registry.register_many(build_search_tool_specs())

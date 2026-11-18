@@ -40,6 +40,9 @@ const context = {
   renderProviderPresetGrid() {}, fillProviderPresetGuide() {}, refreshProviderPresetGrid() {},
   syncProviderKindOptions() {}, updateProviderFormatGuide() {}, updateProviderContextField() {},
   updateProviderKvmemFields() {}, updateProviderVisionHint() {}, updateUnloadModelButton() {},
+  // 09-settings.js 保存供应商后会刷新 KVMem 服务状态；这里是只提取部分函数的
+  // vm 沙箱，给个空桩即可，真实模块里 refreshProviderKvmemService 是同文件 export。
+  refreshProviderKvmemService: async () => ({}),
   renderProviders() {},
   syncSavedProvider(saved) { profiles.push(saved); },
   toast(message) { notices.push(message); },

@@ -42,7 +42,7 @@ FIRST_DATA_WRITING_MIGRATION = 14
 # `app → 领域模块` 的单向依赖红线（维护说明 §3）。这里的值与配置层的一致性由
 # `tests/test_storage_migration.py` 直接断言（`set(_BUILTIN_AGENT_IDS) == built_in_agent_ids()`），
 # 改了配置忘了改这里、或反过来，都会当场变红。
-_BUILTIN_AGENT_IDS: tuple[str, ...] = ("tutor", "master", "director", "prompter", "coder", "skills")
+_BUILTIN_AGENT_IDS: tuple[str, ...] = ("tutor", "master", "director", "prompter", "coder", "skills", "dreamer")
 
 # 「未结束」的任务状态（run 与 job 共用 background_tasks 表）。
 # 重启清理、活动列表查询与取消判定必须共用这一份定义：

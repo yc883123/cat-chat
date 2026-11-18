@@ -936,6 +936,39 @@ def _built_in_agent_defs() -> list[dict[str, Any]]:
             # 标准 18 件 + 装/拆/查 3 件 + 指名出卡 1 件 = 22 件。
             "tool_scope": [*_tool_preset_scope("standard"), *_SKILL_MANAGER_TOOLS, "show_media"],
         },
+        {
+            # 造梦机助手（计划 docs/plans/2026-11-17-造梦机对话预设Agent与工具集设计.md §9）：
+            # 只用七个 dream_* 专用工具在对话里提交造梦机原生任务；不写脚本、不直连
+            # HTTP、不导入或修改工作流。工具集 = 七件套整组（全部 opt-in，见
+            # OPT_IN_TOOLS）；skill_ids 默认空。
+            "id": "dreamer",
+            "name": "造梦机助手",
+            "avatar": "🌙",
+            "system_prompt": (
+                "你是 Cat Chat 的造梦机助手，使用用户已经导入造梦机的工作流完成图片、视频等生成需求。\n"
+                "开始新生成需求时先读取当前工作流目录；用户选过且没有更换意图时继续使用该工作流。"
+                "只列真实工作流，按最近目录快照解释选择编号。读取所选工作流的对话参数配置、默认值与素材要求。\n"
+                "收集本次需要修改的提示词、数量、画幅/清晰度与必要素材。用户已经明确给出的内容不重复问；"
+                "用户可选择沿用默认参数。步数、CFG、种子、采样器等除非用户提出或配置要求询问，否则保留默认值。"
+                "提示词需要润色时先让用户选择保留原文或使用改写内容，不擅自扩展用户已确认的提示词。\n"
+                "只能填写已经指认的用途参数。参数用途不明、存在多组候选或缺少绑定时，说明具体缺项，"
+                "并引导用户到造梦机工作流页的「对话参数」弹窗完成指认；不要猜节点地址或重写工作流。"
+                "比例和MP交给准备工具计算，按工具结果报告实际尺寸。\n"
+                "相同提示词多张使用单次多张；不同提示词或逐条素材使用原生批量。提交前用准备工具核对"
+                "工作流、实际参数和总执行次数；参数完整且用户已要求生成时按会话既有授权规则提交。"
+                "不得自行批准确认、扩大数量或自动重试生成。\n"
+                "只使用专用工具，不自行请求生成 API，不写脚本，不导入或修改工作流。模型输出不代表任务"
+                "已经执行，只有工具返回受理成功才说已创建任务。通知已登记才承诺完成或失败后告知；"
+                "登记失败如实说明并给出查看入口。\n"
+                "生成结束按真实状态报告产物、成功/失败/取消数量和错误。收到取消要求时只操作本会话关联目标。"
+            ),
+            "skill_ids": [],
+            # 有效工具名单严格为七个 dream_* 工具（计划 §7.3）；工具用法与编排提示
+            # 按会话实际工具集条件注入（见 run/chat 的 comfyui 工具指引段模式）。
+            "tool_scope": list(_DREAM_TOOLS),
+            # 整组走 opt-in 授权：预设展开与「未限制」回退都不会隐式带上它们。
+            "tool_opt_ins": list(_DREAM_TOOLS),
+        },
     ]
 
 
@@ -1041,6 +1074,14 @@ _ALIAS_MAIN = {
 }
 _MCP_GROUP = "联网与外部服务"
 _LONG_SESSION_GROUP = "长会话"
+_DREAM_GROUP = "造梦机对话"
+# 造梦机对话七件套（计划 2026-11-17 §7.3）：整组走 opt-in 通道——「未限制」Agent
+# 不能隐式获得生成提交能力；只有专用出厂预设（dreamer）自带整组授权，其他 Agent
+# 由用户在编辑页显式勾选（新会话固化后生效）。
+_DREAM_TOOLS: tuple[str, ...] = (
+    "dream_workflows", "dream_workflow_details", "dream_prepare", "dream_submit",
+    "dream_task_status", "dream_task_cancel", "dream_task_wait",
+)
 _TOOL_GROUP = {
     "read_file": "读取与检索", "list_directory": "读取与检索", "search_files": "读取与检索",
     "find_conversations": _LONG_SESSION_GROUP, "recall_history": _LONG_SESSION_GROUP,
@@ -1058,6 +1099,9 @@ _TOOL_GROUP = {
     "http_request": _MCP_GROUP, "web_search": _MCP_GROUP,
     "comfyui_prepare_workflow": _MCP_GROUP, "comfyui_batch": _MCP_GROUP,
     "register_mcp": _MCP_GROUP,
+    # 造梦机对话七件套（dream_*）：独立成组——它提交的是造梦机原生任务，
+    # 与 HTTP 直连的 comfyui_* 是两条路；opt-in 授权见 OPT_IN_TOOLS。
+    **{name: _DREAM_GROUP for name in _DREAM_TOOLS},
     "vision_analyze": "视觉与图片", "vision_image_ops": "视觉与图片",
     # 指名出卡：用户明确指名的已有媒体出卡。归「视觉与图片」而不是「读取与检索」——
     # 它确实会写本地缓存（首次展示可能复制一份到应用媒体目录），不该挂在"只读"分组下。
@@ -1112,7 +1156,8 @@ _DEFAULT_SELECTED_TOOLS = frozenset({
 #   1. `resolve_tool_preset` 必须把 opt-in 从展开结果里剔除——`group:*` 也不得放行；
 #   2. `run/session.py` 的会话固化/兜底路径同样剔除，只有 Agent 的 `tool_opt_ins` 能加回来；
 #   3. 子 Agent 的 `SUBAGENT_BLOCKED_TOOLS` 要挡住它（子 Agent 不该发起这类任务）。
-OPT_IN_TOOLS: tuple[str, ...] = ("extract_video_frames_exact",)
+# 造梦机对话七件套：整组需要「单独授权」（定义见上面 _DREAM_TOOLS 与工具分组）。
+OPT_IN_TOOLS: tuple[str, ...] = ("extract_video_frames_exact", *_DREAM_TOOLS)
 _OPT_IN_TOOLS_SET = frozenset(OPT_IN_TOOLS)
 
 
@@ -1152,6 +1197,8 @@ def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # 联网与外部服务
         "http_request", "web_search", "register_mcp",
         "comfyui_prepare_workflow", "comfyui_batch",
+        # 造梦机对话（opt-in 整组授权；见 OPT_IN_TOOLS）
+        *_DREAM_TOOLS,
         # 视觉与图片
         "vision_analyze", "vision_image_ops", "show_media",
         # 任务与扩展
@@ -1179,6 +1226,8 @@ TOOL_GROUP_INFO: tuple[dict[str, str], ...] = (
      "badge": "高风险", "tone": "danger"},
     {"name": "联网与外部服务", "desc": "联网搜索、抓网页、调接口；含 ComfyUI 直连与 MCP 外部能力（按服务器分组）",
      "badge": "联网", "tone": "info"},
+    {"name": "造梦机对话", "desc": "在对话里用造梦机已导入的工作流出图出片：按工作流页指认过的「对话参数」提交原生单次/批次任务，完成后自动回报。整组单独授权，默认不开",
+     "badge": "会生成", "tone": "warn"},
     {"name": "视觉与图片", "desc": "图片解读：描述、定位、检测、OCR、取色、裁剪、对比；多模态模型可直接看图",
      "badge": "会写产物", "tone": "warn"},
     {"name": "任务与扩展", "desc": "后台长任务、子 Agent、任务清单；安装与检查 Skill，让 Agent 自己扩展能力",
@@ -3659,6 +3708,44 @@ class ConfigStore:
                 result = [item for item in result if item.get("kind") == kind]
             return result
 
+    @staticmethod
+    def _kvmem_install_dir(raw: Any) -> str:
+        """KVMem 安装目录：绝对路径，保存为规整后的字符串；空串表示未配置。"""
+        value = str(raw or "").strip()
+        if not value:
+            return ""
+        install = Path(value).expanduser()
+        if not install.is_absolute():
+            raise ValueError("KVMem 安装目录必须是绝对路径（例如 D:\\kvmem-v0.19.1-windows-x64）")
+        return str(install)
+
+    @staticmethod
+    def _kvmem_launch_config(raw: Any) -> dict[str, Any]:
+        """校验 KVMem 版本化启动配置；ApiKey 一律不落盘（转入现有密钥处理）。
+
+        只做结构与类型校验，不搬 KVMem 的参数语义——权威校验在控制程序启动时，
+        那里能给出带上下文的明确报错。
+        """
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1 or not isinstance(raw.get("parameters"), dict):
+            raise ValueError("KVMem 启动配置必须是 {schema_version: 1, parameters: {...}} 结构")
+        params: dict[str, Any] = {}
+        for key, value in dict(raw["parameters"]).items():
+            if not isinstance(key, str) or not key or len(key) > 64:
+                raise ValueError("KVMem 启动配置的参数名不合法")
+            if key == "ApiKey":
+                continue  # 启动配置不保存密钥；启动时自动并入供应商 API Key。
+            if isinstance(value, bool) or isinstance(value, (str, int, float)):
+                if isinstance(value, str) and len(value) > 8192:
+                    raise ValueError(f"KVMem 启动配置参数 {key} 过长")
+                params[key] = value
+            elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+                params[key] = value
+            else:
+                raise ValueError(f"KVMem 启动配置参数 {key} 的类型不合法")
+        return {"schema_version": 1, "parameters": params}
+
     def upsert_model_profile(self, values: dict[str, Any]) -> dict[str, Any]:
         """统一保存在线 API 或本地模型配置。"""
         provided_id = str(values.get("id") or "").strip()
@@ -3707,6 +3794,28 @@ class ConfigStore:
                 # 编辑旧卡时前端未带管理字段也不能静默抹掉 KVMem 绑定。
                 payload["service_manager"] = "kvmem"
                 payload["service_manager_url"] = str(existing.get("service_manager_url") or "")
+            effective_kvmem = str(payload.get("service_manager") or "") == "kvmem"
+            if effective_kvmem:
+                # KVMem 启停所需的持久配置（4.1）：安装目录 + 版本化完整启动参数，
+                # 实际模型路径（parameters.Model）与推理接口的模型标识（model）分开保存。
+                # 请求未携带对应键时保留已有值（旧客户端/旧路径不能静默清掉启动配置）。
+                if "kvmem_install_dir" in values:
+                    payload["kvmem_install_dir"] = self._kvmem_install_dir(values.get("kvmem_install_dir"))
+                if "kvmem_launch_config" in values:
+                    launch_config = self._kvmem_launch_config(values.get("kvmem_launch_config"))
+                    if launch_config:
+                        payload["kvmem_launch_config"] = launch_config
+                    else:
+                        payload.pop("kvmem_launch_config", None)
+                        if existing:
+                            existing.pop("kvmem_launch_config", None)
+            else:
+                # 解绑 KVMem 的卡片不再残留启动配置。
+                payload.pop("kvmem_install_dir", None)
+                payload.pop("kvmem_launch_config", None)
+                if existing:
+                    existing.pop("kvmem_install_dir", None)
+                    existing.pop("kvmem_launch_config", None)
             raw_effort = str(values.get("reasoning_effort") or "auto").strip().lower()
             if raw_effort not in {"auto", "off", "low", "medium", "high"}:
                 raise ValueError("思维强度必须是 auto / off / low / medium / high 之一")

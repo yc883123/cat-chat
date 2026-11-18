@@ -121,6 +121,11 @@ def _assembled_test_registry() -> Any:
             lambda: Path(tempfile.mkdtemp(prefix="naiba-video-data-")),
         )
     )
+    # 造梦机对话域（dream_*）：处理器惰性构建（首调才读 app.comfyui），
+    # 桩 app 只需撑住构造，不触达存储。
+    from naiba.tools.providers import dream as dream_provider
+
+    reg.register_provider(dream_provider.DreamToolProvider(_stub_app()))
     return reg
 
 

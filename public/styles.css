@@ -4524,7 +4524,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-workflow-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .comfyui-workflow-card {
   border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface);
-  padding: 8px 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center;
+  padding: 8px 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px 8px; align-items: center;
 }
 .comfyui-workflow-card.active { border-color: var(--violet-line); background: var(--accent-soft); }
 .comfyui-workflow-title {
@@ -4534,15 +4534,102 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .comfyui-workflow-meta { font-size: 10.5px; color: var(--muted); grid-column: 1; }
 .comfyui-workflow-delete {
-  grid-column: 2; grid-row: 1 / span 2;
+  grid-column: 3; grid-row: 1 / span 2;
   border: 1px solid var(--line); background: var(--surface); color: var(--muted);
   border-radius: var(--r-md); font-size: 11px; padding: 3px 8px; cursor: pointer;
 }
 .comfyui-workflow-delete:hover { color: var(--danger, #c0392b); border-color: var(--danger, #c0392b); }
+/* 「对话参数」入口：与删除按钮同行（计划 2026-11-17 §5.4 不新增分页，入口放工作流卡上）。 */
+.comfyui-workflow-chat-config {
+  grid-column: 2; grid-row: 1 / span 2;
+  border: 1px solid var(--violet-line); background: transparent; color: var(--accent, var(--text));
+  border-radius: var(--r-md); font-size: 11px; padding: 3px 8px; cursor: pointer;
+}
+.comfyui-workflow-chat-config:hover { background: var(--accent-soft); }
+/* 对话参数弹窗：绑定清单 + 逐条添加表单；窄屏（375px）单列排布不溢出。
+   弹窗整体限高 + 内部滚动：表单比视口高时底部按钮必须留在视口内可点。 */
+.comfyui-chat-config-dialog { width: min(620px, calc(100vw - 30px)); max-height: calc(100dvh - 30px); overflow: auto; }
+.comfyui-chat-config-fingerprint { font-size: 10.5px; color: var(--muted); margin: 2px 0 8px; }
+.comfyui-chat-config-list { display: grid; gap: 8px; margin-bottom: 12px; max-height: 240px; overflow: auto; }
+.comfyui-chat-config-empty { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0; }
+.comfyui-chat-config-row {
+  position: relative; border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 8px 40px 8px 10px; display: grid; gap: 3px; background: var(--surface);
+}
+.comfyui-chat-config-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.comfyui-chat-config-row-head strong { font-size: 12.5px; }
+.comfyui-chat-config-purpose {
+  font-size: 10.5px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--violet-line); color: var(--accent, var(--text)); background: var(--accent-soft);
+}
+.comfyui-chat-config-row-slots { font-size: 11px; color: var(--muted); line-height: 1.55; word-break: break-all; }
+.comfyui-chat-config-row-meta { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+.comfyui-chat-config-remove {
+  position: absolute; top: 8px; right: 8px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+  border-radius: var(--r-md); font-size: 11px; padding: 2px 7px; cursor: pointer;
+}
+.comfyui-chat-config-remove:hover { color: var(--danger, #c0392b); border-color: var(--danger, #c0392b); }
+.comfyui-chat-config-add { border: 1px dashed var(--line); border-radius: var(--r-md); padding: 10px; display: grid; gap: 8px; }
+.comfyui-chat-config-add > strong { font-size: 12px; }
+.comfyui-chat-config-add-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.comfyui-chat-config-add-grid label { display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.comfyui-chat-config-add-grid input[type="text"],
+.comfyui-chat-config-add-grid select {
+  font-size: 12px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); width: 100%;
+}
+/* 开关只圈自己：全局 label input 造型（§九.169）会把 checkbox 撑成大方块。 */
+.comfyui-chat-config-add-grid label.comfyui-chat-config-peritem { display: flex; align-items: center; gap: 6px; }
+.comfyui-chat-config-peritem input[type="checkbox"] { width: auto; height: auto; display: inline-block; }
+.comfyui-chat-config-peritem span { color: var(--text); font-size: 11.5px; }
+.comfyui-chat-config-desc { grid-column: 1 / -1; }
+.comfyui-chat-config-slots-label { font-size: 11.5px; color: var(--muted); }
+/* 勾选框列表：行 = label>checkbox+文字，整行可点；容器限高内部滚动。
+   §九.169：全局 `label input` 是 40px 高的文本框造型，会把勾选框撑成大方块——
+   行内 checkbox 必须作用域还原原生尺寸（与 peritem 开关同款写法）。 */
+.comfyui-chat-config-slot-picker {
+  display: grid; gap: 2px; margin-top: 6px;
+  max-height: 168px; overflow: auto;
+  border: 1px solid var(--line); border-radius: var(--r-md); padding: 6px;
+  background: var(--surface);
+}
+.comfyui-chat-config-slot-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text); line-height: 1.45;
+  padding: 5px 6px; border-radius: var(--r-md); cursor: pointer;
+}
+.comfyui-chat-config-slot-row:hover { background: var(--accent-soft); }
+.comfyui-chat-config-slot-row input[type="checkbox"] {
+  width: auto; height: auto; display: inline-block; margin: 0; padding: 0; flex: none;
+}
+.comfyui-chat-config-slot-text { min-width: 0; word-break: break-all; }
+@media (max-width: 600px) {
+  .comfyui-chat-config-add-grid { grid-template-columns: 1fr; }
+  .comfyui-chat-config-list { max-height: 180px; }
+}
 .comfyui-empty { margin: 4px 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
 /* 状态栏：地址文字可以压缩省略，但两个按钮绝不越出卡片边框。
    中间栏窄到放不下「圆点 + 地址 + 改地址 + 测试连接」时整行换行——按钮留在卡片里，
    而不是被 min-content 顶到右边界之外（用户 2026-10-29 反馈电脑端与手机端都被挤出边框）。 */
+/* 造梦机助手会话专属「对话参数」入口（设计 §5.4）：复用 meta 按钮尺寸，
+   仅用现有 accent 变量高亮区分；默认 hidden，由 24-comfyui.js 按会话 agent 显示。 */
+.composer-meta-more-button.dreamer-chat-config-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  background: var(--accent-soft, #eef1ff);
+  border-color: var(--accent-border, #cdd7ff);
+}
+.composer-meta-more-button.dreamer-chat-config-entry:hover {
+  color: var(--accent);
+  background: var(--accent-soft-hover, #e3e9ff);
+  border-color: var(--accent);
+}
+.composer-meta-more-button.dreamer-chat-config-entry[hidden] { display: none; }
+.composer-meta-more-button.dreamer-chat-config-entry svg { width: 13px; height: 13px; flex: none; }
+
 .comfyui-statusbar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 9px 12px; border-bottom: 1px solid var(--line);
@@ -6486,16 +6573,28 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .kvmem-control[hidden] { display: none; }
 .kvmem-status-button { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; }
 .kvmem-status-button:hover { color: var(--text); border-color: var(--accent); }
-#kvmemStatusDot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-#kvmemStatusDot[data-status="ready"], #kvmemStatusDot[data-status="running"] { background: var(--success); }
-#kvmemStatusDot[data-status="starting"], #kvmemStatusDot[data-status="stopping"] { background: var(--warning); }
-#kvmemStatusDot[data-status="failed"], #kvmemStatusDot[data-status="error"], #kvmemStatusDot[data-status="port_mismatch"], #kvmemStatusDot[data-status="model_missing"] { background: var(--danger); }
+/* 状态点通用（顶栏 + 供应商设置页共用）；颜色按 data-status 落位。 */
+.kvmem-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.kvmem-dot[data-status="ready"], .kvmem-dot[data-status="running"] { background: var(--success); }
+.kvmem-dot[data-status="starting"], .kvmem-dot[data-status="stopping"] { background: var(--warning); }
+.kvmem-dot[data-status="failed"], .kvmem-dot[data-status="error"], .kvmem-dot[data-status="port_mismatch"], .kvmem-dot[data-status="model_missing"] { background: var(--danger); }
 .kvmem-popover { position: absolute; z-index: 50; top: calc(100% + 8px); left: 0; width: min(330px, 86vw); padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-3); }
 .kvmem-popover[hidden] { display: none; }
 .kvmem-popover-title { margin: 0; font-weight: 700; font-size: 12px; }
 .kvmem-popover-summary, .kvmem-popover-error { margin: 7px 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .kvmem-popover-error { color: var(--danger); }
 .kvmem-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+/* KVMem 供应商设置：后端/GPU 并排（窄屏自动换行）；读取运行配置一行；完整参数收进折叠区。 */
+.kvmem-config-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+/* KVMem 供应商设置：勾选「由 KVMem 管理」后出现的服务启停行（状态 + 刷新/启动/停止）。 */
+.kvmem-service-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.kvmem-service-status { display: inline-flex; align-items: center; gap: 6px; min-width: 96px; color: var(--muted); font-size: 11px; }
+.kvmem-config-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.kvmem-config-actions .hint { flex: 1 1 220px; margin: 0; }
+.kvmem-config-details { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px; background: var(--surface-2); }
+.kvmem-config-details summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+.kvmem-config-details[open] summary { margin-bottom: 8px; color: var(--text); }
+.kvmem-config-details textarea { width: 100%; resize: vertical; min-height: 96px; padding: 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font: 12px/1.5 var(--font-mono); overflow-wrap: anywhere; }
 
 /* ============ 任务总管（Super-agent 控制面） ============ */
 body[data-app-view="super-agent"] .chat-backdrop,

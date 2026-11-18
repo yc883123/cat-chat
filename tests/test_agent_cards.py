@@ -129,11 +129,11 @@ class BuiltInAgentsRetiredTests(unittest.TestCase):
 
 
 class ToolGroupCatalogTests(unittest.TestCase):
-    """工具分类：单一维度 7 组 + 风险徽标 + MCP 按服务器二级分组（Agent 编辑页可读性的地基）。"""
+    """工具分类：单一维度 8 组 + 风险徽标 + MCP 按服务器二级分组（Agent 编辑页可读性的地基）。"""
 
     EXPECTED_GROUPS = (
         "读取与检索", "文件写入与编辑", "命令与脚本执行",
-        "联网与外部服务", "视觉与图片", "任务与扩展", "长会话",
+        "联网与外部服务", "造梦机对话", "视觉与图片", "任务与扩展", "长会话",
     )
 
     def _catalog(self, extra_schemas=()):
@@ -194,6 +194,11 @@ class ToolGroupCatalogTests(unittest.TestCase):
             "http_request", "web_search", "register_mcp",
             "comfyui_prepare_workflow", "comfyui_batch",
         ])
+        self.assertEqual(membership["造梦机对话"], [
+            "dream_workflows", "dream_workflow_details", "dream_prepare", "dream_submit",
+            "dream_task_status", "dream_task_cancel", "dream_task_wait",
+        ], "造梦机对话七件套独立成组：提交的是造梦机原生任务，与 HTTP 直连是两条路；"
+           "整组单独授权（OPT_IN_TOOLS），不随预设扩散")
         self.assertEqual(membership["任务与扩展"], [
             "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
             "subagent", "subagent_spawn",

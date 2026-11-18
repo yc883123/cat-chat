@@ -4,7 +4,11 @@
 
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 
-const KVMEM_STATUS_LABELS = { stopped: '未运行', starting: '启动中', stopping: '停止中', ready: '就绪', running: '运行中', failed: '异常', port_mismatch: '端口不一致', model_missing: '缺少模型', error: '不可达', unknown: '未知' };
+export const KVMEM_STATUS_LABELS = { stopped: '未运行', starting: '启动中', stopping: '停止中', ready: '就绪', running: '运行中', failed: '异常', port_mismatch: '端口不一致', model_missing: '缺少模型', error: '不可达', unknown: '未知' };
+// 操作后的有界轮询：启动要等模型加载（可能数十秒），停止由控制程序确认进程退出后回包。
+export const KVMEM_POLL_INTERVAL_MS = 1600;
+export const KVMEM_POLL_LIMITS = { start: 90_000, stop: 35_000 };
+export const KVMEM_FAIL_STATES = ['failed', 'error', 'port_mismatch', 'model_missing'];
 let kvmemState = { providerId: '', payload: null, busy: false, request: 0 };
 
 function currentKvmemProvider() {
@@ -14,6 +18,7 @@ function currentKvmemProvider() {
 }
 
 function kvmemLabel(status) { return KVMEM_STATUS_LABELS[status] || 'KVMem'; }
+export { kvmemLabel };
 
 export function renderKvmemControl() {
   const root = $('#kvmemControl');
@@ -24,6 +29,7 @@ export function renderKvmemControl() {
     kvmemState.providerId = providerId;
     kvmemState.payload = null;
     kvmemState.request += 1;
+    kvmemState.busy = false; // 换卡即放弃上一张卡未完的操作轮询，不让 busy 卡死新卡按钮。
   }
   root.hidden = !provider;
   if (!provider) { $('#kvmemPopover')?.setAttribute('hidden', ''); return; }
@@ -58,25 +64,71 @@ export async function refreshKvmemStatus({ quiet = false } = {}) {
   }
 }
 
+// 操作轮询期间的存活判断：busy 仍属于当前供应商。refreshKvmemStatus 内部有自己的
+// 回包代次守卫，这里不占用 kvmemState.request，避免第一轮刷新就把自己判失效。
+function kvmemAlive(providerId) {
+  return kvmemState.busy
+    && String(currentKvmemProvider()?.id || '') === String(providerId);
+}
+
+async function kvmemPollUntil(alive, targetStates, limit) {
+  // 有界轮询：直到目标状态、明确失败或超时；偶发状态读取失败继续等，不提前判负。
+  const deadline = Date.now() + limit;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, KVMEM_POLL_INTERVAL_MS));
+    if (!alive()) return null;
+    const payload = await refreshKvmemStatus({ quiet: true });
+    if (!alive()) return null;
+    if (!payload) continue;
+    if (targetStates.includes(payload.status) || KVMEM_FAIL_STATES.includes(payload.status)) return payload;
+  }
+  return null;
+}
+
 async function kvmemAction(action) {
   const provider = currentKvmemProvider(); if (!provider || kvmemState.busy) return;
   const current = await refreshKvmemStatus({ quiet: true });
   if (!current || String(currentKvmemProvider()?.id || '') !== String(provider.id)) return;
-  if (action === 'start') {
-    const summary = `${current?.backend || '未知后端'} / ${current?.model || '未知模型'} / 端口 ${current?.actual_port || '—'}`;
-    if (!confirm(`将通过 KVMem 控制台启动托管服务：\\n${summary}\\n\\n继续吗？`)) return;
-  } else if (action === 'stop' && !confirm('将停止当前 KVMem 控制台托管的推理服务，确定继续吗？')) return;
-  kvmemState.busy = true; renderKvmemControl();
+  // 按钮本身就是明确意图，不再弹 confirm 复核；发起前刷新是为了拿最新状态，失败即中止。
+  const providerId = String(provider.id);
+  const alive = () => kvmemAlive(providerId);
+  kvmemState.busy = true;
+  kvmemState.payload = { ...(kvmemState.payload || {}), status: action === 'start' ? 'starting' : 'stopping' };
+  renderKvmemControl();
   try {
     await api(`/api/providers/${encodeURIComponent(provider.id)}/kvmem/${action}`, { method: 'POST', body: { confirm: true } });
-    await refreshKvmemStatus({ quiet: true });
-    toast(action === 'start' ? '已请求启动 KVMem 服务' : '已请求停止 KVMem 服务');
-  } catch (error) { toast(`KVMem 操作失败：${error.message}`); }
-  finally { kvmemState.busy = false; renderKvmemControl(); }
+    if (alive()) await refreshKvmemStatus({ quiet: true });
+    const target = action === 'start' ? ['ready', 'running'] : ['stopped'];
+    const final = await kvmemPollUntil(alive, target, KVMEM_POLL_LIMITS[action]);
+    if (!alive()) return;
+    if (final && target.includes(final.status)) {
+      toast(action === 'start' ? 'KVMem 模型已就绪' : 'KVMem 模型已停止，显存已释放');
+    } else if (final && KVMEM_FAIL_STATES.includes(final.status)) {
+      toast(`KVMem ${action === 'start' ? '启动' : '停止'}未完成：${final.error || kvmemLabel(final.status)}`);
+    } else {
+      toast(action === 'start'
+        ? 'KVMem 启动仍在进行，可稍后点「刷新」查看状态'
+        : 'KVMem 停止仍未确认，可稍后点「刷新」查看状态');
+    }
+  } catch (error) {
+    toast(`KVMem 操作失败：${error.message}`);
+    if (alive()) await refreshKvmemStatus({ quiet: true });
+  } finally {
+    // 供应商已切换时 busy 归 renderKvmemControl 的换卡重置管；同卡才在这里解锁。
+    if (String(currentKvmemProvider()?.id || '') === providerId) kvmemState.busy = false;
+    renderKvmemControl();
+  }
 }
 
 export function bindKvmemControls() {
   $('#kvmemStatusButton')?.addEventListener('click', () => $('#kvmemPopover')?.toggleAttribute('hidden'));
+  // 点控制台外任何地方自动收起（冒泡阶段判定，control 内点击含 popover 按钮不收）。
+  document.addEventListener('click', (event) => {
+    const popover = $('#kvmemPopover');
+    if (!popover || popover.hidden) return;
+    if (event.target instanceof Element && event.target.closest('.kvmem-control')) return;
+    popover.setAttribute('hidden', '');
+  });
   $('#kvmemRefresh')?.addEventListener('click', () => void refreshKvmemStatus());
   $('#kvmemStart')?.addEventListener('click', () => void kvmemAction('start'));
   $('#kvmemStop')?.addEventListener('click', () => void kvmemAction('stop'));
@@ -1470,6 +1522,8 @@ export async function saveAgentSelection() {
     if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...updated };
     renderSidebar();
     renderSkills($('#skillSearch')?.value || '');
+    // 广播会话配置已变：造梦机助手专属入口等按 agent 显示的 UI 据此同步（A6b）。
+    document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: state.conversationId } }));
     toast('Agent 已切换');
     appendPresetSkillsToComposer(value);
   } catch (error) {

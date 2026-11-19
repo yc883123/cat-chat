@@ -4666,6 +4666,21 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
 
 // ---- 填单视图渲染 ----
 
+// 条目表区（.cbm-items-wrap，桌面 max-height:560px + 吸顶表头）是独立滚动容器，
+// 随整段 innerHTML 销毁重建会 scrollTop 归零——放图/加条目/清空提示词后视图跳回条目1 的根因。
+// 重绘前按文档序抓滚动位置，重绘后按同序回填（数量对不上取最小集），横向滚动一起保。
+function batchCaptureItemScrolls(host) {
+  return [...host.querySelectorAll(".cbm-items-wrap")].map((el) => ({ top: el.scrollTop, left: el.scrollLeft }));
+}
+
+function batchRestoreItemScrolls(host, snaps) {
+  if (!snaps.length) return;
+  [...host.querySelectorAll(".cbm-items-wrap")].slice(0, snaps.length).forEach((el, i) => {
+    el.scrollTop = snaps[i].top;
+    el.scrollLeft = snaps[i].left;
+  });
+}
+
 function renderBatch() {
   // 结果页批次详情是独立宿主：从批次列表点开时留在结果区，不跳回「批量生成」填单页。
   if (batch.resultsDetailId && comfyuiPaneName() === "tasks") {
@@ -4678,7 +4693,9 @@ function renderBatch() {
   if (root) root.hidden = false;
   // 整段重绘前先断开旧卡片的视野观察，避免旧的 detached 节点一直挂着。
   if (batch.view === "run") batchPreviewObserver?.disconnect();
+  const itemScrolls = batchCaptureItemScrolls(host);
   host.innerHTML = batch.view === "run" ? batchRunMarkup() : batchDraftMarkup();
+  batchRestoreItemScrolls(host, itemScrolls);
   if (batch.view === "run") {
     startBatchRunElapsed();
     mountBatchItemPreviews();

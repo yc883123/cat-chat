@@ -7751,10 +7751,22 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 @media (max-width: 760px) {
   #studioView .wb-resource-header { grid-template-columns: minmax(0, 1fr) auto; }
   #studioView .wb-resource-monitor { display: none; }
-  #studioView .wb-resource-header > .wb-header-actions { grid-column: 2; }
+  /* 分档折行后主列有两行高：状态列再居中就会悬在标题与分档之间（2026-11-18 手机反馈
+     「顶端的排版全部乱了」），必须顶到标题行。 */
+  #studioView .wb-resource-header > .wb-header-actions { grid-column: 2; align-self: start; }
   #studioView .studio-topbar > .wb-header-actions { display: contents; }
   #studioView .studio-topbar .studio-topbar-tools { grid-column: 1 / -1; grid-row: 2; }
   #studioView .studio-topbar .wb-resource-menu { grid-column: 2; grid-row: 1; }
+  /* 进度胶囊上到标题行右侧、贴着状态栏，不再独占尾行——尾行会把它压到 ⋯ 正下方
+     （同一条反馈「进度条跑到省略号下面去了」）。生成中让出「已连接…」文字，
+     只留连接点与 ⋯，窄屏标题行才放得下。
+     只作用功能页页头（[data-wb-page-header]）：提词库共享顶栏是 flex 布局，
+     靠 margin-left:auto 贴右，不能被这里的 margin 覆盖。 */
+  #studioView [data-wb-page-header] > .comfyui-step-meter {
+    grid-column: 1; grid-row: 1; justify-self: end; align-self: start;
+    max-width: 100%; margin: 0 2px 0 0;
+  }
+  #studioView .wb-resource-header:has(> .comfyui-step-meter:not([hidden])) .comfyui-status-text { display: none; }
   #studioView .wb-header-main > :is(.studio-source-tabs, #comfyuiPanes) { flex-basis: 100%; }
   #studioView .wb-header-main .labeler-view-tabs { display: flex; flex-basis: 100%; margin: 0; }
   #studioView .wb-header-actions .comfyui-statusbar { justify-content: flex-end; }

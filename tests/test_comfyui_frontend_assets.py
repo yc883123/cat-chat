@@ -454,7 +454,12 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         self.assertIn("data-comfyui-rerun-cancel", js)
         self.assertIn("comfyui-rerun-banner", js)
         self.assertIn("rerunMediaProblems", js)
-        self.assertIn("再次生成使用原任务快照，不新增或修改工作流库条目", js)
+        # 2026-11-18 拍板：再次生成也支持「用当前配置另存工作流」——副本落在库里的
+        # 原工作流上，基准与指纹来自进入时补读的现状；旧拦截提示必须消失。
+        self.assertNotIn("再次生成使用原任务快照，不新增或修改工作流库条目", js)
+        self.assertIn("loadRerunWorkflowBase", js)
+        self.assertIn("workflowBase", js)
+        self.assertIn("已不在原工作流的当前版本里", js)
 
     @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
     def test_rerun_completed_task_prefill_submit_and_clear(self):
@@ -497,6 +502,7 @@ const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys()
   const method=String(options?.method||'GET').toUpperCase();
   requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/tasks/done/rerun-snapshot')return {snapshot};
+  if(path==='/api/comfyui/workflows/cw-1')return {workflow:liveWorkflow};
   if(path==='/api/comfyui/tasks/done/rerun'&&method==='POST'){
     if(failRerun)throw new Error('远端拒绝');
     return {task:{id:'ct-new'}};
@@ -504,6 +510,8 @@ const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys()
   if(path==='/api/comfyui/tasks')return {tasks:[]};
   return {};
 }};
+// 库内原工作流现状：steps=99 故意与快照里的 6 不同，用来证明另存基准是库内值而非快照值。
+const liveWorkflow={id:'cw-1',workflow_fingerprint:'a'.repeat(64),prompt:{'5':{inputs:{text:'库内正文'}},'6':{inputs:{steps:99}}}};
 async function make(name,sourceText,exportsLine){
   const byMod=new Map();
   for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)){
@@ -517,8 +525,8 @@ async function make(name,sourceText,exportsLine){
   await mod.evaluate();
   return mod.namespace;
 }
-const m=await make('comfy',source,'\nexport {comfyui,submitTask,renderTaskCard,openRerunSnapshot,buildRerunDetail,rerunMediaProblems,resetRerunState,cancelRerunDraft,mediaSlotStatus};');
-const {comfyui,submitTask,renderTaskCard,openRerunSnapshot,rerunMediaProblems,resetRerunState,cancelRerunDraft,mediaSlotStatus}=m;
+const m=await make('comfy',source,'\nexport {comfyui,submitTask,renderTaskCard,openRerunSnapshot,buildRerunDetail,rerunMediaProblems,resetRerunState,cancelRerunDraft,mediaSlotStatus,saveAsRows};');
+const {comfyui,submitTask,renderTaskCard,openRerunSnapshot,rerunMediaProblems,resetRerunState,cancelRerunDraft,mediaSlotStatus,saveAsRows}=m;
 const actionsOf=(card)=>card.children.find(child=>String(child.className).includes('comfyui-task-actions'));
 
 // 1) 完成态单次任务只有一个「再次生成」；失败仍只有「重试续跑」；批量不出现。
@@ -548,7 +556,18 @@ const banner=form.children.find(child=>String(child.className).includes('comfyui
 assert.ok(banner&&banner.children[0].textContent.includes('来源任务'));
 assert.ok(form.children.some(child=>String(child.className).includes('comfyui-rerun-alert')));
 assert.equal(mediaSlotStatus(comfyui.detail.params[2],comfyui.mediaSelection.get('8|image'),false,true).badge,'文件失效');
-assert.equal($('#comfyuiSaveCurrentAs').hidden,true);
+// 2b) 另存配置（2026-11-18 拍板）：原工作流补读到位后按钮放开；
+//     另存基准是库内当前值（steps=99），不是快照里烤了覆盖值的 prompt（steps=6）。
+slotValues['6|steps']='6';
+await new Promise(resolve=>setTimeout(resolve,0));
+assert.ok(requests.some(row=>row.path==='/api/comfyui/workflows/cw-1'&&row.method==='GET'));
+assert.equal(comfyui.rerun.workflowBase.fingerprint,'a'.repeat(64));
+assert.equal($('#comfyuiSaveCurrentAs').hidden,false);
+const rerunRows=saveAsRows();
+const stepsRow=rerunRows.find(row=>row.key==='6|steps');
+assert.equal(stepsRow.original,99);
+assert.equal(stepsRow.changed,true);
+assert.equal(stepsRow.problem,'');
 const editButton=form.children.find(child=>String(child.className).includes('comfyui-param-heading-row'))?.children
   .find(child=>String(child.className).includes('comfyui-param-heading-actions'))?.children
   .find(child=>child.textContent==='设置高级参数');

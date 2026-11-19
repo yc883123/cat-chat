@@ -45,7 +45,9 @@ const comfyui = {
   deleting: new Set(),     // 正在「取消并删除」的任务 id，防重复提交
   mediaSelection: new Map(), // 媒体槽已选文件 {slotKey: {path, name, thumb_path}}；切工作流清空
   mediaSkipped: new Set(),   // 手动 ⊘ 跳过的媒体槽 key；独立于 mediaSelection，切工作流清空
-  rerun: null,               // 完成态任务再次生成草稿 {sourceTaskId, workflowId, unavailable...}
+  rerun: null,               // 完成态任务再次生成草稿 {sourceTaskId, workflowId, unavailable,
+                             //   workflowBase?: {fingerprint, prompt}（库内原工作流现状，另存配置用）,
+                             //   workflowBaseError?: string（原工作流读不到的原因，按钮保持隐藏）}
   rerunLoading: "",          // 正在读取快照的任务 id（防重复点）
   drafts: new Map(),       // 主表单用户已填的值 {工作流id|node_id|field_name: value}；重绘与刷新都保留，点「默认」才清
   uploadingSlot: "",       // 正在上传的媒体槽 key（防并发点选；批量拖拽时是各 key 拼接，仍为真值即锁住）
@@ -80,7 +82,11 @@ const SAVE_AS_PROMPT_ROLES = new Set(["positive_prompt", "negative_prompt"]);
 function saveAsValueFor(slot) {
   // 草稿只在用户真的动过控件时才有记录；没记录 = 沿用工作流原值。
   const draft = savedDraft(slotKey(slot));
-  if (draft === undefined) return undefined;
+  if (draft === undefined) {
+    // 再次生成没有草稿的槽：当前值就是快照值（slot.default 已含原任务覆盖值），
+    // 与库内原工作流现状对比才能列出「这次要另存什么」；普通模式维持 undefined（= 未改）。
+    return comfyui.rerun ? (slot.default ?? undefined) : undefined;
+  }
   const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(slotKey(slot))}"]`);
   const text = String(input ? (input.value ?? "") : draft).trim();
   return slot.field_type === "bool" ? text === "true" : text;
@@ -119,17 +125,24 @@ function saveAsProblem(slot, value) {
 }
 
 // 一行 = 一个已扫描槽位。changed 为假的隐藏槽位也要出现，但不会被提交。
+// 对比基准是库里工作流的当前值：再次生成时快照 prompt 已把原任务覆盖值烤进去，
+// 拿它当基准会把覆盖值误判成「未改」，所以用进入时补读的原工作流现状。
 function saveAsRows() {
   const visible = visibleKeySet();
+  const basePrompt = comfyui.rerun?.workflowBase?.prompt || comfyui.detail?.prompt;
   return (comfyui.detail?.params || []).map((slot) => {
     const key = slotKey(slot);
-    const original = comfyui.detail?.prompt?.[slot.node_id]?.inputs?.[slot.field_name];
+    const nodeInputs = basePrompt?.[slot.node_id]?.inputs;
+    const original = nodeInputs?.[slot.field_name];
     const current = saveAsValueFor(slot);
     const changed = !saveAsSameValue(current, original);
+    // 原工作流后来编辑过、这个槽位已不存在：副本写不进去，必须显式标出来而不是发给后端吃 400。
+    const dropped = Boolean(comfyui.rerun?.workflowBase) && original === undefined && current !== undefined;
     return {
       slot, key, original, current, changed,
       visible: visible.has(key),
-      problem: changed ? saveAsProblem(slot, current) : "",
+      problem: dropped ? "这个参数已不在原工作流的当前版本里，不能另存"
+        : changed ? saveAsProblem(slot, current) : "",
     };
   });
 }
@@ -228,10 +241,8 @@ function escapeAttribute(value) {
 
 function openSaveAsDialog() {
   if (!comfyui.detail || workflowSaveBusy) return;
-  if (comfyui.rerun) {
-    toast("再次生成使用原任务快照，不新增或修改工作流库条目");
-    return;
-  }
+  // 再次生成也允许另存：副本落在库里的原工作流上（基准与指纹来自进入时补读的现状）；
+  // 原工作流读不到时按钮是隐藏的，走不到这里。
   const dialog = $("#comfyuiSaveAsDialog");
   if (!dialog) return;
   const nameInput = $("#comfyuiSaveAsName");
@@ -254,10 +265,6 @@ function closeSaveAsDialog() {
 
 async function confirmSaveAs() {
   if (!comfyui.detail || workflowSaveBusy) return;
-  if (comfyui.rerun) {
-    toast("再次生成使用原任务快照，不新增或修改工作流库条目");
-    return;
-  }
   const errorBox = $("#comfyuiSaveAsError");
   if (errorBox) errorBox.textContent = "";
   const name = String($("#comfyuiSaveAsName")?.value || "").trim();
@@ -282,7 +289,13 @@ async function confirmSaveAs() {
   const confirm = $("#comfyuiSaveAsConfirm");
   if (confirm) confirm.disabled = true;
   try {
-    const result = await api(`/api/comfyui/workflows/${encodeURIComponent(source.id)}/save-as`, { method: "POST", body: { name, workflow_fingerprint: source.workflow_fingerprint || source.fingerprint, overrides } });
+    // 再次生成的指纹来自补读的库内原工作流；普通模式用当前详情自带的。
+    const fingerprint = String(comfyui.rerun?.workflowBase?.fingerprint
+      || source.workflow_fingerprint || source.fingerprint || "");
+    if (!/^[0-9a-f]{64}$/.test(fingerprint)) {
+      throw new Error(comfyui.rerun ? "原工作流已不在库中，无法另存" : "工作流指纹缺失，请重新载入后另存");
+    }
+    const result = await api(`/api/comfyui/workflows/${encodeURIComponent(source.id)}/save-as`, { method: "POST", body: { name, workflow_fingerprint: fingerprint, overrides } });
     if (!result.workflow?.id) throw new Error("保存未返回工作流编号，请刷新列表后核对。");
     await refreshWorkflows();
     // Preserve media selections and every drafted value (including hidden slots that
@@ -3181,13 +3194,39 @@ function rerunMediaProblems() {
   return problems;
 }
 
-// 再次生成期间隐藏「用当前配置另存工作流」：计划要求不改/不新增工作流库条目。
+// 再次生成期间「用当前配置另存工作流」先隐藏，等原工作流现状补读成功再放开：
+// 另存副本只能落在库里的原工作流上，需要它的当前指纹与节点图当基准。
 function setRerunSaveAsHidden(hidden) {
   const saveAs = $("#comfyuiSaveCurrentAs");
   if (!saveAs) return;
   saveAs.hidden = hidden;
   saveAs.disabled = hidden;
   saveAs.style.display = hidden ? "none" : "";
+}
+
+// 补读库内原工作流现状（指纹 + 当前图）。快照里没有指纹，也没有「原值」可对比——
+// 快照 prompt 已把覆盖值烤进去。失败（原工作流已删除等）保持按钮隐藏，不影响再次生成本身。
+async function loadRerunWorkflowBase(sourceTaskId, workflowId) {
+  try {
+    const payload = await api(`/api/comfyui/workflows/${encodeURIComponent(workflowId)}`);
+    if (!comfyui.rerun || comfyui.rerun.sourceTaskId !== sourceTaskId) return;
+    const workflow = payload?.workflow;
+    if (!workflow || String(workflow.id || "") !== workflowId) {
+      throw new Error("返回的工作流与原任务不一致");
+    }
+    if (!workflow.prompt || typeof workflow.prompt !== "object") {
+      throw new Error("原工作流没有有效节点图");
+    }
+    comfyui.rerun.workflowBase = {
+      fingerprint: String(workflow.workflow_fingerprint || ""),
+      prompt: workflow.prompt,
+    };
+    setRerunSaveAsHidden(false);
+  } catch (error) {
+    if (comfyui.rerun && comfyui.rerun.sourceTaskId === sourceTaskId) {
+      comfyui.rerun.workflowBaseError = String(error.message || error);
+    }
+  }
 }
 
 function resetRerunState() {
@@ -3345,6 +3384,8 @@ async function openRerunSnapshot(taskId) {
     };
     comfyui.detailLoading = false;
     setRerunSaveAsHidden(true);
+    // 后台补读原工作流现状；另存按钮等它到位才放开，不拖慢再次生成表单本身。
+    void loadRerunWorkflowBase(id, String(snapshot.workflow_id));
     const shots = $("#comfyuiShots");
     if (shots) shots.value = String(Math.max(1, Math.min(200, Math.floor(Number(snapshot.shots) || 1))));
     const unload = $("#comfyuiUnloadAfter");

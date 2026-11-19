@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.5.0-beta
-  RELEASE_TAG: v4.5.0-beta
+  RELEASE_VERSION: 4.5.1-beta
+  RELEASE_TAG: v4.5.1-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.5.0-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.5.1-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.5.0-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.5.1-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.5.0 Beta release
+      - name: Publish 4.5.1 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.5.0 Beta
+          name: Cat Chat 4.5.1 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,13 +193,13 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.5.0 Beta：新增「造梦机助手」，在对话里直接出图出片
-            新增「造梦机助手」Agent 与 dream_* 七件套：在对话里说需求，它读取你已导入的造梦机工作流、预检参数并提交造梦机原生任务/批次。只填已经指认的用途参数，不擅改未知节点、不直连生成 API、不写脚本，模型输出不等于任务已执行——只有工具受理成功才说已创建。
-            权限与幂等：七件套整组 opt-in，confirm/auto/full 三档走真实 ToolExecutor 确认链；预检与通知登记不弹动作确认，确认后仍复核授权与快照指纹。同一快照重放/并发重放只生成一个任务，提交回执永久保留，受理结果未知如实回报、不写假回执、不自动重试。
-            批量与确认卡：整批一张确认卡，卡上带出工作流、条目数与总执行次数；批准前不创建任务，批准后整批只建一个批次。尺寸按节点实时声明的上下限与步长对齐（不硬编码倍数），实际比例/MP 如实回报。
-            对话侧「对话参数」入口：造梦机助手会话的输入框旁新增按钮，直达造梦机同一个配置弹窗，指认提示词/尺寸等槽位，确认后回原对话保留已输入内容。
-            KVMem 本地模型独立启停：控制程序可由应用后台拉起，最近运行配置按供应商+控制地址双键隔离、落盘不含 ApiKey，启动请求含模型检查、停止请求含进程等待，连接不可达时明确提示。
-            修复冻结版「视频解码依赖未安装」误报：onefile 解包目录被外部清理时提示先退出重开重新解包，而非误导为重装；区分源码与冻结版文案。
-            教程助手知识库同步七个内置 Agent（含造梦机助手），并新增守门比对出厂 Agent 清单，避免新增内置 Agent 后教程助手答不出。
-            验证：本地全量 5105 项测试通过，并跑通 GitHub runner 短路径条件自检；L2 弹窗/页面回归/对话提交可见、L3 真实 ComfyUI 单条与 2 条批次均取到真实产物证据。
-            Cat Chat 4.5.0 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            Cat Chat 4.5.1 Beta：批次版本基线与工作台进度状态修复
+            工作台与贴签匠：修复贴签匠进度与切页签，新增工作台级刷新入口与 KVMem 本地模型路径选择器。
+            造梦机批次条目表放图后保持原滚动位置，不再跳回第一条；修复手机端页头对齐；再次生成可按库内工作流现状另存配置。
+            批次快照补齐工作流图与参数结构双指纹、固定参数最小基线；提交前服务端重读工作流比对，任一方案漂移整批以 409 拒绝，不留半批任务。旧批次可继续打开核对，但明确标记没有版本基线。
+            恢复批次时固定参数逐项对照当前工作流：槽位删除、类型变化、候选或控件变化分别给出诊断，用户明确放弃或按当前参数重新指定后才解除阻塞；不再用静默跳过替用户丢掉旧固定值。
+            窄屏分档改为标签条内部横向滚动，中文按钮保持内容宽不叠字，页面不再被撑出可视宽度；进度胶囊挪到标题行右侧与 ⋯ 同行，生成中让出「已连接」文字。离开造梦机收起进度，回来按缓存重新决定显隐。
+            再次生成补读原工作流失败时显示持久告警并说明另存暂不可用，另存入口保持隐藏，但再次生成本身不受阻；迟到回包按来源任务归属拦截。
+            OneBot 渠道测试改用系统空闲端口，避免本机主程序占用默认 8766 时产生假红。
+            验证：本地全量 5117 项测试通过，短路径 harness 与三档窄屏几何、跨页进度冒烟通过；发布守门逐项核对版本串与正文。
+            Cat Chat 4.5.1 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

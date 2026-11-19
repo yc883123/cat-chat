@@ -798,11 +798,19 @@ class WebSocketAuthTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def _service(self, **overrides):
+        import socket
+
         from naiba.channels.service import OneBotChannelService
 
         app = _FakeApp(self.root)
+        # 配置层不接受端口 0，会回落到默认 8766；本机主程序常占着这个端口，
+        # 测试就会因为别人的监听而假红。先向系统借一个空闲端口再释放，
+        # 每条用例各用各的，不再依赖 8766 是否恰好没人用。
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            free_port = probe.getsockname()[1]
         cfg = {
-            "enabled": True, "listen_host": "127.0.0.1", "listen_port": 0,
+            "enabled": True, "listen_host": "127.0.0.1", "listen_port": free_port,
             "path": "/onebot/v11/ws", "access_token": "onebot-secret",
             "allowed_user_ids": ["20000"], "allow_groups": False,
         }

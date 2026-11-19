@@ -217,6 +217,7 @@ const writer = {
   // 「大纲章数」滑条已删——大纲没有章节概念，章节由拆章产出。
   charCount: 2,
   sideCount: 4,
+  outputMode: "json",
   // 模型选择（与拆书匠同口径）：先选供应商，再按供应商拉完整模型目录。
   setupProviderKey: "", setupModelName: "",
   outlineProviderKey: "", outlineModelName: "",
@@ -301,6 +302,40 @@ function fmtTime(ms) {
   if (Number.isNaN(date.getTime())) return "时间未记录";
   const pad = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function applyOutputModeUi() {
+  const json = writer.outputMode !== "freeform";
+  const checkbox = $("#writerJsonOutput");
+  if (checkbox) {
+    checkbox.checked = json;
+    checkbox.disabled = pipelineActive();
+  }
+  const hint = $("#writerOutputModeHint");
+  if (hint) hint.textContent = json
+    ? "开启时按阶段字段输出并严格校验；阶段要求是内置只读规则。"
+    : "关闭后模型自由发挥，结果会保存为原文但不会自动填入题材、简介、分类、角色或章节字段，需要手动整理。";
+}
+
+async function saveOutputMode(mode) {
+  if (!writer.bookId || pipelineActive()) return;
+  const next = mode === "freeform" ? "freeform" : "json";
+  const previous = writer.outputMode;
+  writer.outputMode = next;
+  applyOutputModeUi();
+  try {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/output-mode`, {
+      method: "PATCH", body: { output_mode: next, revision: writer.book?.revision },
+    });
+    writer.book = payload.book;
+    writer.outputMode = String(payload.book?.output_mode || next);
+    applyOutputModeUi();
+    void refreshPlan();
+  } catch (error) {
+    writer.outputMode = previous;
+    applyOutputModeUi();
+    fail("保存输出模式失败", error);
+  }
 }
 
 function setSaveState(text, noteText = "") {
@@ -951,7 +986,11 @@ function fillSetupForm() {
   value("writerBlurb", setup.blurb);
   value("writerWorldview", setup.worldview);
   value("writerGenreTone", setup.genre?.tone);
-  value("writerGenreCustom", setup.genre?.cat && setup.genre?.custom ? setup.genre.cat : "");
+  const customCat = String(setup.genre?.custom || "").trim();
+  const cat = String(setup.genre?.cat || "").trim();
+  const knownCat = writer.genres?.channels?.some((channel) =>
+    (channel.cats || []).some((item) => String(item.label || "") === cat)) || false;
+  value("writerGenreCustom", customCat || (!knownCat ? cat : ""));
   value("writerVibe", setup.constraints?.vibe);
   value("writerAvoid", setup.constraints?.avoid);
   // 题材树 / 标签 / 参考作品 / 角色分区
@@ -1117,7 +1156,8 @@ function collectSetup() {
     idea: String($("#writerIdea")?.value || ""),
     genre: {
       channel: String(writer.genrePick.channel || ""),
-      cat: String(writer.genrePick.cat || "").trim(),
+      cat: String($("#writerGenreCustom")?.value || writer.genrePick.cat || "").trim(),
+      custom: String($("#writerGenreCustom")?.value || "").trim(),
       sub_cat: String(writer.genrePick.sub_cat || "").trim(),
       tone: String($("#writerGenreTone")?.value || "").trim(),
       hook: String(writer.setup?.genre?.hook || ""),
@@ -1451,6 +1491,7 @@ function renderEditor() {
   const hint = $("#writerEditorHint");
   if (hint) hint.textContent = heads[writer.stage][1];
   if (writer.stage === "setup" && !writer.setupDirty) fillSetupForm();
+  applyOutputModeUi();
   if (writer.stage === "outline") { renderOutline(); renderOutlineVersions(); }
   if (writer.stage === "chapter") renderChapterStage();
   if (writer.stage === "draft") renderDraft();
@@ -1542,6 +1583,25 @@ function renderPlan() {
     b.textContent = value;
     kv.append(span, b);
   }
+  const modeCard = document.createElement("div");
+  modeCard.className = "writer-note-card";
+  const modeTitle = document.createElement("strong");
+  modeTitle.textContent = "输出模式";
+  const modeText = document.createElement("p");
+  modeText.textContent = writer.outputMode === "freeform"
+    ? "自由文本：本阶段结果保存为原文，不自动填入结构化字段。"
+    : "结构化 JSON：本阶段结果按内置字段严格校验。";
+  modeCard.append(modeTitle, modeText);
+  blocks.unshift(modeCard);
+  const protocolCard = document.createElement("div");
+  protocolCard.className = "writer-note-card";
+  const protocolTitle = document.createElement("strong");
+  protocolTitle.textContent = "阶段要求（内置，只读）";
+  const protocolText = document.createElement("p");
+  protocolText.textContent = writer.outputMode === "freeform"
+    ? "模型可自由输出自然文本，题材、简介、分类、角色和章节不会自动整理。"
+    : "当前阶段的字段、类型和数量由程序内置，结果会严格校验。";
+  protocolCard.append(protocolTitle, protocolText);
   blocks.push(kv);
   if (budget.fits === false) {
     const card = document.createElement("div");
@@ -1926,6 +1986,7 @@ async function saveSetupBeforeGenerate() {
     writer.setup = payload.setup;
     writer.book = payload.book;
     writer.setupDirty = false;
+    writer.outputMode = String(payload.book?.output_mode || "json");
     persistDraftAfterSave();
     toast("已自动把表单里的设定存为新版本，接着开始生成");
     return true;
@@ -2222,6 +2283,7 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     }
     writer.bookId = bookId;
     writer.book = payload.book;
+    writer.outputMode = String(payload.book?.output_mode || "json");
     // 换书时「拆哪一部」的选择也跟着换：上一部作品的部号对这一本没有意义。
     if (!sameBook) writer.splitPartNo = 0;
     writer.setup = payload.setup;
@@ -2626,6 +2688,7 @@ async function saveSetupManual() {
     writer.setup = payload.setup;
     writer.book = payload.book;
     writer.setupDirty = false;
+    writer.outputMode = String(payload.book?.output_mode || "json");
     persistDraftAfterSave();
     toast("设定已保存为新版本");
     setSaveState("已保存", "设定按新版本保存；旧版本保留，可在「管理记录」里切回。");
@@ -3090,6 +3153,7 @@ async function selectSetupVersion(versionId) {
     });
     writer.book = payload.book;
     writer.setupDirty = false;
+    writer.outputMode = String(payload.book?.output_mode || "json");
     toast("已切换设定版本");
     await openBook(writer.bookId, { keepStage: true });
   } catch (error) {
@@ -4230,7 +4294,10 @@ export function bindWriterEvents() {
     void openChapter(Number(row.dataset.writerChapter));
   });
 
-  // ---- 设定表单 ----
+  $("#writerJsonOutput")?.addEventListener("change", (event) => {
+    void saveOutputMode(event.target.checked ? "json" : "freeform");
+  });
+
   for (const id of ["writerIdea", "writerTitle", "writerBlurb", "writerWorldview",
     "writerGenreTone", "writerGenreCustom", "writerVibe", "writerAvoid"]) {
     $(`#${id}`)?.addEventListener("input", () => {

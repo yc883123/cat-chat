@@ -671,7 +671,33 @@ class AppLimitTests(unittest.TestCase):
         self.assertFalse(result.get("busy"))
         self.assertEqual(result["scopes"][SCOPE_UPLOADS]["trigger"], "manual")
 
-    def test_studio_task_images_are_protected_from_cleanup(self) -> None:
+    def test_manual_clean_reclaims_file_after_legacy_orphan_trace(self) -> None:
+        """缓存清理入口先回收升级前孤儿 trace，再允许释放其路径。"""
+        generated = self.app.paths.data_dir / "generated" / "2026-01-01"
+        generated.mkdir(parents=True, exist_ok=True)
+        target = generated / "legacy-orphan.bin"
+        target.write_bytes(_blob(2 * 1024 * 1024, b"o"))
+        _age(target, days=3)
+        trace = json.dumps([{"role": "tool", "path": str(target)}], ensure_ascii=False)
+        with self.app.storage._connect() as db:  # noqa: SLF001 - 模拟升级前遗留行
+            db.execute(
+                "INSERT INTO message_traces(trace_hash, data) VALUES (?, ?)",
+                ("legacy-orphan-cache-test", trace),
+            )
+            db.commit()
+        self.app.config.update_settings({"imaging": {"generated_clean_limit_mb": 1}})
+
+        result, status = self.app.api_clean_image_cache(SCOPE_GENERATED)
+
+        self.assertEqual(status, 200)
+        self.assertFalse(target.exists(), "孤儿 trace 不应继续保护已删除会话的缓存文件")
+        self.assertGreaterEqual(result["scopes"][SCOPE_GENERATED]["removed"], 1)
+        with self.app.storage._connect() as db:  # noqa: SLF001
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM message_traces WHERE trace_hash = ?",
+                ("legacy-orphan-cache-test",),
+            ).fetchone())
+
         """工作台任务仍引用的图片：单文件复核与批量集合都必须保留（任务可查看/重试期间）。"""
         uploads = self.app.paths.data_dir / "uploads"
         uploads.mkdir(parents=True, exist_ok=True)

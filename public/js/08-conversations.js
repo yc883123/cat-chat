@@ -5,7 +5,7 @@
 import { $, api, escapeHtml, saveSidebarPrefs, state, toast } from "./01-core.js";
 import { renderMessages, revealMessage } from "./04-messages.js";
 import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskDisplayTitle, taskKindLabel, taskStatusLabel } from "./06-tasks-plans.js";
-import { applyConversationAgent, applyConversationModel, conversationModelGeneration, mergeConversationModelSelection, pendingConversationModelSave, resolveNewConversationModel } from "./07-models-agents.js";
+import { applyConversationAgent, applyConversationModel, closeAgentAbilityPopover, conversationModelGeneration, mergeConversationModelSelection, pendingConversationModelSave, resolveNewConversationModel } from "./07-models-agents.js";
 import { readAsDataUrl } from "./10-upload.js";
 import { detachRunSubscription, resumeConversationRun } from "./11-run-stream.js";
 import { closePermissionModeMenu, closeQuickMessagePanel, hideChoiceButtons, updateDeepReasoningButton } from "./12-chat-input.js";
@@ -1434,6 +1434,7 @@ export async function openConversation(id, { expectedGeneration = null } = {}) {
   if (id !== state.conversationId) {
     detachRunSubscription();
     hideChoiceButtons();
+    if (typeof closeAgentAbilityPopover === 'function') closeAgentAbilityPopover();
     // 已引用 Skill 集合属于会话维度：切会话即清空（新会话由 skills 事件重新累计）。
     // 弹窗列表不用这里刷新（避免 08→09 反向 import 成环），打开弹窗时会重渲染。
     state.quotedSkillIds = [];
@@ -2228,7 +2229,15 @@ export async function deleteConversation(id) {
   if (!confirm(`删除对话"${conversation?.title || '新对话'}"？`)) return;
   const wasCurrent = state.conversationId === id;
   const generation = wasCurrent ? beginConversationNavigation(id) : conversationOpenGeneration();
-  await api(`/api/conversations/${id}`, { method: 'DELETE' });
+  try {
+    await api(`/api/conversations/${id}`, { method: 'DELETE' });
+  } catch (error) {
+    if (error.status === 409 && error.payload?.code === 'busy') {
+      toast('还有任务在运行，请先停止');
+      return;
+    }
+    throw error;
+  }
   const stillCurrent = wasCurrent && isConversationOpenCurrent(generation, id);
   state.conversations = state.conversations.filter((item) => item.id !== id);
   if (stillCurrent) state.conversationId = '';

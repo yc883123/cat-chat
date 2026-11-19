@@ -1305,6 +1305,78 @@ def _hydrate_trace(db: sqlite3.Connection, trace_hash: str, cache: dict[str, str
     return value if isinstance(value, list) else None
 
 
+def _prune_orphan_message_traces(
+    db: sqlite3.Connection, preserve_hashes: Iterable[str] = ()
+) -> int:
+    """在当前事务内回收没有消息/检查点引用的内容寻址 trace。
+
+    检查点引用埋在 ``background_tasks.snapshot`` 中，不能用 SQL 的字符串 LIKE
+    代替结构校验：快照损坏或格式未知时宁可本轮一个 blob 都不删，避免破坏恢复数据。
+    ``preserve_hashes`` 用于仍可撤销的删除快照；下一次普通维护扫描会再次判断它是否已
+    变成真正的孤儿。
+    """
+    from naiba.core.contracts import CHAT_CONTEXT_CHECKPOINT_KEY
+
+    checkpoint_hashes: set[str] = set()
+    uncertain = False
+    rows = db.execute("SELECT snapshot FROM background_tasks").fetchall()
+    for row in rows:
+        raw = row[0]
+        try:
+            snapshot = json.loads(raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            uncertain = True
+            continue
+        if not isinstance(snapshot, dict):
+            uncertain = True
+            continue
+        if CHAT_CONTEXT_CHECKPOINT_KEY not in snapshot:
+            continue
+        checkpoint = snapshot.get(CHAT_CONTEXT_CHECKPOINT_KEY)
+        # save_context_checkpoint never writes null, but treat it as an explicitly
+        # empty checkpoint for compatibility with hand-edited/old snapshots.
+        if checkpoint is None:
+            continue
+        if not isinstance(checkpoint, dict):
+            uncertain = True
+            continue
+        segments = checkpoint.get("trace_segments")
+        trace_count = checkpoint.get("trace_count")
+        trace_view = checkpoint.get("trace_view")
+        if (
+            not isinstance(segments, list)
+            or any(not isinstance(item, str) or not item for item in segments)
+            or not isinstance(trace_count, int)
+            or isinstance(trace_count, bool)
+            or trace_count < 0
+            or not isinstance(trace_view, dict)
+        ):
+            uncertain = True
+            continue
+        checkpoint_hashes.update(segments)
+
+    # Any unknown snapshot means we cannot prove that a blob is not needed by a
+    # recovery path.  Message references alone are not enough in that case.
+    if uncertain:
+        return 0
+
+    protected = {str(item) for item in preserve_hashes if str(item)}
+    protected.update(checkpoint_hashes)
+    orphan_rows = db.execute(
+        "SELECT trace_hash FROM message_traces "
+        "WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.trace_hash = message_traces.trace_hash)"
+    ).fetchall()
+    orphan_hashes = [
+        str(row[0]) for row in orphan_rows if str(row[0]) not in protected
+    ]
+    if orphan_hashes:
+        db.executemany(
+            "DELETE FROM message_traces WHERE trace_hash = ?",
+            ((digest,) for digest in orphan_hashes),
+        )
+    return len(orphan_hashes)
+
+
 class ChatStorage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -1313,6 +1385,9 @@ class ChatStorage:
         # 只做记录，不做恢复：正文重建要用 run_events，那属于运行层（见
         # ConversationRunMixin.recover_interrupted_runs）。
         self.interrupted_tasks: list[dict[str, str]] = []
+        # 删除消息的撤销快照只存在前端内存，但在撤销窗口内仍需保留其 trace blob。
+        # 值为单调时钟截止时间；服务重启后前端快照已失效，历史 blob 可正常回收。
+        self._undo_trace_hashes: dict[str, float] = {}
         self._initialize()
 
     def upload_path_referenced(self, target: Path) -> bool:
@@ -2981,6 +3056,27 @@ class ChatStorage:
         return True
 
     @_retry_transient_write
+    def prune_orphan_message_traces(self) -> int:
+        """回收历史遗留的孤儿 trace；失败由调用方记录并按保守策略继续。"""
+        with self._connect() as db:
+            now = time.monotonic()
+            active_undo = {
+                digest for digest, expires in self._undo_trace_hashes.items()
+                if expires > now
+            }
+            self._undo_trace_hashes = {
+                digest: expires for digest, expires in self._undo_trace_hashes.items()
+                if expires > now
+            }
+            removed = _prune_orphan_message_traces(db, active_undo)
+            existing = {row[0] for row in db.execute("SELECT trace_hash FROM message_traces")}
+            self._undo_trace_hashes = {
+                digest: expires for digest, expires in self._undo_trace_hashes.items()
+                if digest in existing
+            }
+            return removed
+
+    @_retry_transient_write
     def delete_session_start(self, message_id: str) -> bool:
         """删除**遗留形态**的边界标记行（role=session；只允许删该角色，避免误删对话消息）。"""
         now = int(time.time() * 1000)
@@ -2996,6 +3092,7 @@ class ChatStorage:
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (now, row["conversation_id"]),
             )
+            _prune_orphan_message_traces(db)
         return True
 
     @_retry_transient_write
@@ -3100,8 +3197,25 @@ class ChatStorage:
 
     @_retry_transient_write
     def delete_conversation(self, conversation_id: str) -> bool:
+        """删除空闲会话；活动任务必须由调用方先停止或使用 idle 判定入口。"""
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT conv_kind FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            # 辅助对话有独立的关闭/过期语义；主对话才受侧栏删除的活动任务保护。
+            if str(row["conv_kind"] or "main") == "main":
+                active = db.execute(
+                    "SELECT id FROM background_tasks WHERE conversation_id = ? "
+                    f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+                if active is not None:
+                    raise RuntimeError("CONVERSATION_BUSY")
             cursor = db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            _prune_orphan_message_traces(db)
         return cursor.rowcount > 0
 
     @_retry_transient_write
@@ -3135,6 +3249,7 @@ class ChatStorage:
             if active is not None:
                 return "busy"
             db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            _prune_orphan_message_traces(db)
         return "deleted"
 
     def delete_expired_aux_conversations(self, ttl_days: int = 7) -> int:
@@ -3186,6 +3301,7 @@ class ChatStorage:
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (int(time.time() * 1000), conversation_id),
             )
+            _prune_orphan_message_traces(db)
         return cursor.rowcount
 
     @_retry_transient_write
@@ -3218,6 +3334,7 @@ class ChatStorage:
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (int(time.time() * 1000), conversation_id),
             )
+            _prune_orphan_message_traces(db)
         return cursor.rowcount
 
     # ---- 删除单条/整轮消息 + 撤销（快照插回） ----
@@ -3279,10 +3396,24 @@ class ChatStorage:
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (now, conversation_id),
             )
+            self._undo_trace_hashes.update(
+                (str(row["trace_hash"] or ""), time.monotonic() + 10.0)
+                for row in victims if str(row["trace_hash"] or "")
+            )
+            # 先登记撤销保护，再做同事务回收；撤销窗口内不会丢失 trace。
+            _prune_orphan_message_traces(
+                db,
+                (digest for digest, expires in self._undo_trace_hashes.items() if expires > time.monotonic()),
+            )
+            _prune_orphan_message_traces(
+                db,
+                (digest for digest, expires in self._undo_trace_hashes.items() if expires > time.monotonic()),
+            )
         return {
             "ok": True,
             "conversation_id": conversation_id,
             "mode": kind,
+
             "removed": [self._message_snapshot(row) for row in victims],
             "updated_at": now,
         }
@@ -3738,6 +3869,7 @@ class ChatStorage:
                     "UPDATE conversations SET updated_at = ? WHERE id = ?",
                     (int(time.time() * 1000), conversation_id),
                 )
+                _prune_orphan_message_traces(db)
         return bool(cursor.rowcount)
 
     @_retry_transient_write
@@ -5032,6 +5164,7 @@ class ChatStorage:
             cursor = db.execute(
                 "DELETE FROM background_tasks WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')"
             )
+            _prune_orphan_message_traces(db)
         return cursor.rowcount
 
     def is_job_cleaned(self, job_id: str) -> bool:

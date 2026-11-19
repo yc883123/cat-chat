@@ -224,7 +224,65 @@ class TraceStorageTests(unittest.TestCase):
         self.assertNotIn("cached.png", self._raw_metadata(str(message["id"])))
         self.assertIn("cached.png", self._trace_rows()[0][1])
 
-    # ---- 5. 迁移 ----
+    # ---- 4.5. orphan trace 回收 ----
+    def test_delete_conversation_prunes_orphan_trace(self) -> None:
+        self._add(TRACE_A)
+        self.assertEqual(len(self._trace_rows()), 1)
+        self.assertTrue(self.storage.delete_conversation(str(self.conversation["id"])))
+        self.assertEqual(self._trace_rows(), [], "删除会话后孤儿 trace 必须回收")
+
+    def test_shared_trace_is_kept_until_last_message_is_deleted(self) -> None:
+        self._add(TRACE_A)
+        other = self.storage.create_conversation(title="共享 trace")
+        self.storage.add_message(other["id"], "assistant", "另一答", {"trace": TRACE_A})
+        self.assertEqual(len(self._trace_rows()), 1)
+        self.assertTrue(self.storage.delete_conversation(str(self.conversation["id"])))
+        self.assertEqual(len(self._trace_rows()), 1, "共享 hash 仍被另一会话引用")
+        self.assertTrue(self.storage.delete_conversation(str(other["id"])))
+        self.assertEqual(self._trace_rows(), [], "最后一个引用删除后才回收")
+
+    def test_checkpoint_trace_is_not_pruned(self) -> None:
+        from naiba.core.trace_view import trace_fingerprint
+
+        run = self.storage.create_chat_run(
+            str(self.conversation["id"]), "检查点", [],
+            {"id": "agent"}, {"interaction_mode": "craft"}, "craft",
+        )
+        checkpoint_trace = [{"role": "assistant", "content": "检查点轨迹"}]
+        self.storage.save_context_checkpoint(
+            run["id"], checkpoint_trace,
+            {"trace_sha256": trace_fingerprint(checkpoint_trace)},
+        )
+        with self.storage._connect() as db:  # noqa: SLF001 - 建一条待回收孤儿
+            db.execute(
+                "INSERT INTO message_traces(trace_hash, data) VALUES (?, ?)",
+                ("orphan-checkpoint-test", "[]"),
+            )
+            db.commit()
+        self.storage.prune_orphan_message_traces()
+        hashes = {row[0] for row in self._trace_rows()}
+        self.assertNotIn("orphan-checkpoint-test", hashes)
+        checkpoint = self.storage.get_run_snapshot(run["id"])["context_checkpoint"]
+        self.assertIn(checkpoint["trace_segments"][0], hashes)
+
+    def test_malformed_checkpoint_snapshot_is_conservative(self) -> None:
+        run = self.storage.create_chat_run(
+            str(self.conversation["id"]), "坏检查点", [],
+            {"id": "agent"}, {"interaction_mode": "craft"}, "craft",
+        )
+        with self.storage._connect() as db:  # noqa: SLF001 - 故意构造未知格式
+            db.execute(
+                "INSERT INTO message_traces(trace_hash, data) VALUES (?, ?)",
+                ("orphan-uncertain-test", "[]"),
+            )
+            db.execute(
+                "UPDATE background_tasks SET snapshot = ? WHERE id = ?",
+                ('{"context_checkpoint": ["unknown"]}', run["id"]),
+            )
+            db.commit()
+        self.assertEqual(self.storage.prune_orphan_message_traces(), 0)
+        self.assertIn("orphan-uncertain-test", {row[0] for row in self._trace_rows()})
+
 
     def test_migration_dedupes_legacy_inline_traces(self) -> None:
         """存量库（trace 内联）迁移后：表里按内容去重、metadata 不再内联。"""

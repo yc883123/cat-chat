@@ -180,6 +180,167 @@ export function closeAgentHelpPopover() {
   button?.setAttribute('aria-expanded', 'false');
 }
 
+// 当前能力只读投影：唯一事实来源是当前会话已经落盘的 first_turn 工具快照。
+// 这里不读取 Agent 配置来“猜”能力，也不触碰 enabled_tool_ids / tool_opt_ins。
+const ABILITY_GROUP_ORDER = [
+  '读取与检索', '文件写入与编辑', '命令与脚本执行', '联网与外部服务',
+  '造梦机对话', '视觉与图片', '任务与扩展', '长会话', '其他',
+];
+const ABILITY_GROUP_FALLBACKS = new Map([
+  ['read_file', '读取与检索'], ['list_directory', '读取与检索'], ['search_files', '读取与检索'],
+  ['find_conversations', '长会话'], ['recall_history', '长会话'],
+  ['read_conversation', '长会话'], ['reset_context', '长会话'],
+  ['read_pdf', '读取与检索'], ['pdf_render_pages', '读取与检索'], ['pdf_zoom_region', '读取与检索'],
+  ['probe_video', '读取与检索'], ['extract_frames', '读取与检索'], ['extract_video_frames_exact', '读取与检索'],
+  ['novel_outline', '读取与检索'], ['novel_chunks', '读取与检索'], ['novel_split_text', '读取与检索'],
+  ['write_file', '文件写入与编辑'], ['edit_file', '文件写入与编辑'],
+  ['pwsh', '命令与脚本执行'], ['run_skill_script', '命令与脚本执行'],
+  ['http_request', '联网与外部服务'], ['web_search', '联网与外部服务'], ['register_mcp', '联网与外部服务'],
+  ['comfyui_prepare_workflow', '联网与外部服务'], ['comfyui_batch', '联网与外部服务'],
+  ['dream_workflows', '造梦机对话'], ['dream_workflow_details', '造梦机对话'], ['dream_prepare', '造梦机对话'],
+  ['dream_submit', '造梦机对话'], ['dream_task_status', '造梦机对话'], ['dream_task_cancel', '造梦机对话'],
+  ['dream_task_wait', '造梦机对话'],
+  ['vision_analyze', '视觉与图片'], ['vision_image_ops', '视觉与图片'], ['show_media', '视觉与图片'],
+  ['run_in_background', '任务与扩展'], ['job_output', '任务与扩展'], ['job_status', '任务与扩展'],
+  ['job_wait', '任务与扩展'], ['job_kill', '任务与扩展'], ['subagent', '任务与扩展'],
+  ['subagent_spawn', '任务与扩展'], ['todo_write', '任务与扩展'], ['install_skill', '任务与扩展'],
+  ['unpack_skill_archive', '任务与扩展'], ['inspect_installed_skill', '任务与扩展'],
+]);
+
+function agentAbilityConversation() {
+  return state.conversations.find((item) => String(item.id) === String(state.conversationId || '')) || null;
+}
+
+function abilityGroupForTool(tool) {
+  const name = String(tool?.name || '');
+  const catalogTool = (state.toolCatalog?.tools || []).find((item) => String(item?.name || '') === name);
+  const catalogGroup = String(catalogTool?.group || '').trim();
+  if (ABILITY_GROUP_ORDER.includes(catalogGroup)) return catalogGroup;
+  if (name.startsWith('mcp__')) return '联网与外部服务';
+  return ABILITY_GROUP_FALLBACKS.get(name) || '其他';
+}
+
+function abilityToolLabel(tool) {
+  const name = String(tool?.name || '').trim();
+  if (!name) return '';
+  if (name.startsWith('mcp__')) {
+    const [, server, action] = name.match(/^mcp__([^_]+(?:_[^_]+)*)__([^_].*)$/) || [];
+    return server && action ? `${server} · ${action}` : name.replace(/^mcp__/, '');
+  }
+  return name;
+}
+
+function renderAbilityEmptyState(body) {
+  const empty = document.createElement('p');
+  empty.className = 'agent-ability-empty';
+  empty.textContent = state.conversationId
+    ? '发送首条消息后确定本会话能力。'
+    : '打开一个会话后显示当前能力。';
+  body.append(empty);
+}
+
+export function renderAgentAbilityPopover() {
+  const agentEl = $('#agentAbilityAgent');
+  const statusEl = $('#agentAbilityStatus');
+  const body = $('#agentAbilityBody');
+  if (!agentEl || !statusEl || !body) return;
+  const conversation = agentAbilityConversation();
+  const configured = (state.bootstrap?.agents || []).find(
+    (item) => String(item.id) === String(conversation?.agent_id || $('#agentSelect')?.value || ''),
+  );
+  const snapshot = state.firstTurnInfo && typeof state.firstTurnInfo === 'object'
+    ? state.firstTurnInfo : null;
+  agentEl.textContent = `当前 Agent：${String(snapshot?.agent_name || configured?.name || $('#agentSelect')?.selectedOptions?.[0]?.textContent || '未确定')}`;
+  body.replaceChildren();
+  if (!snapshot) {
+    statusEl.textContent = '当前会话尚未有可读取的能力快照';
+    renderAbilityEmptyState(body);
+    return;
+  }
+  const tools = Array.isArray(snapshot.tools) ? snapshot.tools.filter((item) => item && typeof item === 'object') : [];
+  statusEl.textContent = `本会话首轮已固化 · ${tools.length} 个工具 · 只读展示`;
+  const groups = new Map();
+  for (const tool of tools) {
+    const group = abilityGroupForTool(tool);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(tool);
+  }
+  for (const groupName of ABILITY_GROUP_ORDER) {
+    const members = groups.get(groupName);
+    if (!members?.length) continue;
+    const section = document.createElement('section');
+    section.className = 'agent-ability-group';
+    const heading = document.createElement('strong');
+    heading.textContent = `${groupName}（${members.length}）`;
+    section.append(heading);
+    const list = document.createElement('p');
+    list.className = 'agent-ability-tools';
+    list.textContent = members.map(abilityToolLabel).filter(Boolean).join('、');
+    section.append(list);
+    body.append(section);
+  }
+  if (!tools.length) {
+    const empty = document.createElement('p');
+    empty.className = 'agent-ability-empty';
+    empty.textContent = '本会话已固化工具集，但没有启用工具。';
+    body.append(empty);
+  }
+  const skills = Array.isArray(snapshot.skills) ? snapshot.skills.filter((item) => item && typeof item === 'object') : [];
+  const skillSection = document.createElement('section');
+  skillSection.className = 'agent-ability-group';
+  const skillHeading = document.createElement('strong');
+  skillHeading.textContent = `Skill（${skills.length}）`;
+  skillSection.append(skillHeading);
+  const skillList = document.createElement('p');
+  skillList.className = 'agent-ability-tools';
+  skillList.textContent = skills.length
+    ? skills.map((item) => String(item.name || item.id || '')).filter(Boolean).join('、')
+    : '未加载 Skill';
+  skillSection.append(skillList);
+  body.append(skillSection);
+}
+
+export function positionAgentAbilityPopover() {
+  const popover = $('#agentAbilityPopover');
+  const button = $('#agentAbilityButton');
+  if (!popover || !button || popover.hidden) return;
+  const edge = 12;
+  const gap = 9;
+  const buttonRect = button.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  const maxLeft = Math.max(edge, window.innerWidth - popoverRect.width - edge);
+  const left = Math.min(Math.max(edge, buttonRect.left), maxLeft);
+  let top = buttonRect.bottom + gap;
+  if (top + popoverRect.height > window.innerHeight - edge) {
+    top = Math.max(edge, buttonRect.top - popoverRect.height - gap);
+  }
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
+}
+
+export function toggleAgentAbilityPopover(event) {
+  event.stopPropagation();
+  const popover = $('#agentAbilityPopover');
+  const button = $('#agentAbilityButton');
+  if (!popover || !button) return;
+  const open = popover.hidden;
+  if (open) {
+    renderAgentAbilityPopover();
+    if (popover.parentElement !== document.body) document.body.appendChild(popover);
+  }
+  popover.hidden = !open;
+  button.setAttribute('aria-expanded', String(open));
+  if (open) positionAgentAbilityPopover();
+}
+
+export function closeAgentAbilityPopover() {
+  const popover = $('#agentAbilityPopover');
+  const button = $('#agentAbilityButton');
+  if (!popover) return;
+  popover.hidden = true;
+  button?.setAttribute('aria-expanded', 'false');
+}
+
 function updateVersionAllowed(release) {
   if (!release || release.installable === false) return false;
   const value = String(release.version || release.tag || '').trim().replace(/^v/i, '');
@@ -1513,6 +1674,7 @@ export async function saveAgentSelection() {
     toast('请先打开或新建一个对话');
     return;
   }
+  closeAgentAbilityPopover();
   try {
     const updated = await api(`/api/conversations/${state.conversationId}/settings`, {
       method: 'POST',

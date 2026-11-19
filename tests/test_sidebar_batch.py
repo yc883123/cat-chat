@@ -111,13 +111,29 @@ class BatchDeleteStorageTests(SidebarBatchTestBase):
         self.storage.update_background_task(run["id"], status="completed", finished=True)
         self.assertEqual(self.storage.delete_conversation_if_idle(conversation["id"]), "deleted")
 
-    def test_aux_and_missing_results(self):
-        aux = self.storage.create_conversation("辅助", conv_kind="aux")
-        self.assertEqual(self.storage.delete_conversation_if_idle(aux["id"]), "not_main")
-        self.assertEqual(self.storage.delete_conversation_if_idle("nope"), "missing")
+    def test_single_delete_uses_same_busy_guard_and_is_idempotent(self):
+        from http import HTTPStatus
 
+        main = self.storage.create_conversation("单删")
+        busy = self.storage.create_conversation("单删忙")
+        self.storage.create_chat_run(
+            busy["id"], "在吗", [], {"id": "agent"}, {"interaction_mode": "craft"}, "craft"
+        )
+        app = _stub(self.storage)
+        app._confirmed_folders = {main["id"]: {"outside"}, busy["id"]: {"busy"}}
+        payload, status = NaibaChatApp.api_delete_conversation(app, busy["id"])
+        self.assertEqual(status, HTTPStatus.CONFLICT)
+        self.assertEqual(payload.get("code"), "busy")
+        self.assertIn(busy["id"], app._confirmed_folders)
+        self.assertIsNotNone(self.storage.get_conversation(busy["id"], include_messages=False))
+        payload, status = NaibaChatApp.api_delete_conversation(app, main["id"])
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertTrue(payload.get("ok"))
+        self.assertNotIn(main["id"], app._confirmed_folders)
+        payload, status = NaibaChatApp.api_delete_conversation(app, main["id"])
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertTrue(payload.get("missing"))
 
-class BatchApiTests(SidebarBatchTestBase):
     def test_contract_registry(self):
         self.assertEqual(set(CONVERSATION_BATCH_ACTIONS), {"archive", "unarchive", "delete"})
         self.assertEqual(CONVERSATION_BATCH_MAX_IDS, 100)

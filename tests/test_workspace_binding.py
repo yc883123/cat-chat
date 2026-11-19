@@ -55,6 +55,8 @@ class WorkspaceBindingTests(unittest.TestCase):
         removed = self.storage.create_conversation(
             workspace_group="removed", workspace_dir=str(self.input_dir)
         )
+        workspace_file = self.input_dir / "keep-after-delete.txt"
+        workspace_file.write_text("用户交付物", encoding="utf-8")
         self.assertEqual(
             self.storage.synchronize_workspace_bindings(self.config.workspace_bindings()), 0
         )
@@ -66,4 +68,6 @@ class WorkspaceBindingTests(unittest.TestCase):
             self.storage.get_conversation(removed["id"], include_messages=False)["workspace_dir"],
             str(self.input_dir),
         )
+        self.assertTrue(self.storage.delete_conversation(ungrouped["id"]))
+        self.assertTrue(workspace_file.is_file(), "删除会话不得删除 workspace 用户文件")
 

@@ -143,6 +143,9 @@ class TopbarCollapseMarkupTests(unittest.TestCase):
 class TopbarCollapseStyleTests(unittest.TestCase):
     """折叠规则：手机形态内、类名门控、不按视口删能力。"""
 
+    def _index(self) -> str:
+        return (ROOT / "public/index.html").read_text(encoding="utf-8")
+
     def _css(self) -> str:
         return (ROOT / "public/styles.css").read_text(encoding="utf-8")
 
@@ -224,6 +227,18 @@ class TopbarCollapseStyleTests(unittest.TestCase):
         self.assertNotIn("#openTasks .button-label", css)
         self.assertNotIn(".mcp-button span { display: none; }", css)
         self.assertNotIn(".button-label", self._mobile_block(), "760 块里不得出现任何按钮文字隐藏规则")
+
+    def test_current_ability_and_help_buttons_are_hidden_without_placeholder(self) -> None:
+        index = self._index()
+        header = index[index.index('<header class="topbar">'): index.index("</header>")]
+        self.assertIn('id="agentHelpButton"', header)
+        self.assertIn('id="agentAbilityButton"', header)
+        self.assertIn('id="agentSelect"', header)
+        mobile = self._mobile_block()
+        self.assertIn("#agentAbilityButton, #agentAbilityPopover, #agentHelpButton { display: none; }", mobile)
+        self.assertIn('id="agentAbilityPopover"', index)
+        # The selector hides the actual controls; no mobile-only replacement or layout slot is added.
+        self.assertNotIn('grid-column: 4', mobile)
 
     def test_topbar_button_rules_untouched(self) -> None:
         """新按钮不得动摇顶栏按钮的既有不变量（test_topbar 亦守门，这里就近再钉一次）。"""

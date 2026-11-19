@@ -272,22 +272,56 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn(".agent-control { grid-column: 3; grid-row: 1;", narrow)
         self.assertIn(".topbar-actions { grid-row: 2;", narrow)
 
+    def test_agent_ability_entry_and_popover_are_separate_from_help(self) -> None:
+        index = self._index()
+        header = index[index.index('<header class="topbar">'):index.index('</header>')]
+        control_start = header.index('<label class="model-control agent-control">')
+        control_end = header.index('</label>', control_start)
+        control = header[control_start:control_end]
+        self.assertEqual(index.count('id="agentAbilityButton"'), 1)
+        self.assertIn('id="agentAbilityButton"', control)
+        self.assertIn('aria-expanded="false"', control)
+        self.assertIn('aria-controls="agentAbilityPopover"', control)
+        self.assertIn('id="agentAbilityPopover"', header)
+        self.assertIn('id="agentAbilityClose"', header)
+        self.assertIn('id="agentHelpPopover"', header)
+        self.assertNotEqual(header.index('id="agentAbilityPopover"'), header.index('id="agentHelpPopover"'))
+
+    def test_agent_ability_is_read_only_snapshot_projection(self) -> None:
+        models = (ROOT / "public/js/07-models-agents.js").read_text(encoding="utf-8")
+        self.assertIn("state.firstTurnInfo", models)
+        self.assertIn("发送首条消息后确定本会话能力", models)
+        self.assertIn("tool_opt_ins", models)
+        self.assertIn("mcp__", models)
+        self.assertIn("export function positionAgentAbilityPopover", models)
+        self.assertIn("export function toggleAgentAbilityPopover", models)
+        self.assertIn("export function closeAgentAbilityPopover", models)
+        self.assertNotIn("set_enabled_tool_ids", models)
+        bind = self._bind()
+        self.assertIn("$('#agentAbilityButton')?.addEventListener('click'", bind)
+        self.assertIn("window.addEventListener('resize', positionAgentAbilityPopover)", bind)
+        self.assertIn("document.addEventListener('click', closeAgentAbilityPopover)", bind)
+
+    def test_agent_ability_mobile_visibility_is_scoped(self) -> None:
+        css = self._css()
+        mobile = css[css.index('@media (max-width: 760px) {'):]
+        mobile = mobile[:mobile.index("\n}")]
+        self.assertIn("#agentAbilityButton, #agentAbilityPopover, #agentHelpButton { display: none; }", mobile)
+        self.assertIn(".agent-ability-popover[hidden] { display: none; }", css)
+        self.assertIn(".agent-ability-button {", css)
+
     def test_turn_jump_select_lives_in_topbar_as_direct_child(self) -> None:
-        """轮次下拉是 .topbar 直接子元素（2026-11-04 两层改版：手机端第 1 行中段、
-        桌面端左段中段视觉不变），不得回到 .topbar-actions 里随操作区换行漂移。
-        手机 / 桌面共用一个元素，细节见 test_turn_jump.py。"""
+        """轮次下拉必须仍是 .topbar 直接子元素，不被当前能力入口改动带回操作区。"""
         index = self._index()
         header = index[index.index('<header class="topbar">'): index.index("</header>")]
         actions_start = header.index('class="topbar-actions"')
         actions_end = header.index("</div>", actions_start)
-        self.assertNotIn('id="turnJumpSelect"', header[actions_start:actions_end],
-                         "轮次下拉不能放进 .topbar-actions（手机端会随操作区换行漂移）")
-        self.assertIn('id="turnJumpSelect"', header, "轮次下拉不在顶栏里")
-        # 必须紧跟 Agent 控件之后（导航语义同排），且在操作区之前。
+        self.assertNotIn('id="turnJumpSelect"', header[actions_start:actions_end])
+        self.assertIn('id="turnJumpSelect"', header)
         agent_end = header.index("</label>", header.index('class="model-control agent-control"'))
         turn_pos = header.index('id="turnJumpSelect"')
-        self.assertGreater(turn_pos, agent_end, "轮次下拉要排在 Agent 控件之后")
-        self.assertLess(turn_pos, actions_start, "轮次下拉要排在操作区之前")
+        self.assertGreater(turn_pos, agent_end)
+        self.assertLess(turn_pos, actions_start)
 
 
 class StudioEntryTests(unittest.TestCase):

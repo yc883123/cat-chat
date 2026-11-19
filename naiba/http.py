@@ -1862,6 +1862,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 service = self.app.writer if module == "writer" else self.app.novel
                 self._json(*service.api_save_system_prompt(path[len(prefix):-len("/system-prompt")], body))
                 return
+        if path.startswith("/api/writer/books/") and path.endswith("/output-mode"):
+            self._json(*self.app.writer.api_save_output_mode(
+                path[len("/api/writer/books/"):-len("/output-mode")], body))
+            return
         if path.startswith("/api/novel/books/") and path.endswith("/storyboard-prompt"):
             self._json(*self.app.novel.api_save_storyboard_prompt_config(
                 path[len("/api/novel/books/"):-len("/storyboard-prompt")], body))
@@ -2058,8 +2062,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 deleted = self.app.storage.clear_session_start(message_id)
             self._json({"ok": deleted}, HTTPStatus.OK if deleted else HTTPStatus.NOT_FOUND)
         elif path.startswith("/api/conversations/"):
-            deleted = self.app.storage.delete_conversation(path.rsplit("/", 1)[-1])
-            self._json({"ok": deleted}, HTTPStatus.OK if deleted else HTTPStatus.NOT_FOUND)
+            conversation_id = path.rsplit("/", 1)[-1]
+            self._json(*self.app.api_delete_conversation(conversation_id))
         elif path.startswith("/api/tasks/") and path.endswith("/cancel"):
             task_id = path.split("/")[-2]
             task = self.app.tasks.cancel(task_id)

@@ -2725,7 +2725,7 @@ class ComfyuiStatusbarLayoutTests(unittest.TestCase):
             '#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes {\n', 1)[1].split("}", 1)[0]
         self.assertIn("min-width: 0", pane)
         self.assertIn("max-width: 100%", pane)
-        self.assertIn("overflow-x: auto", pane)
+        self.assertIn("overflow-x: scroll", pane)
         self.assertIn("flex-wrap: nowrap", pane)
         self.assertNotIn("min-width: max-content", pane)
         self.assertIn(

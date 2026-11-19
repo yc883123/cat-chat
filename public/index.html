@@ -163,6 +163,9 @@
                   title="Agent 是什么？点击查看说明" aria-label="Agent 使用说明" aria-expanded="false">?</button>
           <span>Agent</span>
           <select id="agentSelect" aria-label="当前 Agent"></select>
+          <button class="agent-ability-button" id="agentAbilityButton" type="button"
+                  title="查看当前会话实际能力" aria-label="查看当前会话实际能力"
+                  aria-expanded="false" aria-controls="agentAbilityPopover">当前能力</button>
         </label>
         <!-- 轮次下拉：桌面刻度轨的等价形态，手机 / 桌面共用同一个元素。
              2026-11-04 起移出 .topbar-actions、作为 .topbar 直接子元素（导航语义，
@@ -217,6 +220,20 @@
             （可用开始页「设置本地 Comfy MCP」预设指令让 AI 帮你装）；连上后 MCP 引入的 comfy 工具
             会出现在「设置 → Agent → 工具集」里，手动勾选启用。</p>
           <small>两条路任选其一即可，一般不需要同时开。Agent 的每个工具在设置页都有说明，不确定就先只读模式试试。</small>
+        </div>
+        <!-- 当前能力浮层：打开时挂到 body，内容来自当前会话已落盘的首轮工具快照 -->
+        <div class="agent-ability-popover" id="agentAbilityPopover" hidden role="dialog"
+             aria-labelledby="agentAbilityTitle">
+          <div class="agent-ability-head">
+            <div>
+              <strong id="agentAbilityTitle">当前能力</strong>
+              <p id="agentAbilityAgent" class="agent-ability-agent"></p>
+            </div>
+            <button class="icon-button tiny" id="agentAbilityClose" type="button"
+                    title="关闭当前能力" aria-label="关闭当前能力">×</button>
+          </div>
+          <p id="agentAbilityStatus" class="agent-ability-status"></p>
+          <div id="agentAbilityBody" class="agent-ability-body"></div>
         </div>
         <div class="topbar-actions">
           <button class="control-button file-reopen-button" id="openFileTabs" type="button" hidden title="重新打开面板（保留已打开的文件标签）">
@@ -1725,6 +1742,13 @@
                     <label class="writer-field">补充要求（只在第一步「题材推断」生效）
                       <input type="text" id="writerSetupNote" placeholder="想强调的要求，可留空">
                     </label>
+                    <div class="writer-action-bar">
+                      <label class="writer-check writer-output-mode">
+                        <input type="checkbox" id="writerJsonOutput" checked>
+                        <span>结构化字段输出（JSON）</span>
+                      </label>
+                    </div>
+                    <p class="writer-hint" id="writerOutputModeHint">开启时按阶段字段输出并严格校验；关闭后模型自由发挥，题材、简介、分类、角色和章节不会自动填表，需要手动整理。</p>
                     <div class="writer-action-bar">
                       <button class="control-button writer-primary" type="button" id="writerSetupGenerate">生成整套设定</button>
                       <button class="control-button" type="button" id="writerSetupSave">保存修改为新版本</button>

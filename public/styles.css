@@ -2063,6 +2063,19 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .agent-avatar-row { display: flex; align-items: center; gap: 8px; flex: none; }
 .agent-control { min-width: 0; display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; }
 .agent-control select { width: auto; min-width: 0; max-width: 220px; flex: 0 1 auto; height: 34px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 28px 0 10px; }
+.agent-ability-button { min-height: 34px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 9px; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.agent-ability-button:hover { border-color: var(--line-strong); background: var(--surface-2); }
+.agent-ability-popover { position: fixed; z-index: 1400; width: min(430px, calc(100vw - 24px)); max-height: min(620px, calc(100vh - 24px)); overflow: auto; padding: 14px; border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); color: var(--text); box-shadow: var(--shadow-3); }
+.agent-ability-popover[hidden] { display: none; }
+.agent-ability-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.agent-ability-head strong { font-size: 14px; }
+.agent-ability-agent, .agent-ability-status { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.agent-ability-status { padding: 8px 10px; border-radius: var(--r-md); background: var(--surface-inset); }
+.agent-ability-body { display: grid; gap: 8px; margin-top: 10px; }
+.agent-ability-group { padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.agent-ability-group strong { font-size: 12px; }
+.agent-ability-tools, .agent-ability-empty { margin: 5px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-ability-empty { padding: 10px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); }
 .agent-form { display: flex; flex-direction: column; flex: 1; min-height: 0; max-height: inherit; }
 .agent-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
 .agent-form input[type="text"], .agent-form textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); }
@@ -2434,6 +2447,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .agent-control { grid-column: 3; grid-row: 1; justify-self: end; width: fit-content; max-width: 100%; }
   .model-control:not(.agent-control) select { max-width: 100%; width: 100%; min-width: 0; min-height: 44px; padding: 0 24px 0 8px; text-overflow: ellipsis; }
   .agent-control select { width: auto; max-width: min(220px, 48vw); min-width: 0; min-height: 44px; padding: 0 24px 0 8px; text-overflow: ellipsis; }
+  #agentAbilityButton, #agentAbilityPopover, #agentHelpButton { display: none; }
   /* 轮次下拉：桌面刻度轨的等价形态。选项自带「第 N 轮 · 摘要」文字，不另加标签；
      上限交给 1fr 轨道 + min-width:0，Agent 名再长也先压 Agent（48vw 上限）不挤掉轮次。 */
   .turn-jump-select { display: inline-block; margin-right: 0; width: 100%; max-width: 100%; min-width: 0; min-height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 12px; text-overflow: ellipsis; grid-column: 2; grid-row: 1; }
@@ -7646,7 +7660,7 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
    按钮保留 min-width:max-content 兜住文字；标签条自身收进首列宽内并横向滚动，
    不能让 max-content 把 documentElement 一起撑宽（2026-11-19）。 */
 #studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes {
-  min-width: 0; max-width: 100%; overflow-x: auto; flex-wrap: nowrap;
+  min-width: 0; max-width: 100%; overflow-x: scroll; flex-wrap: nowrap;
   overscroll-behavior-x: contain; scrollbar-width: thin;
 }
 /* 首列够宽时四个按钮仍按内容宽平铺；不够时由标签条横向滚，不换行也不压字。 */

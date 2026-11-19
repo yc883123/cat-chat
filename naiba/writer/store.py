@@ -44,6 +44,7 @@ from naiba.core.fsutil import atomic_write_bytes, atomic_write_json
 from naiba.core.contracts import (
     WRITER_PIPELINE_STOPPING, WriterChapterBaseline, WriterExportResult, WriterPreviousChapter,
     WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
+    WRITER_OUTPUT_MODE_KEY,
 )
 
 # 作品清单版本：首版为 1。
@@ -95,6 +96,32 @@ CHAPTER_STATE_LIST_MAX = {"characters": 30, "relations": 20, "knowledge": 20,
 CHAPTER_STATE_SUBITEM_MAX = 6
 # 新章生成读取的前序状态窗口：最近 N 章的有效章末状态（再远的不进上下文）。
 CHAPTER_STATE_WINDOW = 4
+OUTPUT_MODES = ("json", "freeform")
+DEFAULT_OUTPUT_MODE = "json"
+
+
+def normalize_output_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in OUTPUT_MODES else DEFAULT_OUTPUT_MODE
+
+
+def normalize_freeform_outputs(raw: Any) -> list[dict[str, Any]]:
+    rows = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        step = str(item.get("step") or "").strip()[:40]
+        text = str(item.get("text") or "").strip()
+        if not step or not text:
+            continue
+        rows.append({
+            "step": step,
+            "label": str(item.get("label") or step).strip()[:80],
+            "text": text[:SETUP_TEXT_MAX_CHARS],
+            "task_id": str(item.get("task_id") or "").strip()[:120],
+            "updated_at": int(item.get("updated_at") or 0),
+        })
+    return rows[-30:]
 
 
 def normalize_chapter_state(raw: Any) -> dict[str, Any]:
@@ -386,6 +413,7 @@ def normalize_setup(payload: Any, *, base: dict[str, Any] | None = None) -> dict
             "channel": str(genre_raw.get("channel") or "").strip()[:20],
             "cat": str(genre_raw.get("cat") or "").strip()[:40],
             "sub_cat": str(genre_raw.get("sub_cat") or "").strip()[:40],
+            "custom": str(genre_raw.get("custom") or "").strip()[:120],
             "tone": str(genre_raw.get("tone") or "").strip()[:40],
             "hook": str(genre_raw.get("hook") or "").strip()[:200],
         },
@@ -418,6 +446,9 @@ def normalize_setup(payload: Any, *, base: dict[str, Any] | None = None) -> dict
                                  if isinstance(raw.get("constraints"), dict) else "",
                                  AVOID_MAX, what="雷区"),
         },
+        "freeform_outputs": normalize_freeform_outputs(
+            raw.get("freeform_outputs", base.get("freeform_outputs"))
+        ),
     }
     continuation_summary = raw.get("continuation_summary", base.get("continuation_summary"))
     if continuation_summary is not None or "continuation_summary" in raw:
@@ -674,7 +705,8 @@ class WriterStore:
             if not save_system_prompt and (book_dir / "book.json").exists():
                 current = self._read_json(book_dir / "book.json", what="作品清单")
                 for key, default in ((WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""),
-                                     (WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, 0)):
+                                     (WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, 0),
+                                     (WRITER_OUTPUT_MODE_KEY, DEFAULT_OUTPUT_MODE)):
                     manifest[key] = current.get(key, default)
             manifest["updated_at"] = _now_ms()
             self._write_json(book_dir / "book.json", manifest)
@@ -700,6 +732,23 @@ class WriterStore:
     def _bump_manifest(self, book_dir: Path, manifest: dict[str, Any]) -> None:
         manifest["revision"] = int(manifest.get("revision") or 0) + 1
         self._save_manifest(book_dir, manifest)
+
+    def save_output_mode(self, book_id: str, *, mode: Any,
+                         expected_revision: Any) -> dict[str, Any]:
+        normalized = normalize_output_mode(mode)
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise WriterStoreError("revision 必须是非负整数")
+        with self._lock:
+            manifest = self._load_manifest(book_id)
+            actual = int(manifest.get("revision") or 0)
+            if expected_revision != actual:
+                raise WriterConflictError("作品已在另一窗口修改；请重新打开后再保存")
+            if normalize_output_mode(manifest.get(WRITER_OUTPUT_MODE_KEY)) == normalized:
+                return self._public_manifest(manifest)
+            manifest[WRITER_OUTPUT_MODE_KEY] = normalized
+            self._bump_manifest(self._book_dir(book_id), manifest)
+            return self._public_manifest(manifest)
+
 
     @staticmethod
     def _check_revision(manifest: dict[str, Any], expected: Any, *, what: str = "作品") -> None:
@@ -747,6 +796,7 @@ class WriterStore:
             "revision": int(manifest.get("revision") or 0),
             WORK_GLOBAL_SYSTEM_PROMPT_KEY: str(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY) or ""),
             WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0),
+            WRITER_OUTPUT_MODE_KEY: normalize_output_mode(manifest.get(WRITER_OUTPUT_MODE_KEY)),
             "schema_version": int(manifest.get("schema_version") or 0),
             "chapter_count": len([n for n in manifest.get("chapter_ids") or []]),
             "current_setup_version_id": str(manifest.get("current_setup_version_id") or ""),
@@ -791,6 +841,7 @@ class WriterStore:
                 "title": book_title,
                 WORK_GLOBAL_SYSTEM_PROMPT_KEY: "",
                 WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: 0,
+                WRITER_OUTPUT_MODE_KEY: DEFAULT_OUTPUT_MODE,
                 "current_setup_version_id": "",
                 "current_outline_version_id": "",
                 "setup_versions": [],

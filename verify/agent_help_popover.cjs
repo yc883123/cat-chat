@@ -49,8 +49,17 @@ function pass(label) { console.log(`PASS  ${label}`); }
         badResponses.push(`${res.status()} ${res.url()}`);
       }
     });
+    let checkedPageErrors = 0;
+    function checkNoScriptError(label) {
+      const fresh = pageErrors.slice(checkedPageErrors);
+      checkedPageErrors = pageErrors.length;
+      if (fresh.length) fail(`${label}无 JS 错误`, fresh.join(' | '));
+      else pass(`${label}无 JS 错误`);
+    }
+    await page.addInitScript(() => localStorage.setItem('naibaOnboardingDismissed', '1'));
     await page.goto(`${BASE}/index.html`, { waitUntil: 'load' });
     await page.waitForTimeout(1500);
+    checkNoScriptError('首屏');
     // 关掉「会话同步」轮询（10s 一跳，会按服务端真实状态重渲染 composer 下拉）：
     // 后面几组断言要往 state 里注入工作区/会话，注入必须活到截图那一刻——
     // 否则就是 §九.90 那个错法（拍到的不是被断言的状态）。只动这一个轮询，其余照常。
@@ -126,8 +135,75 @@ function pass(label) { console.log(`PASS  ${label}`); }
     const closed = await page.evaluate(() => document.querySelector('#agentHelpPopover')?.hidden === true);
     if (closed) pass('点外部后说明层关闭');
     else fail('点外部后说明层未关闭');
+    checkNoScriptError('Agent 说明');
 
-    // ④ 工作区路径悬停提示（注入两条同名不同目录的工作区，再调真实渲染函数）
+    // ④ 当前能力入口：桌面可见，内容只来自当前会话首轮快照；无快照时明确空态。
+    const abilityBtn = page.locator('#agentAbilityButton');
+    if (await abilityBtn.isVisible()) pass('桌面「当前能力」入口可见');
+    else fail('桌面「当前能力」入口不可见');
+    const abilityBefore = await page.evaluate(async () => {
+      const core = await import('./js/01-core.js');
+      const models = await import('./js/07-models-agents.js');
+      core.state.conversationId = 'ability-empty';
+      core.state.conversations = [{ id: 'ability-empty', agent_id: 'master' }];
+      core.state.firstTurnInfo = null;
+      models.renderAgentAbilityPopover();
+      return {
+        hidden: document.querySelector('#agentAbilityPopover')?.hidden,
+        text: document.querySelector('#agentAbilityPopover')?.textContent || '',
+      };
+    });
+    if (abilityBefore.hidden && abilityBefore.text.includes('发送首条消息后确定本会话能力')) {
+      pass('首轮前显示明确空态');
+    } else {
+      fail('首轮前空态不正确', JSON.stringify(abilityBefore));
+    }
+    await abilityBtn.click();
+    await page.waitForTimeout(150);
+    const abilityInfo = await page.evaluate(async () => {
+      const core = await import('./js/01-core.js');
+      const models = await import('./js/07-models-agents.js');
+      core.state.conversationId = 'ability-ready';
+      core.state.conversations = [{ id: 'ability-ready', agent_id: 'master' }];
+      core.state.firstTurnInfo = {
+        agent_name: '快照 Agent',
+        tools: [
+          { name: 'read_file', description: '读取文件' },
+          { name: 'dream_submit', description: '提交造梦任务' },
+          { name: 'mcp__demo__search', description: '联网搜索' },
+        ],
+        skills: [{ id: 'skill-a', name: '示例 Skill' }],
+      };
+      models.renderAgentAbilityPopover();
+      const el = document.querySelector('#agentAbilityPopover');
+      return {
+        open: !el?.hidden,
+        inBody: el?.parentElement === document.body,
+        text: el?.textContent || '',
+        expanded: document.querySelector('#agentAbilityButton')?.getAttribute('aria-expanded'),
+      };
+    });
+    if (abilityInfo.open) pass('点击后当前能力面板打开');
+    else fail('点击后当前能力面板未打开');
+    if (abilityInfo.inBody) pass('当前能力面板已挂到 body');
+    else fail('当前能力面板未挂到 body');
+    if (abilityInfo.text.includes('读取与检索') && abilityInfo.text.includes('造梦机对话')
+      && abilityInfo.text.includes('联网与外部服务') && abilityInfo.text.includes('示例 Skill')
+      && abilityInfo.text.includes('快照 Agent')) {
+      pass('当前能力内容来自首轮快照并按分类展示');
+    } else {
+      fail('当前能力内容不符合快照', JSON.stringify(abilityInfo));
+    }
+    if (abilityInfo.expanded === 'true') pass('当前能力 aria-expanded 同步');
+    else fail('当前能力 aria-expanded 未同步', String(abilityInfo.expanded));
+    await page.mouse.click(1150, 700);
+    await page.waitForTimeout(100);
+    const abilityClosed = await page.evaluate(() => document.querySelector('#agentAbilityPopover')?.hidden === true);
+    if (abilityClosed) pass('点外部后当前能力面板关闭');
+    else fail('点外部后当前能力面板未关闭');
+    checkNoScriptError('当前能力');
+
+    // ⑤ 工作区路径悬停提示（注入两条同名不同目录的工作区，再调真实渲染函数）
     const wsResult = await page.evaluate(async () => {
       const core = await import('./js/01-core.js');
       const conv = await import('./js/08-conversations.js');
@@ -214,6 +290,58 @@ function pass(label) { console.log(`PASS  ${label}`); }
     } else {
       fail('注册表补齐后形态不对', JSON.stringify(restoredResult));
     }
+
+    // ⑥ 手机入口隐藏且不占位：Agent 下拉仍可见，顶栏与页面不横向溢出。
+    await page.setViewportSize({ width: 375, height: 800 });
+    await page.waitForTimeout(200);
+    const mobile375 = await page.evaluate(() => {
+      const help = document.querySelector('#agentHelpButton');
+      const ability = document.querySelector('#agentAbilityButton');
+      const popover = document.querySelector('#agentAbilityPopover');
+      const agent = document.querySelector('#agentSelect');
+      const topbar = document.querySelector('.topbar');
+      const rect = agent?.getBoundingClientRect();
+      return {
+        helpVisible: Boolean(help && help.getClientRects().length && getComputedStyle(help).display !== 'none'),
+        abilityVisible: Boolean(ability && ability.getClientRects().length && getComputedStyle(ability).display !== 'none'),
+        popoverVisible: Boolean(popover && popover.getClientRects().length && getComputedStyle(popover).display !== 'none'),
+        agentVisible: Boolean(agent && agent.getClientRects().length && getComputedStyle(agent).display !== 'none'),
+        agentWidth: rect?.width || 0,
+        agentRight: rect?.right || 0,
+        topbarWidth: topbar?.getBoundingClientRect().width || 0,
+        viewportWidth: window.innerWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      };
+    });
+    if (!mobile375.helpVisible && !mobile375.abilityVisible && !mobile375.popoverVisible) {
+      pass('375px 手机隐藏「?」和「当前能力」入口');
+    } else {
+      fail('375px 手机仍显示隐藏入口', JSON.stringify(mobile375));
+    }
+    if (mobile375.agentVisible && mobile375.agentWidth > 0 && mobile375.agentRight <= mobile375.viewportWidth + 1) {
+      pass('375px 手机 Agent 下拉仍可见且未被挤出视口');
+    } else {
+      fail('375px 手机 Agent 下拉几何异常', JSON.stringify(mobile375));
+    }
+    if (mobile375.scrollWidth <= mobile375.viewportWidth + 1
+      && mobile375.topbarWidth <= mobile375.viewportWidth + 1) {
+      pass('375px 手机顶栏无横向溢出');
+    } else {
+      fail('375px 手机顶栏横向溢出', JSON.stringify(mobile375));
+    }
+    await page.setViewportSize({ width: 320, height: 800 });
+    await page.waitForTimeout(120);
+    const mobile320 = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+      agentVisible: Boolean(document.querySelector('#agentSelect')?.getClientRects().length),
+    }));
+    if (mobile320.agentVisible && mobile320.scrollWidth <= mobile320.viewportWidth + 1) {
+      pass('320px 手机 Agent 下拉仍可用且无横向溢出');
+    } else {
+      fail('320px 手机布局异常', JSON.stringify(mobile320));
+    }
+    checkNoScriptError('手机布局');
 
     if (pageErrors.length) fail('页面无 JS 错误', pageErrors.join(' | '));
     else pass('页面无 JS 错误');

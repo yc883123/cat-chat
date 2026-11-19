@@ -1489,6 +1489,27 @@ class NaibaChatApp:
             updated = archived_result if updated is None else {**updated, **archived_result}
         return updated or {"error": "对话不存在"}, HTTPStatus.OK if updated else HTTPStatus.NOT_FOUND
 
+    def api_delete_conversation(self, conversation_id: str) -> tuple[dict[str, Any], int]:
+        """删除一个会话，并在服务端事务内保护主会话的活动任务。"""
+        conversation_id = str(conversation_id or "").strip()
+        if not conversation_id:
+            return {"error": "conversation_id 不能为空"}, HTTPStatus.BAD_REQUEST
+        try:
+            deleted = self.storage.delete_conversation(conversation_id)
+        except RuntimeError as exc:
+            if str(exc) == "CONVERSATION_BUSY":
+                return {
+                    "error": "还有任务在运行，请先停止",
+                    "code": "busy",
+                }, HTTPStatus.CONFLICT
+            raise
+        if not deleted:
+            # 删除接口幂等：迟到的前端请求不应把已经消失的会话显示成失败。
+            getattr(self, "_confirmed_folders", {}).pop(conversation_id, None)
+            return {"ok": False, "missing": True}, HTTPStatus.OK
+        getattr(self, "_confirmed_folders", {}).pop(conversation_id, None)
+        return {"ok": True}, HTTPStatus.OK
+
     def api_reorder_conversations(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """手动排序落库：按前端给定的全量顺序写 1..N。
 
@@ -1536,6 +1557,7 @@ class NaibaChatApp:
             for conversation_id in ids:
                 code = self.storage.delete_conversation_if_idle(conversation_id)
                 if code in ("deleted", "missing"):
+                    getattr(self, "_confirmed_folders", {}).pop(conversation_id, None)
                     succeeded.append(conversation_id)
                 elif code == "busy":
                     failed.append({
@@ -3084,6 +3106,10 @@ class NaibaChatApp:
 
     def _referenced_cache_keys(self, scopes: Iterable[str]) -> set[str]:
         """批量判定：一次扫表拿到被引用的缓存路径键集合（外加当前聊天背景图）。"""
+        try:
+            self.storage.prune_orphan_message_traces()
+        except Exception:  # noqa: BLE001 - 回收失败不得阻断普通缓存统计
+            logger.exception("回收孤儿 message trace 失败，按保守策略继续扫描")
         roots = [cache_scope_dir(self._paths.data_dir, item) for item in scopes]
         keys = self.storage.referenced_cache_paths(roots)
         studio = getattr(self, "studio", None)

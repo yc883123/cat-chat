@@ -14,7 +14,7 @@ from typing import Any
 
 from naiba.core.contracts import (
     WRITER_CHAPTER_BASELINE_KEY, WORK_GLOBAL_SYSTEM_PROMPT_KEY,
-    WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
+    WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, WRITER_OUTPUT_MODE_KEY,
 )
 from naiba.core.shell_open import open_folder
 from naiba.writer import coherence
@@ -137,6 +137,21 @@ class WriterService:
             book = self.store.save_system_prompt(
                 book_id, text=body.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY),
                 expected_revision=body.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY),
+            )
+            return {"book": book}, 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_save_output_mode(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            book = self.store.save_output_mode(
+                book_id, mode=body.get("output_mode"), expected_revision=body.get("revision"),
             )
             return {"book": book}, 200
         except LookupError as exc:
@@ -291,6 +306,7 @@ class WriterService:
             if not book_id:
                 return {"error": "缺少 book_id"}, 400
             book = self.store.get_book(book_id)
+            output_mode = str(book["book"].get("output_mode") or "json")
             setup_version_id = str(body.get("setup_version_id") or "").strip() \
                 or str(book["book"].get("current_setup_version_id") or "")
             setup = self.store.load_setup(book_id, version_id=setup_version_id)
@@ -316,6 +332,7 @@ class WriterService:
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
                     extra_note=str(body.get("extra_note") or ""), previous_chapter=previous,
                     chapter_states=self.store.chapter_context_states(book_id, chapter_no),
+                    output_mode_value=output_mode,
                 )
                 preview_step = "segs" if kind in ("chapter_segs", "segs") else "draft"
                 system = prompts.step_system(preview_step, book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
@@ -325,6 +342,7 @@ class WriterService:
                 )
                 return {
                     "kind": kind, "chapter_no": chapter_no,
+                    "output_mode": output_mode,
                     "chapter": chapter_view,
                     "content": built["content"], "slots": built["slots"],
                     "budget": budget,
@@ -341,6 +359,7 @@ class WriterService:
                     "want_count": max(1, self._int_or(body.get("want_count"), prompts.SPLIT_STEP_CHAPTERS)),
                     WORK_GLOBAL_SYSTEM_PROMPT_KEY: book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""),
                     WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, 0),
+                    WRITER_OUTPUT_MODE_KEY: output_mode,
                 })
                 prepared = self.pipeline.prepare_step_input(book_id, {
                     "kind": kind, "steps": [first_step], "step_index": 0,
@@ -359,6 +378,7 @@ class WriterService:
                 side_count=self._int_or(body.get("side_count"), 0),
                 chapter_count=self._int_or(body.get("chapter_count"), 10),
                 extra_note=str(body.get("extra_note") or ""),
+                output_mode_value=output_mode,
             )
             system = prompts.step_system(step, book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
             budget = prompts.budget_report(

@@ -36,6 +36,7 @@ from naiba.core.contracts import (
     WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
     WRITER_COMPLETED_GENERATIONS_KEY,
     WRITER_RESULT_RESUME_KEY,
+    WRITER_OUTPUT_MODE_KEY,
 )
 from naiba.writer import prompts
 from naiba.writer.store import (
@@ -152,6 +153,7 @@ class WriterPipelineManager:
                        part_no: int = 0, part_title: str = "", target_chars: int = 0,
                        want_count: int = 0, from_no: int = 0,
                        part_plan: Any = None,
+                       output_mode: str = "json",
                        base_revision: Any = None, chapter_revision: Any = None) -> dict[str, Any]:
         """创建并启动一条流水线：快照固化全部输入，重试不因页面当前选择变化而换料。"""
         if kind not in PIPELINE_KINDS:
@@ -308,6 +310,8 @@ class WriterPipelineManager:
                 # 每步落一批章、带上已拆前文衔接，失败也只停在本批。
                 steps = tuple(["split"] * max(1, -(-want_count // prompts.SPLIT_STEP_CHAPTERS)))
             book_title = str(manifest.get("title") or "未命名作品")
+            output_mode = str(manifest.get(WRITER_OUTPUT_MODE_KEY) or "json")
+            output_mode = output_mode if output_mode in ("json", "freeform") else "json"
             snapshot = {
                 "kind": kind,
                 "steps": list(steps),
@@ -334,6 +338,7 @@ class WriterPipelineManager:
                 "book_title": book_title,
                 WORK_GLOBAL_SYSTEM_PROMPT_KEY: str(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY) or ""),
                 WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0),
+                WRITER_OUTPUT_MODE_KEY: output_mode,
             }
             if isinstance(manifest.get("continuation"), dict) and isinstance(setup, dict):
                 # 旧设定或空设定的摘要可能来自清单补值，版本号不能冻结这部分内容。
@@ -885,7 +890,7 @@ class WriterPipelineManager:
                 "blurb_candidates": setup.get("blurb_candidates"),
                 "worldview": setup.get("worldview"), "characters": setup.get("characters"),
                 "style": setup.get("style"), "constraints": setup.get("constraints"),
-            }
+                "freeform_outputs": list(setup.get("freeform_outputs") or []),            }
         if "continuation_summary" in setup:
             merged["continuation_summary"] = copy.deepcopy(setup["continuation_summary"])
         return merged
@@ -911,35 +916,45 @@ class WriterPipelineManager:
 
     def _parse_step_output_inner(self, step: str, result: str, snapshot: dict[str, Any],
                                  *, finish_reason: str = "", step_index: int = 0) -> Any:
+        output_mode = str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json")
         if step == "genre":
-            return prompts.parse_genre(result)
+            return prompts.parse_freeform(result) if output_mode == "freeform" else prompts.parse_genre(result)
         if step == "title":
-            return prompts.parse_title_candidates(result)
+            return prompts.parse_freeform(result) if output_mode == "freeform" else prompts.parse_title_candidates(result)
         if step == "blurb":
-            return prompts.parse_blurb_candidates(result)
+            return prompts.parse_freeform(result) if output_mode == "freeform" else prompts.parse_blurb_candidates(result)
         if step == "world":
             return prompts.parse_world(result)
         if step == "chars":
+            if output_mode == "freeform":
+                return prompts.parse_freeform(result)
             snapshot_side = int(snapshot.get("side_count") or 0)
             return prompts.parse_characters(
                 result,
                 wanted=int(snapshot.get("char_count") or 4) + max(0, snapshot_side),
             )
+        if step == "outline_text" or step == "outline_review":
+            # 纯文本大纲本来就是自由内容，结构化模式也保留原文。
+            return prompts.parse_outline_text(result)
         if step == "outline":
+            if output_mode == "freeform":
+                return prompts.parse_freeform(result)
             return prompts.parse_outline(result, wanted=int(snapshot.get("chapter_count") or 10))
-        if step == "outline_text":
-            return prompts.parse_outline_text(result)
-        if step == "outline_review":
-            return prompts.parse_outline_text(result)
         if step == "split":
             # 每步只拆自己那一批：from_no/want_count 按步切，不是快照里的总任务。
             from_no, want_count = self._split_slice(snapshot, step_index)
+            if output_mode == "freeform":
+                return prompts.parse_freeform(result)
             return prompts.parse_split(result, from_no=from_no, want_count=want_count)
         if step == "segs":
+            if output_mode == "freeform":
+                return prompts.parse_freeform(result)
             return prompts.parse_segs(result)
         if step == "draft":
             return prompts.parse_draft(result, finish_reason=finish_reason)
         if step == "state":
+            if output_mode == "freeform":
+                return prompts.parse_freeform(result)
             return prompts.parse_chapter_state(result)
         raise WriterPipelineError(f"未知步骤：{step}")
 
@@ -997,12 +1012,18 @@ class WriterPipelineManager:
                     self._apply_setup_or_outline_step(book_id, record, step, output, logical_id)
                 elif step == "segs":
                     outputs = dict(record.get("step_outputs") or {})
-                    outputs["segs"] = [str(p) for p in output]
+                    if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform":
+                        outputs["segs"] = [str(output)]
+                    else:
+                        outputs["segs"] = [str(p) for p in output]
                     record["step_outputs"] = outputs
                 elif step == "draft":
                     self._apply_draft_step(book_id, record, output, logical_id)
             if step == "state":
-                self._apply_state_step(book_id, record, output, state_error, logical_id)
+                if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform" and output is not None:
+                    self._save_freeform_output(book_id, record, step, str(output), logical_id)
+                else:
+                    self._apply_state_step(book_id, record, output, state_error, logical_id)
             # ---- 记录完成并前进 ----
             record["completed_task_ids"] = completed
             generations = list(record.get(WRITER_COMPLETED_GENERATIONS_KEY) or [])
@@ -1088,11 +1109,17 @@ class WriterPipelineManager:
             )
             return
         if step == "split":
+            if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform":
+                self._save_freeform_output(book_id, record, step, str(output), task_id)
+                return
             self.store.append_chapters(
                 book_id, output, part_no=int(snapshot.get("part_no") or 0),
             )
             return
         merged = self._accumulated_setup(book_id, record)
+        if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform":
+            self._save_freeform_output(book_id, record, step, str(output), task_id)
+            return
         if step == "genre":
             genre = dict(merged.get("genre") if isinstance(merged.get("genre"), dict) else {})
             merged["genre"] = {
@@ -1158,6 +1185,16 @@ class WriterPipelineManager:
             source_outline_version_id=str(source.get("outline") or ""),
             expected_revision=record.get("chapter_revision"),
         )
+
+    def _save_freeform_output(self, book_id: str, record: dict[str, Any],
+                              step: str, text: str, task_id: str) -> None:
+        snapshot = record.get("request_snapshot") if isinstance(record.get("request_snapshot"), dict) else {}
+        setup = self._accumulated_setup(book_id, record)
+        rows = list(setup.get("freeform_outputs") or [])
+        rows.append({"step": step, "label": prompts.STEP_LABELS.get(step, step),
+                     "text": text, "task_id": task_id, "updated_at": int(time.time() * 1000)})
+        setup["freeform_outputs"] = rows[-30:]
+        self.store.save_setup(book_id, content=setup, kind="generated", task_id=task_id)
 
     def _apply_state_step(self, book_id: str, record: dict[str, Any], output: Any,
                           state_error: str, task_id: str) -> None:
@@ -1270,6 +1307,7 @@ class WriterPipelineManager:
         book_title = str(snapshot.get("book_title") or "未命名作品")
         extra_note = str(snapshot.get("extra_note") or "")
         chapter_no = int(snapshot.get("chapter_no") or 0)
+        output_mode = str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json")
         system_text = prompts.step_system(step, snapshot.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
         chunked: dict[str, Any] | None = None
         if step == "outline_text":
@@ -1298,6 +1336,7 @@ class WriterPipelineManager:
                 target_chars=int(snapshot.get("target_chars") or 8000),
                 extra_note=extra_note,
                 prev_parts=prev_parts,
+                output_mode_value=output_mode,
             )
             task_title = f"《{book_title}》· 第 {part_no} 部大纲"
         elif step == "outline_review":
@@ -1326,6 +1365,7 @@ class WriterPipelineManager:
                 next_parts=[{"no": int(r.get("no") or 0), "title": str(r.get("title") or ""),
                              "text": str(r.get("text") or "")} for r in next_parts],
                 extra_note=extra_note,
+                output_mode_value=output_mode,
             )
             task_title = f"《{book_title}》· 多部复核梳理（第 {part_no} 部）"
         elif step == "split":
@@ -1367,6 +1407,7 @@ class WriterPipelineManager:
                 part_label=f"第 {part_no} 部" if part_no else "",
                 extra_note=extra_note,
                 prev_chapters=prev_chapters,
+                output_mode_value=output_mode,
             )
             batch_note = f"· 第 {step_index + 1}/{len(steps)} 批" if len(steps) > 1 else ""
             task_title = f"《{book_title}》· 拆章{batch_note}（第 {from_no} 章起 {want_count} 章）"
@@ -1378,6 +1419,7 @@ class WriterPipelineManager:
                 side_count=int(snapshot.get("side_count") or 0),
                 chapter_count=int(snapshot.get("chapter_count") or 10),
                 extra_note=extra_note if step == "genre" else "",
+                output_mode_value=output_mode,
             )
             task_title = f"《{book_title}》· {prompts.STEP_LABELS[step]}"
         elif step == "state":
@@ -1399,7 +1441,8 @@ class WriterPipelineManager:
                      for row in (state_setup.get("characters") or [])
                      if isinstance(row, dict) and str(row.get("name") or "").strip()]
             content = prompts.build_state_user(
-                chapter_no=chapter_no, content=state_content, names=names)
+                chapter_no=chapter_no, content=state_content, names=names,
+                output_mode_value=output_mode)
             task_title = f"《{book_title}》· 第{chapter_no}章章末状态"
         else:
             chapter = snapshot.get(WRITER_CHAPTER_BASELINE_KEY)
@@ -1447,7 +1490,7 @@ class WriterPipelineManager:
                 prefix_build = prompts.build_draft_context(
                     setup, chapter_view, mode="segment", seg_points=[],
                     extra_note=extra_note, previous_chapter=previous,
-                    chapter_states=chapter_states,
+                    chapter_states=chapter_states, output_mode_value=output_mode,
                 )
                 # 前缀只含公共上下文（无要点段）；每块的要点单独拼。
                 prefix_lines = prefix_build["content"].split("\n\n")
@@ -1473,7 +1516,7 @@ class WriterPipelineManager:
                 built = prompts.build_draft_context(
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
                     extra_note=extra_note, previous_chapter=previous,
-                    chapter_states=chapter_states,
+                    chapter_states=chapter_states, output_mode_value=output_mode,
                 )
                 content = built["content"]
                 label = prompts.STEP_LABELS["draft"]

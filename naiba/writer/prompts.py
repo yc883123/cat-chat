@@ -73,7 +73,7 @@ ENDING_LABELS = {"suspense": "留悬念", "natural": "自然收", "hook": "留�
 # ---- 写作风格约束（整理自启元 NV.stylePrompt，逐字保留） ----
 
 STYLE_PRESETS = {
-    "web": ("网文爽文（默认）", ""),
+    "web": ("自由写作", ""),
     "jinyong": ("历史正剧 · 金庸式",
                 "【历史正剧 · 金庸式（最高优先约束，与其它要求冲突时以本条为准）】"
                 "1. 史实为骨、虚构为肉，重大历史事件与结局不可更改；"
@@ -349,90 +349,59 @@ def idea_text(setup: dict[str, Any], *, limit: int = IDEA_SLOT_CHARS) -> str:
     return text
 
 
-# ---- 系统提示词（整理自启元 NV.SYS，逐字保留写法） ----
+# ---- 系统提示词：只保留任务协议，不规定默认文风 ----
+
+OUTPUT_MODE_LABELS = {"json": "结构化字段（JSON）", "freeform": "自由文本"}
+JSON_STEPS = frozenset({"genre", "title", "blurb", "chars", "outline", "split", "segs", "state"})
+
+
+def output_mode(value: str) -> str:
+    return "freeform" if str(value or "").strip().lower() == "freeform" else "json"
+
 
 STEP_SYSTEM = {
     "genre": (
-        "你是网文题材分析师。根据创作提示词，判定这部小说的题材画像，输出 JSON：\n"
-        '{"channel":"male"或"female","cat":"大类（如 玄幻/都市/历史/权谋/军事）",'
-        '"subCat":"子流派","tone":"基调（如 冷峻写实/热血爽文/慢热权谋）",'
-        '"hook":"核心卖点一句话","tags":["关键词1","关键词2","关键词3"]}\n'
+        "根据创作提示词整理题材画像，输出 JSON：\n"
+        '{"channel":"male"或"female","cat":"大类","subCat":"子流派",'
+        '"tone":"基调","hook":"核心卖点一句话","tags":["关键词"]}\n'
         "只输出 JSON，不要解释。"
     ),
     "title": (
-        "你是网文书名策划师。基于创作提示词，输出 JSON 数组：[\"书名1\",\"书名2\",...]\n"
-        "共 5—10 个候选，两种风格混合：短名立意（2—4字，如《赤心巡天》式）与"
-        "卖点前置（带核心梗，如《重生：高三大器晚成》式）。"
+        "根据创作提示词整理书名候选，输出 JSON 数组：[\"书名1\",\"书名2\",...]。"
     ),
     "blurb": (
-        "你是网文简介写手。基于创作提示词，写 3 版作品简介，每版 150—200 字，"
-        "用「处境—目标—悬念」三句式，突出世界观骨架、升级路线与差异化设定，"
-        "不剧透后期设定。输出 JSON 数组：[\"简介1\",\"简介2\",\"简介3\"]"
+        "根据创作提示词写作品简介，输出 JSON 数组：[\"简介1\",\"简介2\",...]。"
     ),
     "world": (
-        "你是网文世界观架构师。基于创作提示词，输出一部小说的世界观设定（Markdown，600—1200字）：\n"
-        "一、世界骨架（天地/技术结构、时代风貌）；二、力量体系四件套（等级阶梯6阶以内、"
-        "资源产出消耗、瓶颈关卡、不可豁免的代价）；三、势力与格局（至少两组可持续冲突源）；"
-        "四、主线抓手（主角目标与阻碍）。\n直接输出设定正文。"
+        "根据创作提示词与现有设定写世界观设定（Markdown 或自然文本）。\n"
+        "只输出设定正文，不解释。"
     ),
     "chars": (
-        "你是网文角色设计师。基于创作提示词与世界观，输出 JSON 数组：\n"
-        '[{"name":"姓名","role":"主角/配角/反派","identity":"身份一句话",'
-        '"goal":"核心诉求一句话","traits":"性格标签","speech":"说话习惯",'
-        '"arc":"人物弧光一句话","background":"背景与秘密",'
-        '"relations":"与其他角色的关系（写清与谁、什么关系，如：张三：同门师兄，互相提防）"}]\n'
-        "按用户消息要求的主角与配角数量给足，一个都不能少；配角也要有独立的动机与"
-        "生活，不做工具人。角色之间要有利益冲突或情感张力，反派动机必须合理；"
-        "relations 必须写出角色两两之间的具体关系，不许留空。所有值纯中文。"
+        "根据创作提示词与世界观整理角色，输出 JSON 数组；每项包含 name、role、identity、goal、traits、speech、arc、background、relations。\n"
+        "按用户要求给足数量，角色必须有独立动机和关系。"
     ),
     "outline": (
-        "你是网文大纲策划师。基于创作提示词与世界观，输出 JSON 对象：\n"
-        '{"chapters":[{"no":1,"title":"第一章 标题","beat":"本章爽点/兑付点","hook":"章末钩子"}]}\n'
-        "title 必须以「第X章」开头；爽点密度每章至少一个；"
-        "章末钩子八式轮换（悬念/期待/危机/反转/情感/代价/信息/挑衅），同式不得连续使用。"
+        "根据创作提示词与世界观整理章节大纲，输出 JSON 对象："
+        '{"chapters":[{"no":1,"title":"标题","beat":"本章内容","hook":"结尾安排"}]}。'
     ),
     "outline_text": (
-        "你是网文大纲策划师。按创作提示词、世界观与角色，写这一「部」的整篇大纲（不要分章、不要 JSON）：\n"
-        "用「主线 / 本部目标 / 阶段推进（一、二、三…）/ 关键转折 / 结尾落点」组织，允许长句叙事；\n"
-        "目标是让人读完就知道故事怎么走，不写逐章条目，也不要写正文对白。\n"
-        "直接输出大纲正文。"
+        "根据创作提示词、世界观与角色，写这一部的整篇大纲（不要分章、不要 JSON）：\n"
+        "用主线、本部目标、阶段推进、关键转折、结尾落点组织，直接输出大纲正文。"
     ),
     "outline_review": (
-        "你是网文大纲主编。给你一部小说的分部大纲：一部是本部（要由你修订的），其余各部是上下文。\n"
-        "任务：把本部放到整本书里复核梳理——只修本部，不动其他部：\n"
-        "1. 衔接：本部开头必须接住前一部结尾留下的线，本部结尾要给后一部留出接续空间；\n"
-        "2. 矛盾：时间线、人物状态、力量/资源水平与前后部冲突的地方，以整体故事为准改本部；\n"
-        "3. 重复：前后部已经写过的桥段、反转、爽点，本部不再复用；\n"
-        "4. 保留：本部原有的结构、主线走向和关键转折尽量不动，只做必要修改。\n"
-        "输出要求与「全篇大纲」相同：用「主线 / 本部目标 / 阶段推进 / 关键转折 / 结尾落点」组织，"
-        "不要分章、不要 JSON、不要输出复核说明，直接输出修订后的本部大纲正文。"
+        "对照整本书上下文修订当前部的大纲，只输出修订后的大纲正文，不要 JSON、不要复核说明。"
     ),
     "split": (
-        "你是网文章节拆分师。把给定的大纲正文拆成章节目录，输出 JSON 对象：\n"
-        '{"chapters":[{"no":1,"title":"第1章 标题","beat":"本章发生什么（80—150字）","hook":"章末钩子"}]}\n'
-        "严格按大纲顺序推进，不跳过、不重复、不编造大纲之外的重大情节；章标题不超过 20 字。"
+        "把给定的大纲正文拆成章节目录，按顺序输出 JSON 对象，字段为 no、title、beat、hook。"
     ),
     "segs": (
-        "你是网文章节策划。把一章的梗概拆成 2—4 个段落要点，输出 JSON 数组："
-        "[\"段落1要点\",\"段落2要点\",...]\n"
-        "每个要点一句话，按「开局钩子→推进→加压→兑付」顺序排列，覆盖全章梗概。"
+        "把一章梗概拆成 2—4 个段落要点，输出 JSON 数组；每个要点一句话。"
     ),
     "draft": (
-        "你是网文作家。基于给定设定与段落要点写一段正文（1200—1800字）：\n"
-        "直接输出正文，不要解释写作思路；对白像真人说话，带潜台词；前三章新设定名词不超过3个。\n"
-        "【节奏】开局即钩子，段内完成一次小兑付；结尾停在情节推进处，留给下一段续接。\n"
-        "题材与尺度尊重创作提示词的约定，不做自我审查。"
+        "基于给定设定与段落要点直接输出正文，不解释写作思路，遵守作品系统提示词的文风。"
     ),
     "state": (
-        "你是网文连续性记录员。通读给定章节正文，输出本章结束时的事实状态 JSON：\n"
-        '{"characters":[{"name":"姓名","presence":"出场/被提及/缺席","location":"本章结束时在哪里",'
-        '"condition":"身体/身份状态"}],'
-        '"relations":[{"between":["甲","乙"],"change":"本章里关系如何变化（没有变化的关系不写）"}],'
-        '"knowledge":[{"name":"姓名","known":["本章新得知的事"],"unknown":["本章结束时仍不知道的事"]}],'
-        '"events":["本章关键事件与结果"],"open_threads":["本章留下、尚未解决的线索"],'
-        '"next_hooks":["下一章需要接续的事项"]}\n'
-        "只记录正文明确写出的事实；没有写明的不要推断；数组可以为空，但结构与键名必须齐全。\n"
-        "只输出 JSON，不要解释。"
+        "通读给定章节正文，提取本章结束时的事实状态并输出 JSON。字段为 characters、relations、knowledge、events、open_threads、next_hooks；只记录正文明确写出的事实。"
     ),
 }
 
@@ -440,15 +409,27 @@ STEP_SYSTEM = {
 def step_system(step: str, global_system_prompt: str = "") -> str:
     if step not in STEP_SYSTEM:
         raise PromptError(f"未知步骤：{step}")
-    global_text = str(global_system_prompt or "")
-    return "\n\n".join(part for part in (global_text, STEP_SYSTEM[step]) if part.strip())
+    # 作品系统提示词是唯一的 system 级写作规则；阶段协议进入 user 输入，避免
+    # 内置写法与用户作品方向争抢同一优先级。
+    return str(global_system_prompt or "")
+
+
+def stage_protocol(step: str, mode: str = "json") -> str:
+    current = output_mode(mode)
+    if current == "freeform":
+        return (f"【本阶段内置要求｜只读】\n当前阶段：{STEP_LABELS.get(step, step)}。\n"
+                "请直接输出自然文本，不要输出 JSON；结果会保存为原文，题材、简介、分类、角色、章节等结构化字段不会自动填入。\n"
+                "写作方向、题材和文风以作品系统提示词为准。")
+    return (f"【本阶段内置要求｜只读】\n当前阶段：{STEP_LABELS.get(step, step)}。\n"
+            "请严格按本阶段要求输出 JSON；程序会校验字段、类型、数量和必要结构。\n"
+            "JSON 只是内部交接格式，写作方向、题材和文风以作品系统提示词为准。")
 
 
 # ---- 设定各步的用户提示词（预检与正式提交共用） ----
 
 def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
                     side_count: int = 0, chapter_count: int = 10,
-                    extra_note: str = "") -> str:
+                    extra_note: str = "", output_mode_value: str = "json") -> str:
     """设定各步的用户消息。`setup` 是选定设定版本的内容。
 
     `char_count` / `side_count` 只在角色步生效：主角与配角数量都要给足
@@ -460,7 +441,7 @@ def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
         raise PromptError(f"未知设定步骤：{step}")
     idea = idea_text(setup)
     style_block = _constraints_block(setup)
-    parts = [f"【创作提示词】\n{idea}"]
+    parts = [stage_protocol(step, output_mode_value), f"【创作提示词】\n{idea}"]
     if step in ("world", "chars", "outline"):
         if str(setup.get("worldview") or "").strip():
             parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=1200)}")
@@ -481,7 +462,9 @@ def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
         parts.append(f"【补充要求】\n{extra_note.strip()[:500]}")
     if style_block:
         parts.append(style_block.rstrip())
-    if step == "genre":
+    if output_mode(output_mode_value) == "freeform":
+        parts.append("请自由输出本阶段内容；不要尝试替我填写结构化字段。")
+    elif step == "genre":
         parts.append("请输出题材画像（JSON）。")
     elif step == "title":
         parts.append("请输出书名候选（JSON 数组）。")
@@ -507,13 +490,15 @@ def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
 def build_outline_text_user(setup: dict[str, Any], *, part_no: int = 1,
                             part_title: str = "", target_chars: int = 8000,
                             extra_note: str = "",
-                            prev_parts: list[dict[str, Any]] | None = None) -> str:
+                            prev_parts: list[dict[str, Any]] | None = None,
+                            output_mode_value: str = "json") -> str:
     """整篇大纲的用户消息：**不要 JSON**，只要一段能读的大纲文字（按部）。
 
     `prev_parts` 是已生成好的前几部大纲（一次生成全部时保证七部互相衔接，
     不会各写各的）——每部只带开头一段，防止撑爆窗口。
     """
-    parts = [f"【创作提示词】\n{idea_text(setup)}"]
+    parts = [stage_protocol("outline_text", output_mode_value),
+             f"【创作提示词】\n{idea_text(setup)}"]
     if str(setup.get("worldview") or "").strip():
         parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=1200)}")
     chars_text = _characters_text(setup, limit=800, count=CHARS_SLOT_COUNT)
@@ -552,13 +537,14 @@ def build_outline_text_user(setup: dict[str, Any], *, part_no: int = 1,
 def build_outline_review_user(setup: dict[str, Any], *, part_no: int, part_title: str,
                               part_text: str, prev_parts: list[dict[str, Any]] | None = None,
                               next_parts: list[dict[str, Any]] | None = None,
-                              extra_note: str = "") -> str:
+                              extra_note: str = "", output_mode_value: str = "json") -> str:
     """多部复核梳理的用户消息：本部全文 + 其余各部节选，让模型对照全书修订本部。
 
     与 build_outline_text_user 的区别：本部的大纲文字是**输入**而不是让模型现写；
     前后各部都要带（复核要往后看，只带前几部会漏掉「后面的部已经用过这个反转」）。
     """
-    parts = [f"【创作提示词】\n{idea_text(setup)}"]
+    parts = [stage_protocol("outline_review", output_mode_value),
+             f"【创作提示词】\n{idea_text(setup)}"]
     if str(setup.get("worldview") or "").strip():
         parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=1200)}")
     chars_text = _characters_text(setup, limit=800, count=CHARS_SLOT_COUNT)
@@ -616,7 +602,8 @@ def parse_outline_text(text: str, *, limit: int = PART_TEXT_MAX) -> str:
 def build_split_user(setup: dict[str, Any], *, part_text: str, want_count: int,
                      from_no: int = 1, part_label: str = "",
                      extra_note: str = "",
-                     prev_chapters: list[dict[str, Any]] | None = None) -> str:
+                     prev_chapters: list[dict[str, Any]] | None = None,
+                     output_mode_value: str = "json") -> str:
     """拆章的用户消息：给定这一部的大纲正文，按顺序拆出 want_count 章。
 
     `prev_chapters` 是已拆好的章节（接续拆分时必有）：不带这个，第 31 章起
@@ -641,10 +628,14 @@ def build_split_user(setup: dict[str, Any], *, part_text: str, want_count: int,
             prev_text = "……\n" + prev_text[-SPLIT_PREV_MAX_CHARS:]
         parts.append(f"【已拆好的前文】（新章必须从这里继续：接住上一章的钩子，不重讲、不跳跃）\n{prev_text}")
     parts.append(f"【本次任务】从第 {int(from_no)} 章开始，拆 {int(want_count)} 章")
+    parts.append(stage_protocol("split", output_mode_value))
     if extra_note.strip():
         parts.append(f"【补充要求】\n{extra_note.strip()[:300]}")
-    parts.append('请输出 JSON：{"chapters":[{"no":%d,"title":"第%d章 …","beat":"…","hook":"…"}]}'
-                 % (int(from_no), int(from_no)))
+    if output_mode(output_mode_value) == "freeform":
+        parts.append("请直接自由写出本批章节安排，不要 JSON；这些文字不会自动生成章节目录。")
+    else:
+        parts.append('请输出 JSON：{"chapters":[{"no":%d,"title":"第%d章 …","beat":"…","hook":"…"}]}'
+                     % (int(from_no), int(from_no)))
     return "\n\n".join(parts)
 
 
@@ -699,11 +690,12 @@ def state_content_excerpt(content: str) -> str:
 
 
 def build_state_user(*, chapter_no: int, content: str, names: list[str] | None = None,
-                     part_note: str = "") -> str:
+                     part_note: str = "", output_mode_value: str = "json") -> str:
     """章末状态提取的用户消息：本章全文（超长截取）+ 角色名单（帮助统一人名）。"""
     body = state_content_excerpt(content)
     parts = [f"【章节】第 {int(chapter_no or 0)} 章"
              + (f"（{part_note}）" if part_note else ""), f"【正文】\n{body}"]
+    parts.insert(0, stage_protocol("state", output_mode_value))
     clean_names = [str(n or "").strip() for n in (names or []) if str(n or "").strip()]
     if clean_names:
         parts.append("【本作角色名单】（人名以这份名单为准；正文里新出现的人物如实记录）\n"
@@ -797,7 +789,8 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
                         seg_index: int = 0, prev_tail: str = "",
                         draft_tail: str = "", extra_note: str = "",
                         previous_chapter: dict[str, Any] | None = None,
-                        chapter_states: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                        chapter_states: list[dict[str, Any]] | None = None,
+                        output_mode_value: str = "json") -> dict[str, Any]:
     """组装正文用户消息与槽位清单（预检与正式提交、右栏来源展示共用）。
 
     `mode`：whole 整章 / segment 分段 / continue 续写。
@@ -832,7 +825,7 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
         if not chars_text:
             chars_text = "（角色未定）"
 
-    parts: list[str] = [f"【创作提示词】\n{idea_text(setup)}"]
+    parts: list[str] = [stage_protocol("draft", output_mode_value), f"【创作提示词】\n{idea_text(setup)}"]
     slots.append({"key": "idea", "label": "创作提示词", "included": True,
                   "chars": len(parts[0])})
     summary = setup.get("continuation_summary")
@@ -998,6 +991,15 @@ def extract_json_payload(text: str) -> Any:
         raise PromptError(
             "模型输出不是合法 JSON（只接受纯 JSON 或单个代码围栏）；可重试或换模型"
         ) from exc
+
+
+def parse_freeform(text: str, *, limit: int = PART_TEXT_MAX) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        raise PromptError("模型没有返回内容")
+    if len(raw) > limit:
+        raise PromptError(f"自由文本超过 {limit} 字符上限")
+    return raw
 
 
 def parse_genre(text: str) -> dict[str, Any]:

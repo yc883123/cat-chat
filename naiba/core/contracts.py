@@ -78,6 +78,7 @@ FRONTEND_PROVIDERS_CHANGED_HOOK = "onProvidersChanged"
 STUDIO_SYSTEM_PROMPT_KEY = "system_prompt"
 WORK_GLOBAL_SYSTEM_PROMPT_KEY = "global_system_prompt"
 WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY = "global_system_prompt_revision"
+WRITER_OUTPUT_MODE_KEY = "output_mode"
 STORYBOARD_PROMPT_CONFIG_KEY = "storyboard_prompt_config"
 # Storyboard requests select one saved script version; omitted/null/empty means
 # current. Resolved version and scene text are frozen in the Studio input, with

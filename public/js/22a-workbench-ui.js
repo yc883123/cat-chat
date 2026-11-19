@@ -168,6 +168,9 @@ export function syncWorkbenchHeader(page) {
   const monitor = document.getElementById("workbenchResourceMonitor");
   if (monitor && monitor.parentElement !== target) target.append(monitor);
   const meter = document.getElementById("comfyuiStepMeter");
-  if (meter && meter.parentElement !== target) target.append(meter);
+  // 进度胶囊跟状态栏同一格：进 actions 参与 flex 排布，桌面和手机都落在标题行右侧。
+  // 仍是移动唯一节点，ID 与事件归属不变。
+  const meterHost = target.querySelector(".wb-header-actions") || target;
+  if (meter && meter.parentElement !== meterHost) meterHost.append(meter);
   home.hidden = target !== home;
 }

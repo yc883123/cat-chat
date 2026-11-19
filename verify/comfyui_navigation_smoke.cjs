@@ -328,12 +328,22 @@ async function checkViewport(browser, vp) {
     assert.ok(batchDetailRequests > closedCount, '重开工作台必须恢复当前批次');
     await page.evaluate(async () => (await import('/js/22-studio.js')).setStudioPage('library'));
     await page.waitForTimeout(100);
+    const meterHidden = () => page.locator('#comfyuiStepMeter').evaluate(node => node.hidden === true);
+    assert.equal(await meterHidden(), true, '切到提词库必须收起造梦机进度');
+    for (const pageName of ['labeler', 'novel', 'writer']) {
+      await page.evaluate(async name => (await import('/js/22-studio.js')).setStudioPage(name), pageName);
+      await page.waitForTimeout(80);
+      assert.equal(await meterHidden(), true, `切到 ${pageName} 不允许带着造梦机进度`);
+    }
     const otherPageCount = batchDetailRequests;
     await page.waitForTimeout(2400);
     assert.equal(batchDetailRequests, otherPageCount, '切换其他工作台页必须停止批次请求');
     await page.evaluate(async () => (await import('/js/22-studio.js')).setStudioPage('comfyui'));
     await page.waitForTimeout(100);
     assert.ok(batchDetailRequests > otherPageCount, '返回造梦机必须恢复批次轮询');
+    // 回页时按缓存重算：这个夹具没有活跃 step，进度条必须继续隐藏，
+    // 不能把切走之前那次可见状态直接搬回来。
+    assert.equal(await meterHidden(), true, '回到造梦机无活跃进度时不能复活旧进度');
     await checkNoScriptError();
     await paneButton('run').click();
     const beforeReturnRequests = batchDetailRequests;
@@ -361,10 +371,61 @@ async function checkViewport(browser, vp) {
   }
 }
 
+async function checkNarrowPaneGeometry(browser, width) {
+  const page = await browser.newPage({ viewport: { width, height: 812 } });
+  try {
+    await page.addInitScript(() => localStorage.setItem('naibaOnboardingDismissed', '1'));
+    await page.route('**/api/comfyui/**', route => {
+      const pathname = new URL(route.request().url()).pathname;
+      const responses = {
+        '/api/comfyui/workflows': { workflows: [] },
+        '/api/comfyui/tasks': { tasks: [] },
+        '/api/comfyui/batches': { batches: [] },
+      };
+      return route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify(responses[pathname] ?? {}) });
+    });
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
+    await page.evaluate(async () => {
+      const studio = await import('/js/22-studio.js');
+      studio.openStudioView();
+      studio.setStudioPage('comfyui');
+    });
+    await page.locator('#comfyuiPanes').waitFor({ state: 'visible' });
+    const geometry = await page.evaluate(() => {
+      const panes = document.querySelector('#comfyuiPanes');
+      const buttons = [...panes.querySelectorAll('.comfyui-pane-btn')];
+      return {
+        size: document.querySelector('#studioPageComfyui').dataset.wbSize || '',
+        pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        paneOverflow: panes.scrollWidth - panes.clientWidth,
+        boxes: buttons.map(button => {
+          const box = button.getBoundingClientRect();
+          return { left: box.left, right: box.right, width: box.width, text: button.textContent.trim() };
+        }),
+      };
+    });
+    assert.ok(geometry.pageOverflow <= 1, `${width}px 根页面不得横向溢出：${geometry.pageOverflow}px`);
+    assert.equal(geometry.boxes.length, 4, `${width}px 四档按钮必须都在`);
+    for (let index = 1; index < geometry.boxes.length; index += 1) {
+      assert.ok(geometry.boxes[index].left >= geometry.boxes[index - 1].right - 1,
+        `${width}px 分档按钮文字不得互相覆盖：${JSON.stringify(geometry.boxes)}`);
+    }
+    if (geometry.size === 'narrow') {
+      const overflowX = await page.locator('#comfyuiPanes').evaluate(node => getComputedStyle(node).overflowX);
+      assert.equal(overflowX, 'auto', '窄档标签条必须自己横向滚，不能把页面撑宽');
+    }
+    console.log(`通过窄档几何 ${width}px：size=${geometry.size} 页面溢出=${geometry.pageOverflow} 标签条可滚=${geometry.paneOverflow > 0}`);
+  } finally {
+    await page.close();
+  }
+}
+
 (async () => {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   try {
     for (const vp of [{ width: 1680, height: 1000 }, { width: 1280, height: 800 }, { width: 375, height: 812 }]) await checkViewport(browser, vp);
+    for (const width of [320, 375, 390]) await checkNarrowPaneGeometry(browser, width);
   } finally {
     await browser.close();
   }

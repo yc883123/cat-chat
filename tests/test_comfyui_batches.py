@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +17,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from naiba.comfyui import client
-from naiba.comfyui.batches import ComfyUIBatchError, ComfyUIBatchManager
+from naiba.comfyui.batches import (ComfyUIBatchError, ComfyUIBatchManager,
+                                   ComfyUIBatchVersionError)
 from naiba.comfyui.jobs import ComfyUIJobManager
 from naiba.comfyui.runner import ComfyUIRunner
 from naiba.comfyui.store import ComfyUIStore
@@ -531,6 +533,44 @@ class ComfyUIBatchesTests(unittest.TestCase):
         self.assertIsNone(self.batches.get(batch["id"]))
         self.assertFalse(self.batches.batch_path(batch["id"]).exists())
         self.assertFalse(self.batches.schemes_path(batch["id"]).exists())
+
+
+    def test_scheme_snapshot_records_version_baselines(self):
+        workflow_fp = self.store.payload_hash(self.prompt)
+        params_fp = self.batches.params_fingerprint(self.store.get_workflow("cw-batch"))
+        scheme = dict(self.scheme, overrides=[
+            {"node_id": "10", "field_name": "steps", "value": 30},
+        ], workflow_fingerprint=workflow_fp, params_fingerprint=params_fp)
+        batch = self.batches.create(self.body(schemes=[scheme]))
+        self.assertEqual(len(batch["items"]), 1)
+        snapshot = json.loads(
+            self.batches.schemes_path(batch["id"]).read_text(encoding="utf-8"))["schemes"][0]
+        self.assertEqual(snapshot["workflow_fingerprint"], workflow_fp)
+        self.assertEqual(snapshot["params_fingerprint"], params_fp)
+        fixed = snapshot["fixed_baseline"]["10|steps"]
+        self.assertEqual(fixed["field_type"], "number")
+        self.assertEqual(fixed["default"], 24)
+
+    def test_declared_fingerprint_drift_rejects_whole_batch_without_tasks(self):
+        params_fp = self.batches.params_fingerprint(self.store.get_workflow("cw-batch"))
+        for field, stale in (("workflow_fingerprint", "0" * 64),
+                             ("params_fingerprint", "1" * 64)):
+            with self.subTest(field=field):
+                scheme = dict(self.scheme, **{field: stale})
+                if field == "workflow_fingerprint":
+                    scheme["params_fingerprint"] = params_fp
+                with self.assertRaises(ComfyUIBatchVersionError):
+                    self.batches.create(self.body(schemes=[scheme]))
+        self.assertEqual(list(self.store.iter_tasks()), [])
+        self.assertEqual(list(self.batches._dir.glob("cfb-*.json")), [])
+
+    def test_legacy_create_without_fingerprints_still_records_baseline(self):
+        batch = self.batches.create(self.body())
+        self.assertEqual(len(batch["items"]), 1)
+        snapshot = json.loads(
+            self.batches.schemes_path(batch["id"]).read_text(encoding="utf-8"))["schemes"][0]
+        self.assertRegex(snapshot["workflow_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(snapshot["params_fingerprint"], r"^[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

@@ -385,6 +385,10 @@ export function bindComfyuiEvents() {
     } else {
       // 离开造梦机页：再次生成草稿不跨页面保留。
       if (comfyui.rerun || comfyui.rerunLoading) dropRerunDraft();
+      // 进度胶囊是共享头里的唯一节点：离开时收起旧状态，别让别的
+      // 工作台页看到造梦机残留的生成进度（回到本页再按缓存重算）。
+      const meter = document.getElementById("comfyuiStepMeter");
+      if (meter) meter.hidden = true;
       exitClearMode();
       stopPolling();
       stopBackgroundRefresh();
@@ -489,6 +493,8 @@ async function enterPage() {
   void loadModelCandidates();
   void loadBatchHistories();
   renderParamForm();
+  // 切回时按缓存的 active task/batch 重新定显隐；离开时收起的进度不靠旧值复活。
+  updateStepMeter();
   scheduleBackgroundRefresh();
   if (batchPaneVisible()) enterBatchPane();
   else if (batch.resultsDetailId && comfyuiPaneName() === "tasks") {
@@ -1314,6 +1320,15 @@ function renderParamForm() {
       const alert = document.createElement("p");
       alert.className = "comfyui-rerun-alert";
       alert.textContent = `有 ${problems.length} 个原任务媒体文件已不存在：请重新选择，或点 ⊘ 跳过后再提交。`;
+      form.append(alert);
+    }
+    if (comfyui.rerun.workflowBaseError) {
+      // 补读原工作流失败是持久状态：不随 toast 消失，不阻断再次生成，
+      // 只说明「另存工作流」为什么还不能用，等下次成功补读才清掉。
+      const alert = document.createElement("p");
+      alert.className = "comfyui-rerun-alert";
+      alert.setAttribute("role", "alert");
+      alert.textContent = `原工作流读取失败：${comfyui.rerun.workflowBaseError}；再次生成仍可用，另存工作流暂不可用。`;
       form.append(alert);
     }
   }
@@ -3221,10 +3236,14 @@ async function loadRerunWorkflowBase(sourceTaskId, workflowId) {
       fingerprint: String(workflow.workflow_fingerprint || ""),
       prompt: workflow.prompt,
     };
+    comfyui.rerun.workflowBaseError = "";
     setRerunSaveAsHidden(false);
+    rerenderParamForm();
   } catch (error) {
     if (comfyui.rerun && comfyui.rerun.sourceTaskId === sourceTaskId) {
       comfyui.rerun.workflowBaseError = String(error.message || error);
+      // 失败要立刻可见；迟到回包已先被上面的归属检查挡掉，不会污染新表单。
+      rerenderParamForm();
     }
   }
 }
@@ -4990,6 +5009,80 @@ function slotKeyOf(slot) {
   return `${slot.node_id}|${slot.field_name}`;
 }
 
+// ---- 固定参数漂移：快照基线逐项对照当前工作流 ----
+
+/** 控件、候选、媒体属性任一变了，旧固定值就不一定还成立。default 变化不影响值本身。 */
+function batchFixedSemanticChanged(base, slot) {
+  for (const field of ["control", "candidates", "media"]) {
+    if (!(field in base)) continue;
+    if (JSON.stringify(base[field]) !== JSON.stringify(slot[field])) return true;
+  }
+  return false;
+}
+
+/** 把快照固定参数逐项对照当前工作流，返回需要用户处理的漂移清单。 */
+function batchFixedIssues(snapshot, detail) {
+  const baseline = snapshot?.fixed_baseline || {};
+  const issues = [];
+  for (const override of snapshot?.overrides || []) {
+    if (!override?.node_id || !override?.field_name) continue;
+    const key = slotKeyOf(override);
+    const slot = batchSlotByAddress(detail, parseSlotKey(key));
+    const row = baseline[key] || {};
+    let kind = "";
+    if (!detail || !slot) kind = "missing";
+    else if (row.field_type && row.field_type !== slot.field_type) kind = "type_changed";
+    else if (batchFixedSemanticChanged(row, slot)) kind = "semantic_changed";
+    if (!kind) continue;
+    issues.push({
+      key, kind, value: override.value,
+      label: slot?.label || key,
+      reason: kind === "missing" ? "已删除：当前工作流没有这个参数"
+        : kind === "type_changed" ? `类型由 ${row.field_type} 变成 ${slot.field_type}`
+        : "控件或候选值已经变化",
+    });
+  }
+  return issues;
+}
+
+function batchFixedIssueResolved(scheme, key) {
+  return Boolean(scheme?.fixedDiscarded?.[key] || scheme?.fixedReassigned?.[key]);
+}
+
+/** 用户明确放弃：这个旧固定值不再提交，槽位回到工作流保存值。 */
+function batchDiscardFixedIssue(scheme, key) {
+  if (!scheme || !key) return;
+  scheme.fixedDiscarded = scheme.fixedDiscarded || {};
+  scheme.fixedDiscarded[key] = true;
+  if (scheme.fixedReassigned) delete scheme.fixedReassigned[key];
+}
+
+/** 按当前槽位类型重新换算旧值；转不成不解除阻塞。 */
+function batchReassignFixedIssue(scheme, key) {
+  if (!scheme || !key) return false;
+  const slot = batchSlotByAddress(scheme.detail, parseSlotKey(key));
+  const converted = slot ? batchConvertFixedValue(scheme.fixed[key], slot) : { ok: false };
+  if (!converted.ok) return false;
+  scheme.fixed[key] = converted.value;
+  scheme.fixedReassigned = scheme.fixedReassigned || {};
+  scheme.fixedReassigned[key] = true;
+  if (scheme.fixedDiscarded) delete scheme.fixedDiscarded[key];
+  return true;
+}
+
+/** 固定值按当前槽位转换；与提交共用一套口径，避免两处各写一份。 */
+function batchConvertFixedValue(raw, slot) {
+  if (!slot) return { ok: false, value: raw };
+  if (slot.field_type === "bool") return { ok: true, value: String(raw) === "true" };
+  if (slot.field_type === "number" || slot.field_type === "seed") {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return { ok: false, value: raw };
+    return { ok: true, value: slot.field_type === "seed" || Number.isInteger(value)
+      ? Math.round(value) : value };
+  }
+  return { ok: true, value: String(raw) };
+}
+
 // ---- 固定参数折叠区 ----
 
 function batchFixedMarkup(scheme) {
@@ -5039,12 +5132,25 @@ function batchFixedMarkup(scheme) {
     const label = slot.label || `${slot.node_id} · ${slot.field_name}`;
     return `<div class="cbm-fixed-field"><label>${escapeText(label)}${slot.field_type === "seed" ? "（留空 = 每次随机）" : ""}</label>${control}</div>`;
   }).join("");
+  const issueRows = (scheme.fixedIssues || []).map((issue) => {
+    const resolved = batchFixedIssueResolved(scheme, issue.key);
+    const shown = typeof issue.value === "boolean"
+      ? (issue.value ? "开" : "关") : String(issue.value ?? "");
+    const discard = `<button type="button" class="cbm-btn tiny" data-batch-action="discard-fixed" data-scheme="${escapeText(scheme.id)}" data-fixed-key="${escapeText(issue.key)}">放弃此参数</button>`;
+    const readopt = issue.kind === "missing" ? "" :
+      `<button type="button" class="cbm-btn tiny" data-batch-action="readopt-fixed" data-scheme="${escapeText(scheme.id)}" data-fixed-key="${escapeText(issue.key)}">按当前参数改用</button>`;
+    return `<div class="cbm-fixed-field cbm-fixed-issue${resolved ? " resolved" : ""}" data-fixed-issue="${escapeText(issue.key)}">
+      <label>${escapeText(issue.label)} · ${escapeText(issue.reason)}</label>
+      <div class="cbm-fixed-issue-value">旧值：${escapeText(shown)}</div>
+      <div class="cbm-fixed-issue-actions">${resolved ? "已处理" : `${readopt}${discard}`}</div>
+    </div>`;
+  }).join("");
   return `<div class="cbm-fixed-bar" data-fixed-bar="${escapeText(scheme.id)}">
       固定参数（本方案每条相同）：<span class="cbm-fixed-summary" data-fixed-summary>${batchFixedAppliedMarkup(scheme)}</span>
       <button type="button" class="cbm-btn tiny" data-batch-action="toggle-fixed" data-scheme="${scheme.id}">展开固定参数</button>
     </div>
     <div class="cbm-fixed-detail${scheme.fixedOpen ? " open" : ""}">
-      ${rows}
+      ${rows}${issueRows}
       <p class="cbm-map-hint">同一工作流想换模型配方，不用改这份方案——「复制方案」再来一份，这里改成另一套即可。</p>
     </div>`;
 }
@@ -5052,8 +5158,12 @@ function batchFixedMarkup(scheme) {
 /** 固定参数栏的已改值摘要；编辑时原地刷新，不重绘整块表单。 */
 function batchFixedAppliedMarkup(scheme) {
   const keys = Object.keys(scheme.fixed || {});
-  if (!keys.length) return '<span>其余按工作流保存值</span>';
-  return keys.map((key) => {
+  const unresolved = (scheme.fixedIssues || []).filter(
+    (row) => !batchFixedIssueResolved(scheme, row.key));
+  const warn = unresolved.length
+    ? `<span class="cbm-kv cbm-fixed-warn">${unresolved.length} 项待处理</span>` : "";
+  if (!keys.length) return `${warn}<span>其余按工作流保存值</span>`;
+  return warn + keys.map((key) => {
     const slot = (scheme.detail?.params || []).find((row) => slotKeyOf(row) === key);
     const label = slot?.label || key;
     const value = scheme.fixed[key];
@@ -5448,6 +5558,14 @@ function onBatchClick(event) {
     renderBatch();
   } else if (action === "toggle-fixed" && scheme) {
     scheme.fixedOpen = !scheme.fixedOpen;
+    renderBatch();
+  } else if (action === "discard-fixed" && scheme) {
+    batchDiscardFixedIssue(scheme, String(target.dataset.fixedKey || ""));
+    renderBatch();
+  } else if (action === "readopt-fixed" && scheme) {
+    if (!batchReassignFixedIssue(scheme, String(target.dataset.fixedKey || ""))) {
+      toast("旧值按当前参数类型换算不了：先改成合法值，或点「放弃此参数」");
+    }
     renderBatch();
   } else if (action === "add-item" && scheme) {
     scheme.items.push(newBatchItem(scheme.items.length + 1));
@@ -6133,6 +6251,21 @@ async function submitBatch() {
     toast("有标红的条目还没填完必填素材，补齐或删掉再提交");
     return;
   }
+  // 恢复出来的固定参数如果对不上当前工作流，先给清单让用户处理，
+  // 绝不用 `if (!slot) continue` 替用户默默丢掉旧值。
+  const unresolvedFixed = [];
+  draft.schemes.forEach((scheme, schemeIndex) => {
+    for (const issue of scheme.fixedIssues || []) {
+      if (batchFixedIssueResolved(scheme, issue.key)) continue;
+      unresolvedFixed.push(`方案 ${schemeIndex + 1} · ${issue.label}（${issue.reason}）`);
+    }
+  });
+  if (unresolvedFixed.length) {
+    batch.blockedMessage = `固定参数有 ${unresolvedFixed.length} 项还没处理：${unresolvedFixed.join("；")}。到固定参数区点「放弃此参数」或「按当前参数改用」。`;
+    renderBatch();
+    toast("固定参数有变化，先处理标出来的项再提交");
+    return;
+  }
   const schemes = [];
   let skippedItems = 0;
   let skippedSchemes = 0;
@@ -6142,22 +6275,22 @@ async function submitBatch() {
     const savedOf = (slot) => batchSlotSavedValue(detail, slot);
     const fixedOverrides = [];
     for (const [key, raw] of Object.entries(scheme.fixed || {})) {
-      const [nodeId, ...rest] = key.split("|");
-      const slot = batchSlotByAddress(detail, { node_id: nodeId, field_name: rest.join("|") });
+      if (scheme.fixedDiscarded?.[key]) continue;
+      const slot = batchSlotByAddress(detail, parseSlotKey(key));
       if (!slot) continue;
-      if (slot.field_type === "bool") {
-        const value = String(raw) === "true";
-        if (typeof savedOf(slot) === "boolean" && savedOf(slot) === value) continue;
-        fixedOverrides.push({ node_id: nodeId, field_name: slot.field_name, value });
-      } else if (slot.field_type === "number" || slot.field_type === "seed") {
-        const value = Number(raw);
-        if (!Number.isFinite(value) || value === savedOf(slot)) continue;
-        fixedOverrides.push({ node_id: nodeId, field_name: slot.field_name, value: slot.field_type === "seed" || Number.isInteger(value) ? Math.round(value) : value });
-      } else {
-        const value = String(raw);
-        if (value === savedOf(slot)) continue;
-        fixedOverrides.push({ node_id: nodeId, field_name: slot.field_name, value });
+      const converted = batchConvertFixedValue(raw, slot);
+      if (!converted.ok) {
+        batch.blockedMessage = `固定参数「${slot.label || key}」的旧值按当前类型换算不了，请到固定参数区处理后再提交`;
+        renderBatch();
+        return;
       }
+      // 与工作流保存值相同就不必下发；后端仍会按当前参数类型做最终校验。
+      if (JSON.stringify(converted.value) === JSON.stringify(savedOf(slot))) continue;
+      fixedOverrides.push({
+        node_id: String(slot.node_id),
+        field_name: String(slot.field_name),
+        value: converted.value,
+      });
     }
     const ports = (scheme.mapping.media_ports || []).filter((port) => port.checked);
     // 完全没动过的行不提交：空提示词会退回工作流原配置，白跑一条。
@@ -6203,6 +6336,9 @@ async function submitBatch() {
     });
     schemes.push({
       workflow_id: scheme.workflow_id,
+      // 当前表单读到的双指纹随请求带回；服务端在开建任务前重读工作流比对。
+      workflow_fingerprint: String(detail.workflow_fingerprint || ""),
+      params_fingerprint: String(detail.params_fingerprint || ""),
       overrides: fixedOverrides,
       mapping: {
         prompt_slot: scheme.mapping.prompt_slot,
@@ -6255,7 +6391,8 @@ async function submitBatch() {
       skippedSchemes ? `跳过 ${skippedSchemes} 个空方案` : ""].filter(Boolean).join("，");
     toast(skipped ? `批次已提交（${skipped}），正在逐条执行` : "批次已提交，正在逐条执行");
   } catch (error) {
-    toast(`提交失败：${error.message}`);
+    // 409 是服务端明确告知「工作流已变」：文案本身就是可操作指引，别再套一层前缀。
+    toast(error.status === 409 ? error.message : `提交失败：${error.message}`);
   }
 }
 
@@ -6835,10 +6972,25 @@ function batchSchemeFromRestore(snapshot, detail) {
     if (!override?.node_id || !override?.field_name) continue;
     scheme.fixed[slotKeyOf(override)] = override.value;
   }
+  scheme.fixedIssues = batchFixedIssues(snapshot, detail);
+  scheme.fixedDiscarded = {};
+  scheme.fixedReassigned = {};
+  scheme.oldBaseline = !snapshot?.workflow_fingerprint && !snapshot?.params_fingerprint
+    && !snapshot?.fixed_baseline;
+  const unresolvedFixed = scheme.fixedIssues.filter(
+    (row) => !batchFixedIssueResolved(scheme, row.key));
+  const fixedNote = unresolvedFixed.length
+    ? `固定参数有 ${unresolvedFixed.length} 项对不上（${unresolvedFixed.map((row) => row.label).join("、")}），请在固定参数区处理后再提交。`
+    : "";
+  const baselineNote = scheme.oldBaseline
+    ? "这是旧批次，没有版本基线；请核对固定参数和映射后再提交。" : "";
   const snapshotItems = Array.isArray(snapshot?.items) ? snapshot.items : [];
   if (!detail) {
     scheme.items = snapshotItems.map((item, index) => batchItemFromSnapshot(item, index));
-    scheme.restoreWarning = `工作流「${snapshot?.workflow_name || snapshot?.workflow_id || "未知"}」已不存在，请重新选择工作流后再核对条目。`;
+    scheme.restoreWarning = [
+      `工作流「${snapshot?.workflow_name || snapshot?.workflow_id || "未知"}」已不存在，请重新选择工作流后再核对条目。`,
+      fixedNote, baselineNote,
+    ].filter(Boolean).join(" ");
     if (!scheme.items.length) scheme.items = [newBatchItem(1)];
     return scheme;
   }
@@ -6866,9 +7018,13 @@ function batchSchemeFromRestore(snapshot, detail) {
   }
   const lostMedia = allMedia.some((input) =>
     !checkedPorts.some((port) => slotKeyOf(port) === slotKeyOf(input)));
+  const notes = [];
   if (lostMapping || lostMedia || lostExtras) {
-    scheme.restoreWarning = "这份工作流改过：部分映射或素材口已经对不上，标出来的条目提交前要重新指认。";
+    notes.push("这份工作流改过：部分映射或素材口已经对不上，标出来的条目提交前要重新指认。");
   }
+  if (fixedNote) notes.push(fixedNote);
+  if (baselineNote) notes.push(baselineNote);
+  if (notes.length) scheme.restoreWarning = notes.join(" ");
   if (!scheme.items.length) scheme.items = [newBatchItem(1)];
   return scheme;
 }
@@ -6904,7 +7060,11 @@ function batchSchemeFromLegacy(group, detail) {
     mapping: null,
     fixed: {},
     items: [],
-    restoreWarning: "这一批是旧版提交的：映射按当前工作流重新识别，提交前请核对正文/时长/分辨率写对了没有。",
+    fixedIssues: [],
+    fixedDiscarded: {},
+    fixedReassigned: {},
+    oldBaseline: true,
+    restoreWarning: "这一批是旧版提交的，没有版本基线：映射按当前工作流重新识别，提交前请核对正文/时长/分辨率写对了没有。",
   };
   if (!detail) {
     scheme.restoreWarning = group.workflowId

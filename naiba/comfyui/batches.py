@@ -34,7 +34,7 @@ from naiba.comfyui import COMFYUI_BATCH_PREFIX, MAX_SHOTS
 from naiba.comfyui import client
 from naiba.comfyui.jobs import ComfyUITaskError, _running_step
 from naiba.comfyui.history import HistoryIndex, history_page, history_record_missing
-from naiba.comfyui.store import _store_lock, now_ms
+from naiba.comfyui.store import ComfyUIStore, _store_lock, now_ms
 from naiba.core.contracts import COMFYUI_BATCH_CONVERT_KEY
 
 # Default response size for legacy callers; older batch files remain available.
@@ -47,6 +47,24 @@ MAX_EXTRA_POINTS = 8
 
 class ComfyUIBatchError(ValueError):
     """批量提交非法（参数 / 校验 / 探活）。"""
+
+
+class ComfyUIBatchVersionError(ComfyUIBatchError):
+    """工作流或参数结构已漂移：对应 HTTP 409，前端要提示重新读取后再提交。"""
+
+
+# 参数结构基线只取决定「这个槽位是什么」的字段，label / 连接说明改了不算漂移。
+_PARAMS_BASELINE_FIELDS = (
+    "node_id", "field_name", "field_type", "control", "default", "candidates", "media",
+)
+
+
+def _params_baseline(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for row in entry.get("params") or []:
+        if isinstance(row, dict):
+            rows.append({key: row[key] for key in _PARAMS_BASELINE_FIELDS if key in row})
+    return rows
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -236,6 +254,73 @@ class ComfyUIBatchManager:
         payload.setdefault("items", [])
         return payload
 
+    @staticmethod
+    def params_fingerprint(entry: dict[str, Any]) -> str:
+        """参数结构指纹，与 workflow_fingerprint 共用 payload_hash 的 canonical JSON 口径。"""
+        return ComfyUIStore.payload_hash(_params_baseline(entry))
+
+    @classmethod
+    def _fixed_baseline(cls, entry: dict[str, Any],
+                        overrides: Any) -> dict[str, Any]:
+        """固定参数的最小基线：地址 + 类型 + 必要语义；供恢复时诊断漂移。"""
+        params = {}
+        for row in entry.get("params") or []:
+            if not isinstance(row, dict):
+                continue
+            key = f"{row.get('node_id') or ''}|{row.get('field_name') or ''}"
+            params[key] = {name: row[name] for name in _PARAMS_BASELINE_FIELDS if name in row}
+        baseline: dict[str, Any] = {}
+        for override in overrides if isinstance(overrides, list) else []:
+            if not isinstance(override, dict):
+                continue
+            key = (f"{override.get('node_id') or ''}|"
+                   f"{override.get('field_name') or ''}")
+            if key in params:
+                baseline[key] = params[key]
+            else:
+                # 快照里原本就对不上的地址也留一行，恢复时能明确说「已删除」。
+                baseline[key] = {
+                    "node_id": str(override.get("node_id") or ""),
+                    "field_name": str(override.get("field_name") or ""),
+                    "missing": True,
+                }
+        return baseline
+
+    def verify_scheme_baselines(self, schemes: Any,
+                                entries: dict[str, dict[str, Any]]) -> None:
+        """创建任何任务前比对前端声明的指纹与库内当前工作流。
+
+        前端没带基线字段的旧调用方跳过比对（向后兼容），但仍把读到的 entry
+        填进 entries 供后续展开复用；只要有一个方案漂移就整批拒绝。
+        """
+        if not isinstance(schemes, list):
+            return
+        for index, scheme in enumerate(schemes, 1):
+            if not isinstance(scheme, dict):
+                continue
+            declared_workflow = str(scheme.get("workflow_fingerprint") or "")
+            declared_params = str(scheme.get("params_fingerprint") or "")
+            if not declared_workflow and not declared_params:
+                continue
+            workflow_id = str(scheme.get("workflow_id") or "").strip()
+            entry = entries.get(workflow_id)
+            if entry is None:
+                entry = self.store.get_workflow(workflow_id)
+                if entry is not None:
+                    entries[workflow_id] = entry
+            if entry is None:
+                # 工作流不存在交给 _expand_scheme 报原有错误，不在这一步改口径。
+                continue
+            if (declared_workflow
+                    and declared_workflow != ComfyUIStore.payload_hash(entry.get("prompt") or {})):
+                raise ComfyUIBatchVersionError(
+                    f"第 {index} 个方案的工作流图已经变了，请重新读取工作流后再提交"
+                )
+            if declared_params and declared_params != self.params_fingerprint(entry):
+                raise ComfyUIBatchVersionError(
+                    f"第 {index} 个方案的参数结构已经变了，请重新读取工作流后再提交"
+                )
+
     # ---- 外层幂等（计划 2026-11-17 §7.1：原生批次 create 补 owner/request_key） ----
 
     def lookup_request(self, request_key: str, *, owner_id: str = "") -> dict[str, Any] | None:
@@ -295,6 +380,9 @@ class ComfyUIBatchManager:
             )
 
         entries: dict[str, dict[str, Any]] = {}
+        # 版本检查必须在 _expand_scheme 干跑或创建任务之前：任一方案漂移就整批
+        # 拒绝，不能靠建完再回滚掩盖竞态，也不留下「有任务、没批次」的窗口。
+        self.verify_scheme_baselines(schemes, entries)
         payloads: list[dict[str, Any]] = []
         snapshots: list[dict[str, Any]] = []
         # request_key 前缀就是批次 id（cfb-<batch_id>-<条目序号>），重放同一条
@@ -528,6 +616,10 @@ class ComfyUIBatchManager:
         snapshot = {
             "workflow_id": workflow_id,
             "workflow_name": workflow_name,
+            # 版本/参数基线随快照落盘：编辑这一批时能识别同 ID 工作流被改过。
+            "workflow_fingerprint": ComfyUIStore.payload_hash(entry.get("prompt") or {}),
+            "params_fingerprint": self.params_fingerprint(entry),
+            "fixed_baseline": self._fixed_baseline(entry, scheme_overrides),
             "overrides": _frozen(scheme_overrides),
             "mapping": {
                 "prompt_slot": self._valid_slot(entry, prompt_slot),

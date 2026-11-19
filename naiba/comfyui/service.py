@@ -24,7 +24,8 @@ from naiba.comfyui import (
     PARAMS_SCHEMA_VERSION,
 )
 from naiba.comfyui import client
-from naiba.comfyui.batches import ComfyUIBatchError, ComfyUIBatchManager
+from naiba.comfyui.batches import (ComfyUIBatchError, ComfyUIBatchManager,
+                                   ComfyUIBatchVersionError)
 from naiba.comfyui.dream import DreamConfigError, DreamService, check_bindings_against_params
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError
 from naiba.comfyui.history import history_record_missing, parse_history_ids
@@ -270,6 +271,9 @@ class ComfyUIService:
             entry.get("prompt") or {}, sort_keys=True, ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
+        # 参数结构指纹随详情下发：批次提交时前端原样带回，服务端据此识别
+        # 同 ID 工作流在填单期间被改过（图或参数结构漂移都要挡住）。
+        entry["params_fingerprint"] = ComfyUIBatchManager.params_fingerprint(entry)
         return {"workflow": entry}, 200
 
     def api_workflow_create(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -624,6 +628,9 @@ class ComfyUIService:
     def api_batch_create(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         try:
             batch = self.batches.create(body)
+        except ComfyUIBatchVersionError as exc:
+            # 版本冲突走 409，和 safe-save/dream 的口径一致：前端提示重新读工作流。
+            return {"error": str(exc)}, 409
         except ComfyUIBatchError as exc:
             return {"error": str(exc)}, 400
         except ComfyUITaskError as exc:

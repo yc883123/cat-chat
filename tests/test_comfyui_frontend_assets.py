@@ -290,7 +290,7 @@ const m=await make('comfy',source,'\nexport {batch,ensureBatchDraft,submitBatch,
 const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup,batchFixedMarkup,batchSetFixedValue,batchJsonParamMarkup,batchItemRowMarkup,jsonParamInfo,jsonParamSummary,jsonParamButtonText,jsonParamHelper,jsonEditableValue,jsonNewEntry,jsonTargetAssign}=m;
 ensureBatchDraft();
 const s=batch.draft.schemes[0];
-s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
+s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',params_fingerprint:'pf-x',
   prompt:{'5':{inputs:{text:'默认正文'}},'6':{inputs:{length:5}},'7':{inputs:{res:'848x480'}},'8':{inputs:{image:'old.png'}},'9':{inputs:{lora:'base.safetensors'}},'20':{inputs:{lora_data:'[{"name":"a","strength_model":1,"strength_clip":1,"enabled":true},{"name":"b","strength_model":0.5,"strength_clip":1,"enabled":false}]'}},'31':{inputs:{tail:''}}},
   params:[{node_id:'5',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',label:'正文'},
           {node_id:'6',field_name:'length',field_type:'number',default:5,label:'时长'},
@@ -412,6 +412,8 @@ assert.ok(post,'必须 POST /api/comfyui/batches');
 assert.equal(post.body.title,'验收批次');assert.equal(post.body.unload_after,true);
 const scheme=post.body.schemes[0];
 assert.equal(scheme.workflow_id,'cw-1');
+assert.equal(scheme.workflow_fingerprint,'fp-x');
+assert.equal(scheme.params_fingerprint,'pf-x','双指纹必须随方案提交，服务端据此挡版本漂移');
 assert.deepEqual(scheme.mapping,{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},resolution_slot:{node_id:'7',field_name:'res'},extra_points:[{id:'bx1',kind:'prompt',slot:{node_id:'31',field_name:'tail'}}],media_ports:[{node_id:'8',field_name:'image',checked:true}]});
 assert.deepEqual(scheme.overrides,[{node_id:'9',field_name:'lora',value:'third.safetensors'}]);
 const [one,two]=scheme.items;
@@ -1250,6 +1252,153 @@ assert.equal(legacy.items[0].duration,'8');
 assert.equal(legacy.items[0].files['0'].path,'/managed/old.png');
 assert.equal(legacy.fixed['9|lora'],'base.safetensors');
 assert.ok(legacy.restoreWarning.includes('旧版'));
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+    def test_batch_fixed_drift_blocks_until_user_discards_or_readopts(self):
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const nodes=new Map(),requests=[],toasts=[];
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
+const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});if(path==='/api/comfyui/batches')return {batch:{id:'cfb-x'}};return {};}};
+async function make(sourceText,exportsLine){
+  const byMod=new Map();
+  for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)) byMod.set(match[2],match[1].split(',').map(n=>n.trim()).filter(Boolean));
+  const mod=new vm.SourceTextModule(sourceText+exportsLine,{context});
+  await mod.link(async spec=>{const names=byMod.get(spec)||[];return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});});
+  await mod.evaluate();
+  return mod.namespace;
+}
+const m=await make(source,'\nexport {batch,ensureBatchDraft,submitBatch,batchSchemeFromRestore,batchFixedMarkup,batchDiscardFixedIssue,batchReassignFixedIssue};');
+const {batch,ensureBatchDraft,submitBatch,batchSchemeFromRestore,batchFixedMarkup,batchDiscardFixedIssue,batchReassignFixedIssue}=m;
+ensureBatchDraft();
+const detail={id:'cw-1',name:'改过的流',workflow_fingerprint:'fp-now',params_fingerprint:'pf-now',
+  prompt:{'6':{inputs:{length:'5'}},'7':{inputs:{res:'x'}}},
+  params:[{node_id:'6',field_name:'length',field_type:'text',label:'时长'},
+          {node_id:'7',field_name:'res',field_type:'text',control:'select',candidates:['x','y'],label:'分辨率'}]};
+const snapshot={workflow_id:'cw-1',workflow_name:'改过的流',workflow_fingerprint:'fp-old',params_fingerprint:'pf-old',
+  fixed_baseline:{
+    '5|text':{node_id:'5',field_name:'text',field_type:'text',control:'multiline'},
+    '6|length':{node_id:'6',field_name:'length',field_type:'number',default:5},
+    '7|res':{node_id:'7',field_name:'res',field_type:'text',candidates:['a','b']}},
+  overrides:[{node_id:'5',field_name:'text',value:'旧正文'},{node_id:'6',field_name:'length',value:8},{node_id:'7',field_name:'res',value:'a'}],
+  mapping:{prompt_slot:null,duration_slot:null,resolution_slot:null,extra_points:[],media_ports:[]},
+  items:[{name:'条目 1',prompt:'场景A',shots:1,media_inputs:[],extras:{}}]};
+const scheme=batchSchemeFromRestore(snapshot,detail);
+assert.equal(JSON.stringify(scheme.fixedIssues.map(row=>row.kind)),JSON.stringify(['missing','type_changed','semantic_changed']));
+assert.equal(scheme.oldBaseline,false);
+assert.match(scheme.restoreWarning,/固定参数有 3 项对不上/);
+const markup=batchFixedMarkup(scheme);
+assert.ok(markup.includes('已删除'),'删掉的槽位必须有可见行');
+assert.ok(markup.includes('旧值：旧正文'));
+assert.ok(markup.includes('3 项待处理'));
+assert.ok(markup.includes('data-batch-action="discard-fixed"'));
+assert.ok(markup.includes('data-batch-action="readopt-fixed"'));
+const posts=()=>requests.filter(row=>row.body);
+batch.draft={title:'漂移批次',unload_after:false,schemes:[scheme]};
+await submitBatch();
+assert.equal(posts().length,0,'未处理的漂移必须挡住提交');
+assert.match(batch.blockedMessage,/方案 1/);
+scheme.fixedIssues.forEach(row=>batchDiscardFixedIssue(scheme,row.key));
+await submitBatch();
+assert.equal(posts().length,1,'明确放弃后必须能提交');
+assert.deepEqual(posts()[0].body.schemes[0].overrides,[]);
+const scheme2=batchSchemeFromRestore(snapshot,detail);
+batchDiscardFixedIssue(scheme2,'5|text');
+batchDiscardFixedIssue(scheme2,'7|res');
+assert.equal(batchReassignFixedIssue(scheme2,'6|length'),true);
+assert.equal(scheme2.fixed['6|length'],'8');
+batch.draft.schemes=[scheme2];
+await submitBatch();
+assert.equal(posts().length,2);
+assert.deepEqual(posts()[1].body.schemes[0].overrides,[{node_id:'6',field_name:'length',value:'8'}]);
+const oldSnap={...snapshot,workflow_fingerprint:'',params_fingerprint:'',fixed_baseline:undefined};
+const oldScheme=batchSchemeFromRestore(oldSnap,detail);
+assert.equal(oldScheme.oldBaseline,true);
+assert.match(oldScheme.restoreWarning,/没有版本基线/);
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
+    def test_rerun_workflow_base_failure_is_visible_without_blocking_rerun(self):
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const nodes=new Map(),requests=[],toasts=[];
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],className:'',classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(name,value){this[name]=String(value);},getAttribute(name){return this[name];},removeAttribute(){},addEventListener(){},append(...items){this.children.push(...items);},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{},remove(){}});
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
+const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,Date,
+  document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}}},
+  window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)},
+  failWorkflow:false,workflowGate:null});
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},
+  localFileUrl:path=>path,attachmentThumbUrl:record=>record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,
+  api:async(path,options)=>{
+    requests.push({path,method:String(options?.method||'GET')});
+    if(path==='/api/comfyui/workflows/cw-1'){
+      if(context.workflowGate)return context.workflowGate.promise;
+      if(context.failWorkflow)throw new Error('工作流已删除');
+      return {workflow:{id:'cw-1',workflow_fingerprint:'f'.repeat(64),prompt:{'1':{inputs:{text:'x'}}}}};
+    }
+    if(path==='/api/comfyui/tasks/done/rerun'&&options?.method==='POST')return {task:{id:'ct-new'}};
+    return {};
+  }};
+async function make(sourceText,exportsLine){
+  const byMod=new Map();
+  for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)) byMod.set(match[2],match[1].split(',').map(n=>n.trim()).filter(Boolean));
+  const mod=new vm.SourceTextModule(sourceText+exportsLine,{context});
+  await mod.link(async spec=>{const names=byMod.get(spec)||[];return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});});
+  await mod.evaluate();return mod.namespace;
+}
+const m=await make(source,'\nexport {comfyui,buildRerunDetail,renderParamForm,loadRerunWorkflowBase,setRerunSaveAsHidden,submitTask};');
+const {comfyui,buildRerunDetail,renderParamForm,loadRerunWorkflowBase,setRerunSaveAsHidden,submitTask}=m;
+const snapshot={workflow_id:'cw-1',workflow_name:'原任务',prompt:{'1':{inputs:{text:'原值'}}},
+  params:[{node_id:'1',field_name:'text',field_type:'text',control:'multiline',label:'正文'}],
+  overrides:[{node_id:'1',field_name:'text',value:'覆盖'}],media_inputs:[],media_skip:[],shots:1};
+comfyui.detail=buildRerunDetail(snapshot).detail;
+comfyui.selectedId='cw-1';
+comfyui.rerun={sourceTaskId:'done',workflowId:'cw-1',workflowName:'原任务',
+  unavailable:false,originalOverrides:new Map([['1|text','覆盖']])};
+const form=$('#comfyuiParamForm');
+context.failWorkflow=true;
+setRerunSaveAsHidden(true);
+await loadRerunWorkflowBase('done','cw-1');
+assert.equal(comfyui.rerun.workflowBaseError,'工作流已删除');
+assert.ok(comfyui.rerun,'失败不能清掉再次生成草稿');
+assert.equal($('#comfyuiSaveCurrentAs').hidden,true,'失败时另存入口保持隐藏');
+renderParamForm();
+const alerts=form.children.filter(child=>String(child.className).includes('comfyui-rerun-alert'));
+const failure=alerts.find(child=>String(child.textContent).includes('原工作流读取失败'));
+assert.ok(failure,'补读失败必须渲染成持久告警');
+assert.equal(failure.getAttribute('role'),'alert');
+assert.match(failure.textContent,/再次生成仍可用，另存工作流暂不可用/);
+// 迟到回包：归属已换，旧错误不能落到新表单上。
+const gate={};gate.promise=new Promise((resolve,reject)=>{gate.reject=reject;});
+context.failWorkflow=false;context.workflowGate=gate;
+comfyui.rerun.workflowBaseError='';
+const pending=loadRerunWorkflowBase('done','cw-1');
+comfyui.rerun.sourceTaskId='other';
+gate.reject(new Error('迟到的失败'));
+await pending;
+assert.equal(comfyui.rerun.workflowBaseError,'','迟到回包不能污染新任务');
+renderParamForm();
+assert.ok(!form.children.some(child=>String(child.textContent).includes('迟到的失败')));
+// 失败不阻断再次生成本身：仍走 rerun 接口（提交成功后草稿才清空）。
+comfyui.rerun.sourceTaskId='done';
+requests.length=0;toasts.length=0;
+await submitTask();
+assert.ok(requests.some(row=>row.path==='/api/comfyui/tasks/done/rerun'&&row.method==='POST'));
 })().catch(error=>{console.error(error);process.exitCode=1});
 '''
         result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)

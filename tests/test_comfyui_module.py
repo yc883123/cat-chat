@@ -2719,6 +2719,19 @@ class ComfyuiStatusbarLayoutTests(unittest.TestCase):
         self.assertIn("max-width: 1180px", cols)
         self.assertIn("margin: 0 auto", cols)
 
+    def test_narrow_pane_tabs_scroll_inside_header_without_page_overflow(self):
+        """窄档四档按钮保持内容宽不叠字，但标签条自己滚，不把整页撑宽（2026-11-19）。"""
+        pane = self.css.split(
+            '#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes {\n', 1)[1].split("}", 1)[0]
+        self.assertIn("min-width: 0", pane)
+        self.assertIn("max-width: 100%", pane)
+        self.assertIn("overflow-x: auto", pane)
+        self.assertIn("flex-wrap: nowrap", pane)
+        self.assertNotIn("min-width: max-content", pane)
+        self.assertIn(
+            '#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes .comfyui-pane-btn {\n  flex: 0 0 auto; min-width: max-content;\n}',
+            self.css)
+
 
 class TaskCardLayoutTests(unittest.TestCase):
     def test_long_workflow_title_shrinks_before_status_badge(self):

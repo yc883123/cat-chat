@@ -353,6 +353,29 @@ class StepMeterUiContractTests(unittest.TestCase):
         self.assertIn("FRESH_WINDOW_MS", source)
         self.assertIn("def snapshot_for", source)
 
+    def test_meter_hides_on_page_exit_and_recomputes_on_return(self):
+        # 切出造梦机要收起旧进度；切回按缓存重算，不靠离开前的可见状态复活。
+        leave = self.js.split("onStudioPageChange((page, detail = {}) => {", 1)[1].split("  });", 1)[0]
+        self.assertIn("meter.hidden = true", leave)
+        self.assertIn("stopPolling()", leave)
+        enter = self.js.split("async function enterPage() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("updateStepMeter()", enter)
+        # 共享头结构保持唯一节点：只移动，不复制、不改 ID。挂在状态栏那一格，
+        # 桌面与手机都落在标题行右侧，不再自动流到 ⋯ 下一行。
+        shared = (self.root / "public/js/22a-workbench-ui.js").read_text(encoding="utf-8")
+        self.assertIn('const meterHost = target.querySelector(".wb-header-actions") || target;', shared)
+        self.assertIn("if (meter && meter.parentElement !== meterHost) meterHost.append(meter);", shared)
+        self.assertIn("#studioView .wb-header-actions > .comfyui-step-meter {", self.css)
+        self.assertIn(
+            "#studioView .wb-header-actions:has(> .comfyui-step-meter:not([hidden])) { flex-wrap: nowrap; }",
+            self.css)
+        self.assertIn(
+            "#studioView .wb-header-actions:has(> .comfyui-step-meter:not([hidden])) .comfyui-statusbar { width: auto; }",
+            self.css)
+        self.assertIn(
+            "#studioView .wb-resource-header:has(.comfyui-step-meter:not([hidden])) .comfyui-status-text { display: none; }",
+            self.css)
+
 
 if __name__ == "__main__":
     unittest.main()

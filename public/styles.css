@@ -7093,6 +7093,12 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-fixed-detail label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; overflow-wrap: anywhere; }
 .cbm-fixed-detail input, .cbm-fixed-detail select { box-sizing: border-box; width: 100%; font: inherit; font-size: 12.5px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 4px 8px; }
 .cbm-fixed-detail .cbm-map-hint { grid-column: 1 / -1; margin: 2px 0 0; }
+/* 恢复出来的旧固定值对不上当前工作流：整行标出来，必须用户明确处理才放行。 */
+.cbm-fixed-detail .cbm-fixed-issue { align-content: start; border: 1px solid var(--warning); border-radius: var(--r-md); padding: 8px 10px; }
+.cbm-fixed-detail .cbm-fixed-issue.resolved { border-color: var(--line); opacity: .72; }
+.cbm-fixed-detail .cbm-fixed-issue-value { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.cbm-fixed-detail .cbm-fixed-issue-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.cbm-fixed-bar .cbm-fixed-warn { color: var(--warning); }
 
 /* 条目表 */
 .cbm-items-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
@@ -7636,11 +7642,17 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 #studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes { order: 8; flex-basis: 100%; }
 #studioPageComfyui[data-wb-size="medium"] #comfyuiPanes .comfyui-pane-btn,
 #studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes .comfyui-pane-btn { flex: 1; padding-inline: 6px; }
-/* 手机窄档：页头首列被状态列挤到装不下四档按钮，flex:1+min-width:0 会把按钮压到
-   比文字还窄，文字溢出互相叠字（2026-11-17）。给按钮和标签条都兜住内容下限：首列够宽
-   时四档照旧平铺占满，不够时标签条整体按内容宽溢出到右侧空白，保持单行不叠字。 */
-#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes { min-width: max-content; }
-#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes .comfyui-pane-btn { min-width: max-content; }
+/* 手机窄档：页头首列被状态列挤到装不下四档按钮，按钮压到比文字还窄会叠字。
+   按钮保留 min-width:max-content 兜住文字；标签条自身收进首列宽内并横向滚动，
+   不能让 max-content 把 documentElement 一起撑宽（2026-11-19）。 */
+#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes {
+  min-width: 0; max-width: 100%; overflow-x: auto; flex-wrap: nowrap;
+  overscroll-behavior-x: contain; scrollbar-width: thin;
+}
+/* 首列够宽时四个按钮仍按内容宽平铺；不够时由标签条横向滚，不换行也不压字。 */
+#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes .comfyui-pane-btn {
+  flex: 0 0 auto; min-width: max-content;
+}
 #studioPageComfyui[data-wb-size="narrow"] .comfyui-statusbar { flex: 0 1 110px; }
 #studioPageComfyui[data-wb-size="narrow"] .comfyui-param-heading-row { flex-wrap: wrap; }
 #studioPageComfyui[data-wb-size="narrow"] .comfyui-param-heading-actions { width: 100%; justify-content: flex-end; }
@@ -7707,6 +7719,15 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 #studioView .wb-header-actions .studio-search input { width: 100%; }
 #studioView .wb-header-actions .comfyui-statusbar { width: 100%; min-width: 0; margin: 0; padding: 0; }
 #studioView .wb-header-actions .comfyui-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 进度胶囊并进状态栏那一格：桌面与手机同口径，都在标题行右侧、贴着 ⋯。
+   旧版它作为页头直接子元素自动流到第二行，正压在 ⋯ 下方（2026-11-19 反馈）。 */
+#studioView .wb-header-actions > .comfyui-step-meter {
+  flex: none; order: -1; margin: 0; max-width: 100%;
+}
+/* 状态栏默认占满整行；有胶囊时收回自适应宽度，两者才同在标题行右侧。 */
+#studioView .wb-header-actions:has(> .comfyui-step-meter:not([hidden])) { flex-wrap: nowrap; }
+#studioView .wb-header-actions:has(> .comfyui-step-meter:not([hidden])) .comfyui-statusbar { width: auto; }
+#studioView .wb-resource-header:has(.comfyui-step-meter:not([hidden])) .comfyui-status-text { display: none; }
 #studioView .wb-resource-header > :is(.novel-stagebar, .writer-stagebar) { grid-column: 1 / -1; grid-row: 2; width: 100%; }
 #studioView .wb-resource-header > .comfyui-step-meter { grid-column: 1 / -1; justify-self: end; max-width: 100%; margin: 0; }
 #studioView .wb-resource-monitor {
@@ -7757,16 +7778,8 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
   #studioView .studio-topbar > .wb-header-actions { display: contents; }
   #studioView .studio-topbar .studio-topbar-tools { grid-column: 1 / -1; grid-row: 2; }
   #studioView .studio-topbar .wb-resource-menu { grid-column: 2; grid-row: 1; }
-  /* 进度胶囊上到标题行右侧、贴着状态栏，不再独占尾行——尾行会把它压到 ⋯ 正下方
-     （同一条反馈「进度条跑到省略号下面去了」）。生成中让出「已连接…」文字，
-     只留连接点与 ⋯，窄屏标题行才放得下。
-     只作用功能页页头（[data-wb-page-header]）：提词库共享顶栏是 flex 布局，
-     靠 margin-left:auto 贴右，不能被这里的 margin 覆盖。 */
-  #studioView [data-wb-page-header] > .comfyui-step-meter {
-    grid-column: 1; grid-row: 1; justify-self: end; align-self: start;
-    max-width: 100%; margin: 0 2px 0 0;
-  }
-  #studioView .wb-resource-header:has(> .comfyui-step-meter:not([hidden])) .comfyui-status-text { display: none; }
+  /* 进度胶囊现在和 ⋯ 同在状态栏那一格，桌面与手机同一处，这里不再单独占 grid 位。
+     窄屏把进度轨道收短，标题行才放得下；生成中让出「已连接…」文字的规则在上方全局。 */
   #studioView .wb-header-main > :is(.studio-source-tabs, #comfyuiPanes) { flex-basis: 100%; }
   #studioView .wb-header-main .labeler-view-tabs { display: flex; flex-basis: 100%; margin: 0; }
   #studioView .wb-header-actions .comfyui-statusbar { justify-content: flex-end; }

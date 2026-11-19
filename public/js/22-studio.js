@@ -658,6 +658,25 @@ async function refreshStudio() {
 // 手机三档
 // ============================================================
 
+/** 各功能页右上 ⋯ 的「刷新工作台」：按当前页自己的口径重读一遍数据。
+
+每次进入页面本来就会重读（提词库 refreshStudio、贴签匠 activateLabeler、
+造梦机 enterPage、拆书匠/织书台各自的 page 回调），所以统一走页面事件，
+不在这个函数里再按页写一份分支——那样迟早有几页漏掉。
+ */
+export async function refreshWorkbench(source = null) {
+  if (!studio.open) return;
+  const button = source instanceof Element ? source : null;
+  if (button) button.disabled = true;
+  try {
+    if (studio.page === "library") await refreshStudio();
+    else emitStudioPage(studio.page, { refresh: true });
+  } finally {
+    if (button) button.disabled = false;
+  }
+  toast("已刷新工作台");
+}
+
 function setStudioPane(pane) {
   const next = PANES.includes(pane) ? pane : "form";
   studio.pane = next;
@@ -2872,6 +2891,20 @@ export function bindStudioEvents() {
   });
   watchWorkbenchSize($("#studioPageLibrary"));
   bindWorkbenchDetails($("#studioPageLibrary"));
+  // 五个功能页右上 ⋯ 里都有一颗「刷新工作台」：一处委托，不逐页绑。
+  // 收起菜单的动作照抄资源监控那条：<details> 与 popover 两种菜单都要收。
+  $("#studioView")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-studio-refresh]");
+    if (!button) return;
+    event.preventDefault();
+    button.closest("details")?.removeAttribute("open");
+    const panel = button.closest("[popover]");
+    if (panel) {
+      if (typeof panel.hidePopover === "function") panel.hidePopover();
+      panel.hidden = true;
+    }
+    void refreshWorkbench(button);
+  });
   $("#studioSourceTabs")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-studio-source]");
     if (button) { initGenerationSettings(); void setPromptSource(button.dataset.studioSource); }

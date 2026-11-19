@@ -220,6 +220,7 @@
   "test_dependency_dag",
   "test_fence_actions",
   "test_folder_drop_bridge",
+  "test_fs_pick",
   "test_image_encode_cache",
   "test_job_contracts",
   "test_job_waits",

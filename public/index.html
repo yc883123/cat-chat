@@ -35,7 +35,7 @@
         <div class="sidebar-mode-switch" role="group" aria-label="视图">
           <button class="sidebar-mode-btn active" id="openChatMode" type="button" aria-pressed="true">对话</button>
           <button class="sidebar-mode-btn" id="openStudio" type="button" aria-pressed="false" title="工作台（模板检索与生成）">工作台</button>
-          <button class="sidebar-mode-btn" id="openSuperAgent" type="button" aria-pressed="false" title="查看长期任务状态">任务总管</button>
+          <button class="sidebar-mode-btn" id="openSuperAgent" type="button" aria-pressed="false" aria-label="任务总管" title="查看长期任务状态"><span class="sidebar-mode-btn-qualifier">任务</span>总管</button>
         </div>
         <!-- 侧栏收放是两种视图共享的操作，因此跟模式切换留在同一行 -->
         <button class="icon-button sidebar-collapse-btn" id="collapseSidebar" type="button" title="收起侧栏" aria-label="收起侧栏">
@@ -328,7 +328,7 @@
           </div>
           <details class="wb-media-menu wb-resource-menu" data-wb-menu>
             <summary id="libraryMoreTrigger" aria-label="提词库更多操作" title="更多操作">⋯</summary>
-            <div class="wb-media-menu-panel"><button class="control-button" type="button" data-resource-details data-resource-opener="libraryMoreTrigger">资源监控</button></div>
+            <div class="wb-media-menu-panel"><button class="control-button" type="button" data-resource-details data-resource-opener="libraryMoreTrigger">资源监控</button><button class="control-button" type="button" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button></div>
           </details>
           </div>
           <!-- 共享生成进度独占尾行，避免挤压搜索、阶段与资源摘要。 -->
@@ -504,7 +504,7 @@
             <div class="wb-header-actions">
               <details class="wb-media-menu wb-resource-menu" data-wb-menu>
                 <summary id="labelerMoreTrigger" aria-label="贴签匠更多操作" title="更多操作">⋯</summary>
-                <div class="wb-media-menu-panel"><button class="control-button" type="button" data-resource-details data-resource-opener="labelerMoreTrigger">资源监控</button></div>
+                <div class="wb-media-menu-panel"><button class="control-button" type="button" data-resource-details data-resource-opener="labelerMoreTrigger">资源监控</button><button class="control-button" type="button" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button></div>
               </details>
             </div>
           </header>
@@ -839,6 +839,7 @@
                 <summary id="comfyuiMoreTrigger" aria-label="造梦机更多操作" title="更多操作">⋯</summary>
                 <div class="wb-media-menu-panel">
                   <button class="control-button" type="button" data-resource-details data-resource-opener="comfyuiMoreTrigger">资源监控</button>
+                  <button class="control-button" type="button" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button>
                   <button class="control-button tiny" id="comfyuiEditUrl" type="button">改地址</button>
                   <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
                 </div>
@@ -1091,6 +1092,7 @@
               <button class="control-button wb-book-more" id="novelMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelMoreMenu" aria-label="更多作品操作">⋯</button>
               <div class="wb-book-menu" id="novelMoreMenu" role="menu" popover hidden>
               <button class="control-button" type="button" role="menuitem" data-resource-details data-resource-opener="novelMoreBtn">资源监控</button>
+              <button class="control-button" type="button" role="menuitem" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button>
               <button class="control-button" id="novelSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
               <button class="control-button novel-manage-entry" id="novelManageBtn" type="button"
                       role="menuitem" title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
@@ -1489,6 +1491,7 @@
               <button class="control-button wb-book-more" id="writerMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerMoreMenu" aria-label="更多作品操作">⋯</button>
               <div class="wb-book-menu" id="writerMoreMenu" role="menu" popover hidden>
               <button class="control-button" type="button" role="menuitem" data-resource-details data-resource-opener="writerMoreBtn">资源监控</button>
+              <button class="control-button" type="button" role="menuitem" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button>
               <button class="control-button" id="writerSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
               <button class="control-button writer-manage-entry" id="writerManageBtn" type="button"
                       role="menuitem" title="集中管理设定、大纲、章节正文与生成记录">管理记录</button>
@@ -3612,9 +3615,9 @@
           </div>
           <label>控制台地址<input id="providerKvmemManagerUrl" type="url" placeholder="http://127.0.0.1:18199"></label>
           <small class="hint">只允许本机回环地址；控制程序没开时 Cat Chat 会后台拉起，不弹窗口。</small>
-          <label>KVMem 安装目录<input id="providerKvmemInstallDir" type="text" placeholder="例如 D:\kvmem-v0.19.1-windows-x64-nvidia-50-unified" spellcheck="false"></label>
+          <label>KVMem 安装目录<span class="kvmem-path-field"><input id="providerKvmemInstallDir" type="text" placeholder="例如 D:\kvmem-v0.19.1-windows-x64-nvidia-50-unified" spellcheck="false"><button class="control-button tiny" id="providerKvmemPickDir" type="button" data-local-picker title="在本机资源管理器里选安装目录（只在跑服务的这台电脑上可用）">选择…</button></span></label>
           <small class="hint">KVMem 解压后的根目录（里面有 runtime、scripts、workers）。</small>
-          <label>模型文件路径<input id="providerKvmemModelPath" type="text" placeholder="例如 D:\models\Qwen3-32B.gguf" spellcheck="false"></label>
+          <label>模型文件路径<span class="kvmem-path-field"><input id="providerKvmemModelPath" type="text" placeholder="例如 D:\models\Qwen3-32B.gguf" spellcheck="false"><button class="control-button tiny" id="providerKvmemPickFile" type="button" data-local-picker title="在本机资源管理器里选模型文件（不过滤格式，.gguf / .ninfer / .safetensors 都能选）">选择…</button></span></label>
           <div class="kvmem-config-row">
             <label>后端
               <select id="providerKvmemBackend">

@@ -1069,6 +1069,42 @@ export async function captureProviderKvmem() {
   }
 }
 
+// 本机原生选择器：安装目录选文件夹、模型选文件。
+// 对话框弹在跑服务的那台电脑上，所以手机/局域网访问时这颗按钮由 hideLocalPickers() 藏掉，
+// 否则点了只会以为页面卡住。文件对话框不按扩展名过滤（.gguf / .ninfer / .safetensors 都有）。
+export async function pickKvmemPath(targetId, mode) {
+  const input = $('#' + targetId);
+  if (!input) return;
+  const button = mode === 'file' ? $('#providerKvmemPickFile') : $('#providerKvmemPickDir');
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/fs/pick', {
+      method: 'POST',
+      body: {
+        mode: mode === 'file' ? 'file' : 'dir',
+        initial: input.value.trim(),
+        title: mode === 'file' ? '选择模型文件' : '选择 KVMem 安装目录',
+      },
+    });
+    if (result.cancelled) return;
+    input.value = result.path || '';
+    // 手动派发 input：这条框没有 keyup 监听，但外部若按 input 事件做联动，别让它漏掉。
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  } catch (error) {
+    toast(`选择失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// 只有本机（127.0.0.1 / localhost）能用原生对话框；手机走局域网地址时把它们藏起来。
+export function hideLocalPickers() {
+  const host = String(location.hostname || '').toLowerCase();
+  const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  if (isLocal) return;
+  $$('[data-local-picker]').forEach((button) => { button.hidden = true; });
+}
+
 function applyKvmemCapture(payload) {
   const params = (payload && payload.parameters) || {};
   $('#providerKvmemModelPath').value = params.Model || '';

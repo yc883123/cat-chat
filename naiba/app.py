@@ -719,6 +719,52 @@ class NaibaChatApp:
         self.config.ensure_workspace_writable(resolved)
         return {"cancelled": False, "path": selected, "resolved": str(resolved)}
 
+    def pick_filesystem_path(self, mode: str = "dir", initial: str = "", title: str = "") -> dict[str, Any]:
+        """本机原生对话框选目录或选文件；取消返回空串。
+
+        只对跑服务的这台机器有意义（窗口弹在它的屏幕上）：手机/局域网访问时前端
+        会把这个入口隐藏，否则点了只会以为卡住。
+        文件对话框不按扩展名过滤——本地模型有 .gguf，也有 .ninfer / .safetensors 分片，
+        白名单只会把用户挡在门外。
+        """
+        kind = "file" if str(mode or "").strip().lower() == "file" else "dir"
+        dialog_title = str(title or "").strip()[:80] or ("选择模型文件" if kind == "file" else "选择文件夹")
+        start = str(initial or "").strip()
+        initial_path = Path(self._paths.exe_dir)
+        if start:
+            probe = Path(start).expanduser()
+            try:
+                if probe.is_dir():
+                    initial_path = probe
+                elif probe.parent.is_dir():
+                    initial_path = probe.parent
+            except OSError:
+                pass
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            if kind == "file":
+                selected = filedialog.askopenfilename(
+                    parent=root, initialdir=str(initial_path), title=dialog_title,
+                    filetypes=[("所有文件", "*.*")],
+                )
+            else:
+                selected = filedialog.askdirectory(
+                    parent=root, initialdir=str(initial_path), title=dialog_title, mustexist=True,
+                )
+            root.destroy()
+        except Exception as exc:
+            raise RuntimeError(f"无法打开 Windows 原生选择器：{exc}") from exc
+        selected = str(selected or "").strip()
+        if not selected:
+            return {"cancelled": True, "path": ""}
+        # 用 Windows 原生反斜杠形式返回：界面上看到的和资源管理器地址栏里的一致，
+        # 填完能直接截图对照；下游 Path/http JSON 两种分隔符都吃。
+        return {"cancelled": False, "path": str(Path(selected).expanduser()), "mode": kind}
+
     def browse_workspace(self, raw: str = "", conversation_id: str = "") -> dict[str, Any]:
         """Return a shallow, read-only project tree limited to a workspace root.
 

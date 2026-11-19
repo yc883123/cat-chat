@@ -701,6 +701,36 @@ class LabelerRunnerTests(unittest.TestCase):
         self.assertEqual(len(app.models.calls), calls_before, "同图同配置不应重复调用模型")
         self.assertEqual(self.db.counts(task2["id"])["done"], 1)
 
+    def test_resume_restores_existing_annotation_before_retry(self):
+        """续跑前若任务项状态丢失但已有同配置标注，不能重新调用或覆盖结果。"""
+        app = self._make_app()
+        jobs, task = self._submit(app, images=self.images[:1])
+        self._wait(task["id"])
+        item = self.db.list_items(task["id"])[0]
+        annotation_before = self.db.find_reusable(
+            item["path_key"], item["content_version"], item["config_fingerprint"],
+        )
+        self.assertIsNotNone(annotation_before)
+        calls_before = len(app.models.calls)
+        with self.db._connect() as db:
+            db.execute(
+                "UPDATE task_items SET state='failed', annotation_id=NULL, error='旧错误' "
+                "WHERE task_id=? AND item_id=?",
+                (task["id"], item["item_id"]),
+            )
+        self.store.update_task(task["id"], status="failed")
+        resumed = jobs.resume_task(task["id"])
+        self.assertEqual(resumed["skipped_succeeded"], 1)
+        self.assertEqual(self.db.counts(task["id"])["done"], 1)
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(len(app.models.calls), calls_before)
+        annotation_after = self.db.find_reusable(
+            item["path_key"], item["content_version"], item["config_fingerprint"],
+        )
+        self.assertEqual(annotation_after["tags"], annotation_before["tags"])
+        self.assertEqual(annotation_after["description"], annotation_before["description"])
+
     def test_transient_error_retries_then_succeeds(self):
         remaining = {"n": 1}
 

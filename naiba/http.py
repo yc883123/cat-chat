@@ -1458,6 +1458,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json(self.app.pick_workspace_directory(str(body.get("initial") or "")))
             except (OSError, ValueError, RuntimeError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/fs/pick":
+            try:
+                self._json(self.app.pick_filesystem_path(
+                    str(body.get("mode") or "dir"),
+                    str(body.get("initial") or ""),
+                    str(body.get("title") or ""),
+                ))
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/mcp/register":
             try:
                 self._json(self.app.register_mcp_server(body))

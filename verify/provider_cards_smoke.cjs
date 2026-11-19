@@ -356,6 +356,9 @@ async function runProviderCopyViewport(browser, width) {
     assert.equal(localDraft.keyEmpty, true);
     assert.equal(await page.locator('#providerKvmemEnabled').isChecked(), true);
     assert.equal(await page.locator('#providerKvmemManagerUrl').inputValue(), 'http://127.0.0.1:19998');
+    // 本机访问时两个原生选择入口必须可用（手机走局域网时由 hideLocalPickers 隐藏）。
+    assert.equal(await page.locator('#providerKvmemPickDir').isVisible(), true, '安装目录有「选择…」按钮');
+    assert.equal(await page.locator('#providerKvmemPickFile').isVisible(), true, '模型文件有「选择…」按钮');
     await closeDraft();
     assert.equal(saves.length, 3, '本地复制取消也不保存');
     await noErrors();

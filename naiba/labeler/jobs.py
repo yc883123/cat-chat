@@ -477,7 +477,16 @@ class LabelerJobManager:
     # ---- 查询 ----
 
     def tasks(self, active_only: bool = False, limit: int = 60) -> list[dict[str, Any]]:
-        return [self._slim(task) for task in self.store.list_tasks(active_only=active_only, limit=limit)]
+        rows: list[dict[str, Any]] = []
+        for task in self.store.list_tasks(active_only=active_only, limit=limit):
+            slim = self._slim(task)
+            counts = self.db.counts(str(task.get("id") or ""))
+            slim["progress"] = self._progress(counts)
+            slim["counts"] = counts
+            slim["can_continue"] = self._can_continue(task, counts)
+            slim["uncertain_count"] = int(counts.get("uncertain") or 0)
+            rows.append(slim)
+        return rows
 
     def task(self, task_id: str) -> dict[str, Any] | None:
         task = self.store.get_task(task_id)
@@ -681,6 +690,13 @@ class LabelerJobManager:
             items = self.db.list_items(task_id, limit=10000)
             if Counter(_resume_identity(item) for item in items) != wanted:
                 continue
+            # 只在确认是同一批后修复旧任务项，候选查询不应改动其他批次。
+            self.db.restore_completed_items_from_annotations(task_id)
+            counts = self.db.counts(task_id)
+            total = int(counts.get("total") or 0)
+            done = int(counts.get("done") or 0)
+            if total != len(refs) or done >= total:
+                continue
             config = input_data.get("config") if isinstance(input_data.get("config"), dict) else {}
             blocked = self._resume_block_reason(config)
             if blocked:
@@ -715,12 +731,30 @@ class LabelerJobManager:
         if blocked:
             raise LabelerTaskError(blocked)
         counts = self.db.counts(task_id)
+        was_incomplete = int(counts.get("done") or 0) < int(counts.get("total") or 0)
+        self.db.restore_completed_items_from_annotations(task_id)
+        counts = self.db.counts(task_id)
         total = int(counts.get("total") or 0)
         done = int(counts.get("done") or 0)
         if total <= 0:
             raise LabelerTaskError("这个批次没有图片，无法继续")
         if done >= total:
-            raise LabelerTaskError("这个批次已经全部完成，没有要接着打的图片")
+            if not was_incomplete:
+                raise LabelerTaskError("这个批次已经全部完成，没有要接着打的图片")
+            self.store.update_task(
+                task_id,
+                status="done",
+                detail="已完成图片无需重复打标",
+                error="",
+                finished_at=task.get("finished_at") or None,
+                progress=self._progress(counts),
+                result={"annotation_ids": self.db.annotation_ids_for_task(task_id)},
+            )
+            detail = self.task(task_id) or task
+            detail["resumed"] = True
+            detail["skipped_succeeded"] = done
+            detail["skipped_uncertain"] = 0
+            return detail
         uncertain = int(counts.get("uncertain") or 0) + int(counts.get("running") or 0)
         if uncertain and not confirm_uncertain:
             raise LabelerTaskError(

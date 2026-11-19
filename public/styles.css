@@ -3595,20 +3595,27 @@ body[data-studio="on"] .studio-view { display: flex; }
   display: flex;
   flex: 1;
   min-width: 0;
+  /* 窄侧栏要把三个入口降到「总管」二字：容器查询按这一格的实宽判断。 */
+  container: sidebar-modes / inline-size;
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--sidebar-line);
   border-radius: var(--r-md);
 }
+/* 按钮按内容分宽（此前 flex:1 强制等宽）：侧栏拖到 ~190px 时每格只剩 47px，
+   「任务总管」12.5px 四个字要 50px，差几像素就折成两行。 */
 .sidebar-mode-btn {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   height: 30px;
+  padding: 0 6px;
   border: 0;
   border-radius: calc(var(--r-md) - 2px);
   background: transparent;
   color: var(--sidebar-muted);
   font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
   cursor: pointer;
   transition: var(--t-fast);
 }
@@ -3616,6 +3623,12 @@ body[data-studio="on"] .studio-view { display: flex; }
 .sidebar-mode-btn.active { background: var(--sidebar-active); color: var(--brand-300, #fff); font-weight: 600; }
 .sidebar-mode-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .sidebar-mode-row .sidebar-collapse-btn { flex: none; }
+/* 窄侧栏兜底（容器 <165px ≈ 侧栏 <225px）：字号与内边距各收一档，
+   「任务总管」只留「总管」二字——三个入口都保持单行、不裁字（aria-label 仍是全称）。 */
+@container sidebar-modes (max-width: 165px) {
+  .sidebar-mode-btn { padding: 0 2px; font-size: 12px; }
+  .sidebar-mode-btn-qualifier { display: none; }
+}
 
 /* 工作台态：侧栏只留模式切换 + 工作台导航 + 共享底部操作，会话内容全部让位。 */
 body[data-studio="on"] #sidebarWorkspaceHeader,
@@ -6591,6 +6604,10 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .kvmem-service-status { display: inline-flex; align-items: center; gap: 6px; min-width: 96px; color: var(--muted); font-size: 11px; }
 .kvmem-config-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 .kvmem-config-actions .hint { flex: 1 1 220px; margin: 0; }
+/* 安装目录 / 模型文件：输入框 + 本机原生选择按钮并排；手机访问时按钮由 JS 隐藏。 */
+.kvmem-path-field { display: flex; align-items: center; gap: 6px; }
+.kvmem-path-field input { flex: 1 1 auto; min-width: 0; }
+.kvmem-path-field .control-button { flex: 0 0 auto; white-space: nowrap; }
 .kvmem-config-details { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px; background: var(--surface-2); }
 .kvmem-config-details summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
 .kvmem-config-details[open] summary { margin-bottom: 8px; color: var(--text); }

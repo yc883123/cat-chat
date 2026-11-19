@@ -267,6 +267,46 @@ class LabelerDB:
         return self.list_items(task_id, states=("queued",), limit=10000)
 
     @_retry_transient
+    def restore_completed_items_from_annotations(self, task_id: str) -> int:
+        """把已有同配置标注恢复成成功项，避免续跑再次覆盖旧结果。
+
+        任务项状态可能在请求中断或旧版本迁移时没有落成 ``succeeded``，但全局标注库
+        已经有同一张图、同一内容版本和同一配置的结果。此时标注才是可复用的完成事实；
+        只补任务项关联，不改已有标注内容，也不碰 TXT 文件。
+        """
+        stamp = now_ms()
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                UPDATE task_items
+                   SET state='succeeded', annotation_id=(
+                           SELECT a.id
+                             FROM annotations a
+                            WHERE a.path_key=task_items.path_key
+                              AND a.content_version=task_items.content_version
+                              AND a.config_fingerprint=task_items.config_fingerprint
+                            LIMIT 1
+                       ),
+                       error='', error_category='', attempt_count=0,
+                       started_at=NULL, finished_at=?, phase='reused',
+                       worker_slot=0, worker_model_key='', worker_model_name='',
+                       supervisor_decision='', supervisor_attempts=0,
+                       supervisor_reason='', supervisor_usage_json='{}', candidate_json='{}'
+                 WHERE task_id=?
+                   AND state<>'succeeded'
+                   AND EXISTS (
+                           SELECT 1
+                             FROM annotations a
+                            WHERE a.path_key=task_items.path_key
+                              AND a.content_version=task_items.content_version
+                              AND a.config_fingerprint=task_items.config_fingerprint
+                       )
+                """,
+                (stamp, task_id),
+            )
+            return int(cursor.rowcount or 0)
+
+    @_retry_transient
     def reset_items_for_resume(self, task_id: str) -> int:
         """「接着上次批次」：把没成功的逐图项重置回排队，已成功的一项不动。
 

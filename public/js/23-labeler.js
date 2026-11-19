@@ -1331,6 +1331,8 @@ async function pollTask() {
     if (active || detailItems.length) labeler.items = mergeTaskItemRows(labeler.items, detailItems);
     if (active) syncAnnotationsIfDue(taskId, labeler.items);
     renderTask(task);
+    // 左侧批次卡的进度也一起走：只刷新底部进度条的话，卡片会停在开局那个数。
+    if (active) syncBatchCard(task);
     if (!active) {
       stopPolling();
       const loaded = await loadTaskItems(taskId, { refresh: true });
@@ -1404,6 +1406,7 @@ async function reconcileTask() {
     if (active) {
       startPolling();
       syncAnnotationsIfDue(taskId, labeler.items);
+      syncBatchCard(task);
       return false;
     }
     stopPolling();
@@ -1565,19 +1568,7 @@ function renderBatches() {
     top.append(title, state);
     const meta = document.createElement("div");
     meta.className = "labeler-batch-meta";
-    const progress = task.progress || {};
-    const bits = [`${Number(progress.done || 0)}/${Number(progress.total || 0)} 完成`];
-    if (Number(progress.failed || 0)) bits.push(`失败 ${progress.failed}`);
-    if (Number(progress.uncertain || 0)) bits.push(`不确定 ${progress.uncertain}`);
-    // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID；
-    // 自定义打标的任务没有预设，显示成「自定义」。
-    const preset = labeler.presets.find((row2) => row2.id === task.preset);
-    bits.push(preset?.label || (String(task.preset || "") === "custom" ? "自定义" : String(task.preset || "")));
-    if (task.concurrency_enabled) {
-      bits.push(`${Number(task.worker_count || 0)} 个打标员`);
-      if (task.supervisor_model_name) bits.push(`监督 ${task.supervisor_model_name}`);
-    }
-    meta.textContent = bits.filter(Boolean).join(" · ");
+    meta.textContent = batchMetaText(task);
     button.append(top, meta);
     row.append(button);
     if (TERMINAL_BATCH_STATUSES.has(String(task.status || ""))) {
@@ -1592,6 +1583,49 @@ function renderBatches() {
     return row;
   });
   list.replaceChildren(...rows);
+}
+
+// 批次卡第二行文案（进度 + 生成模式 + 并发信息）：列表整体重绘与逐条同步共用，
+// 两处各写一份的话，哪天文案一改就会出现「点了刷新才变」的不一致。
+function batchMetaText(task) {
+  const progress = task?.progress || {};
+  const bits = [`${Number(progress.done || 0)}/${Number(progress.total || 0)} 完成`];
+  if (Number(progress.failed || 0)) bits.push(`失败 ${progress.failed}`);
+  if (Number(progress.uncertain || 0)) bits.push(`不确定 ${progress.uncertain}`);
+  // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID；
+  // 自定义打标的任务没有预设，显示成「自定义」。
+  const preset = labeler.presets.find((row2) => row2.id === task?.preset);
+  bits.push(preset?.label || (String(task?.preset || "") === "custom" ? "自定义" : String(task?.preset || "")));
+  if (task?.concurrency_enabled) {
+    bits.push(`${Number(task.worker_count || 0)} 个打标员`);
+    if (task.supervisor_model_name) bits.push(`监督 ${task.supervisor_model_name}`);
+  }
+  return bits.filter(Boolean).join(" · ");
+}
+
+// 打标中把进度就地写回批次卡：批次列表只在切页/终态重新拉取，靠它一份数据的话
+// 左边会一直停在开局那个「0/N」，而底部进度条每 1.2s 都在动（2026-11-18 远端反馈）。
+// 只改文字与状态属性，不重建行——重建会打断用户的点击/滚动，也会闪。
+function syncBatchCard(task) {
+  const id = String(task?.id || "");
+  if (!id) return;
+  const index = labeler.batches.findIndex((row) => String(row.id || "") === id);
+  if (index >= 0) labeler.batches[index] = { ...labeler.batches[index], ...task };
+  const button = $$("#labelerBatchList .labeler-batch-main")
+    .find((el) => String(el.dataset.labelerTask || "") === id);
+  if (!button) return;
+  const status = String(task.status || "unknown");
+  const state = button.querySelector(".labeler-batch-state");
+  if (state) {
+    const label = STATUS_LABELS[status] || status;
+    if (state.dataset.state !== status) state.dataset.state = status;
+    if (state.textContent !== label) state.textContent = label;
+  }
+  const meta = button.querySelector(".labeler-batch-meta");
+  if (meta) {
+    const text = batchMetaText(labeler.batches[index] || task);
+    if (meta.textContent !== text) meta.textContent = text;
+  }
 }
 
 // 删除的是批次记录与逐图运行行；标注库按「图片内容 + 配置」全局复用，不受影响。
@@ -1762,6 +1796,10 @@ function setResultTab(tab) {
   const next = ["images", "tags", "sentences"].includes(tab) ? tab : "images";
   labeler.resultTab = next;
   labeler.activeTag = "";
+  // 切页签必须让「按图」重画一次：标签云/句子库把 body 换掉了，但 items 与标注
+  // 没变，按图那边的签名 diff 会判成「没变化」直接早退，屏幕停在上一档的内容上，
+  // 要等下一轮轮询改到数据才补出来（2026-11-18 远端反馈：切回来一片空白）。
+  labeler.lastImageSignature = "";
   $$("#studioPageLabeler .labeler-result-tab").forEach((btn) => {
     const active = btn.dataset.labelerResult === next;
     btn.classList.toggle("active", active);
@@ -1966,7 +2004,7 @@ function renderImageResults(body) {
   // 懒加载签名 diff：任务、搜索、渲染上限、每条图片的状态与标注摘录都没变时，
   // 跳过整段 DOM 重建——打标进行中每 1.2s 的轮询大多数轮次在这里直接返回。
   const signature = JSON.stringify([
-    labeler.taskId, labeler.search, labeler.imageResultLimit,
+    labeler.resultTab, labeler.taskId, labeler.search, labeler.imageResultLimit,
     labeler.items.length, labeler.annotations.length, labeler.annotationTotal,
     Number(labeler.task?.items_total || 0),
     visible.map(({ item, annotation }) => [
@@ -2337,14 +2375,23 @@ async function exportResults() {
       if (isPywebview()) {
         // 桌面端不下载副本：WebView2 不处理 <a download>，点了也没反应；
         // 文件已经在应用数据目录里，直接告诉用户位置，交给「打开文件夹」。
-        setHint(`已导出 ${payload.count} ${noun}：${payload.name}，位置：${payload.path}`);
+        const text = `已导出 ${payload.count} ${noun}：${payload.name}，位置：${payload.path}`;
+        setHint(text);
+        // 导出按钮在右侧结果区、hint 在左侧配置栏底部，光写 hint 等于没提示（2026-11-18）。
+        toast(`已导出 ${payload.count} ${noun}：${payload.name}，可点「打开文件夹」取走`);
       } else {
         triggerDownload(fileUrl(payload.path));
-        setHint(`已导出 ${payload.count} ${noun}：${payload.name}（已开始下载）`);
+        const text = `已导出 ${payload.count} ${noun}：${payload.name}（已开始下载）`;
+        setHint(text);
+        toast(text);
       }
+    } else {
+      setHint("导出完成，但没有返回文件信息", true);
+      toast("导出完成，但没有返回文件信息");
     }
   } catch (error) {
     setHint(`导出失败：${error.message}`, true);
+    toast(`导出失败：${error.message}`);
   } finally {
     if (button) button.disabled = false;
   }

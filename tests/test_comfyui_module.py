@@ -2720,7 +2720,10 @@ class ComfyuiStatusbarLayoutTests(unittest.TestCase):
         self.assertIn("margin: 0 auto", cols)
 
     def test_narrow_pane_tabs_scroll_inside_header_without_page_overflow(self):
-        """窄档四档按钮保持内容宽不叠字，但标签条自己滚，不把整页撑宽（2026-11-19）。"""
+        """窄档四档按钮保持内容宽不叠字；页头整行留给分档条，常见手机宽四档全露（2026-11-20）。
+
+        overflow-x 仍保留，只在极大字号或超窄屏下兜底，不再承担日常提示。
+        """
         pane = self.css.split(
             '#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes {\n', 1)[1].split("}", 1)[0]
         self.assertIn("min-width: 0", pane)
@@ -2730,6 +2733,13 @@ class ComfyuiStatusbarLayoutTests(unittest.TestCase):
         self.assertNotIn("min-width: max-content", pane)
         self.assertIn(
             '#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes .comfyui-pane-btn {\n  flex: 0 0 auto; min-width: max-content;\n}',
+            self.css)
+        # 手机页头改块级：状态栏绝对定位贴右上，分档条独占整行，不再被状态列挤窄。
+        self.assertIn(
+            "#studioView #studioPageComfyui.wb-resource-header { position: relative; display: block; }",
+            self.css)
+        self.assertIn(
+            "#studioView #studioPageComfyui > .wb-header-actions { position: absolute; top: 8px; right: 12px; }",
             self.css)
 
 

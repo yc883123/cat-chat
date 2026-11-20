@@ -4630,17 +4630,26 @@ export function renderAgentToolOptIns() {
     return;
   }
   const selected = new Set(state.agentFormToolOptIns || []);
+  const selectedCount = items.filter((tool) => selected.has(tool.name)).length;
   box.hidden = false;
+  // 外观和下面的工具分组一致：默认收起成一行，展开后是白底列表。
   box.innerHTML = `
-    <div class="agent-tool-optins-head">
-      <b>单独授权</b>
-      <small>这里的工具不会被预设或全选打开，只有在这里打勾才会对这台 Agent 生效</small>
-    </div>
+    <summary class="agent-tool-optins-head">
+      <span class="group-caret" aria-hidden="true">▸</span>
+      <span class="agent-tool-optins-spacer" aria-hidden="true"></span>
+      <b class="group-title">单独授权<i class="group-badge" data-tone="warn">默认关闭</i></b>
+      <span class="group-desc">这里的工具不会被预设或全选打开，只有在这里打勾才会对这台 Agent 生效</span>
+      <span class="group-count agent-tool-optins-count">${selectedCount}/${items.length}</span>
+    </summary>
     <div class="agent-tool-optins-list">${items.map((tool) => `
       <label class="agent-tool-optin-card">
         <input type="checkbox" value="${escapeHtml(tool.name)}"${selected.has(tool.name) ? ' checked' : ''}>
         <span><b>${escapeHtml(tool.name)}</b><i>需单独授权</i><p>${escapeHtml(tool.description || '')}</p></span>
       </label>`).join('')}</div>`;
+  const countEl = box.querySelector('.agent-tool-optins-count');
+  const syncCount = () => {
+    if (countEl) countEl.textContent = `${(state.agentFormToolOptIns || []).length}/${items.length}`;
+  };
   box.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
     cb.addEventListener('change', () => {
       const next = new Set(state.agentFormToolOptIns || []);
@@ -4649,6 +4658,7 @@ export function renderAgentToolOptIns() {
       state.agentFormToolOptIns = items
         .map((tool) => tool.name)
         .filter((name) => next.has(name));
+      syncCount();
       updateToolCounter();
     });
   });
@@ -4934,6 +4944,8 @@ function stripOptInGroups(groups, optInNames) {
 export function renderToolScopeList() {
   const list = $('#agentToolScope');
   if (!list) return;
+  // 单独授权块现在和普通工具同在一个滚动区里；重画分组时保留原节点（事件与勾选状态都不丢）。
+  const optIns = $('#agentToolOptIns');
   const allTools = state.toolCatalog?.tools || [];
   const optInNames = new Set(allTools.filter((tool) => tool.opt_in).map((tool) => tool.name));
   const catalog = allTools.filter((tool) => !optInNames.has(tool.name));
@@ -4941,6 +4953,7 @@ export function renderToolScopeList() {
   const toolMap = new Map(catalog.map((tool) => [tool.name, tool]));
   const filter = String(state.agentToolFilter || '').trim().toLowerCase();
   list.innerHTML = '';
+  if (optIns) list.append(optIns);
   // 「只看已选」优先于搜索：它是一份核对清单，搜索框此时不参与（切换开关时会清空搜索词）。
   if (state.agentToolOnlySelected) renderSelectedScope(list, groups, toolMap);
   else if (filter) renderFilteredScope(list, catalog, filter);

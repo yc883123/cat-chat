@@ -182,43 +182,27 @@ export function closeAgentHelpPopover() {
 
 // 当前能力只读投影：唯一事实来源是当前会话已经落盘的 first_turn 工具快照。
 // 这里不读取 Agent 配置来“猜”能力，也不触碰 enabled_tool_ids / tool_opt_ins。
-const ABILITY_GROUP_ORDER = [
-  '读取与检索', '文件写入与编辑', '命令与脚本执行', '联网与外部服务',
-  '造梦机对话', '视觉与图片', '任务与扩展', '长会话', '其他',
-];
-const ABILITY_GROUP_FALLBACKS = new Map([
-  ['read_file', '读取与检索'], ['list_directory', '读取与检索'], ['search_files', '读取与检索'],
-  ['find_conversations', '长会话'], ['recall_history', '长会话'],
-  ['read_conversation', '长会话'], ['reset_context', '长会话'],
-  ['read_pdf', '读取与检索'], ['pdf_render_pages', '读取与检索'], ['pdf_zoom_region', '读取与检索'],
-  ['probe_video', '读取与检索'], ['extract_frames', '读取与检索'], ['extract_video_frames_exact', '读取与检索'],
-  ['novel_outline', '读取与检索'], ['novel_chunks', '读取与检索'], ['novel_split_text', '读取与检索'],
-  ['write_file', '文件写入与编辑'], ['edit_file', '文件写入与编辑'],
-  ['pwsh', '命令与脚本执行'], ['run_skill_script', '命令与脚本执行'],
-  ['http_request', '联网与外部服务'], ['web_search', '联网与外部服务'], ['register_mcp', '联网与外部服务'],
-  ['comfyui_prepare_workflow', '联网与外部服务'], ['comfyui_batch', '联网与外部服务'],
-  ['dream_workflows', '造梦机对话'], ['dream_workflow_details', '造梦机对话'], ['dream_prepare', '造梦机对话'],
-  ['dream_submit', '造梦机对话'], ['dream_task_status', '造梦机对话'], ['dream_task_cancel', '造梦机对话'],
-  ['dream_task_wait', '造梦机对话'],
-  ['vision_analyze', '视觉与图片'], ['vision_image_ops', '视觉与图片'], ['show_media', '视觉与图片'],
-  ['run_in_background', '任务与扩展'], ['job_output', '任务与扩展'], ['job_status', '任务与扩展'],
-  ['job_wait', '任务与扩展'], ['job_kill', '任务与扩展'], ['subagent', '任务与扩展'],
-  ['subagent_spawn', '任务与扩展'], ['todo_write', '任务与扩展'], ['install_skill', '任务与扩展'],
-  ['unpack_skill_archive', '任务与扩展'], ['inspect_installed_skill', '任务与扩展'],
+// 面板只给用户看能干什么，不显示调用名、分组、数量或快照状态。
+const ABILITY_TOOL_LABELS = new Map([
+  ['read_file', '读文件'], ['list_directory', '列文件夹'], ['search_files', '搜文件'],
+  ['read_pdf', '读 PDF'], ['pdf_render_pages', 'PDF 转图片'], ['pdf_zoom_region', '放大 PDF'],
+  ['novel_outline', '读小说'], ['novel_chunks', '读小说分段'], ['novel_split_text', '拆长文'],
+  ['probe_video', '看视频'], ['extract_frames', '视频截图'], ['extract_video_frames_exact', '视频逐帧截图'],
+  ['write_file', '写文件'], ['edit_file', '改文件'],
+  ['pwsh', '跑命令'], ['run_skill_script', '跑技能脚本'],
+  ['http_request', '发网络请求'], ['web_search', '联网搜索'], ['register_mcp', '接 MCP 服务'],
+  ['comfyui_prepare_workflow', '准备 ComfyUI 工作流'], ['comfyui_batch', '批量跑 ComfyUI'],
+  ['dream_workflows', '看造梦机工作流'], ['dream_workflow_details', '看造梦机参数'],
+  ['dream_prepare', '预检造梦机参数'], ['dream_submit', '提交造梦机生成'],
+  ['dream_task_status', '查造梦机进度'], ['dream_task_cancel', '取消造梦机任务'], ['dream_task_wait', '等造梦机完成'],
+  ['vision_analyze', '看图'], ['vision_image_ops', '处理图片'], ['show_media', '显示图片/视频'],
+  ['run_in_background', '后台运行'], ['job_output', '看输出'], ['job_status', '查任务'],
+  ['job_wait', '等任务'], ['job_kill', '停任务'],
+  ['subagent', '派子 Agent'], ['subagent_spawn', '派子 Agent'], ['todo_write', '记待办'],
+  ['install_skill', '装技能'], ['unpack_skill_archive', '解压技能包'], ['inspect_installed_skill', '看已装技能'],
+  ['find_conversations', '找会话'], ['recall_history', '回忆历史'],
+  ['read_conversation', '读会话'], ['reset_context', '清空上下文'],
 ]);
-
-function agentAbilityConversation() {
-  return state.conversations.find((item) => String(item.id) === String(state.conversationId || '')) || null;
-}
-
-function abilityGroupForTool(tool) {
-  const name = String(tool?.name || '');
-  const catalogTool = (state.toolCatalog?.tools || []).find((item) => String(item?.name || '') === name);
-  const catalogGroup = String(catalogTool?.group || '').trim();
-  if (ABILITY_GROUP_ORDER.includes(catalogGroup)) return catalogGroup;
-  if (name.startsWith('mcp__')) return '联网与外部服务';
-  return ABILITY_GROUP_FALLBACKS.get(name) || '其他';
-}
 
 function abilityToolLabel(tool) {
   const name = String(tool?.name || '').trim();
@@ -227,77 +211,147 @@ function abilityToolLabel(tool) {
     const [, server, action] = name.match(/^mcp__([^_]+(?:_[^_]+)*)__([^_].*)$/) || [];
     return server && action ? `${server} · ${action}` : name.replace(/^mcp__/, '');
   }
-  return name;
+  const label = ABILITY_TOOL_LABELS.get(name);
+  if (label) return label;
+  // 未登记的工具用自带描述第一句兜底；没有描述才退回调用名。
+  const brief = String(tool?.description || '').split(/[：:。\n]/)[0].trim();
+  if (!brief) return name;
+  return brief.length > 24 ? `${brief.slice(0, 24)}…` : brief;
 }
 
-function renderAbilityEmptyState(body) {
+function renderAbilityEmptyState(body, text) {
   const empty = document.createElement('p');
   empty.className = 'agent-ability-empty';
-  empty.textContent = state.conversationId
-    ? '发送首条消息后确定本会话能力。'
-    : '打开一个会话后显示当前能力。';
+  empty.textContent = text;
   body.append(empty);
 }
 
-export function renderAgentAbilityPopover() {
-  const agentEl = $('#agentAbilityAgent');
-  const statusEl = $('#agentAbilityStatus');
-  const body = $('#agentAbilityBody');
-  if (!agentEl || !statusEl || !body) return;
-  const conversation = agentAbilityConversation();
-  const configured = (state.bootstrap?.agents || []).find(
-    (item) => String(item.id) === String(conversation?.agent_id || $('#agentSelect')?.value || ''),
+// 首轮快照优先；还没发过消息的会话按当前 Agent 的配置预览，不显示空面板。
+// 预览只读：不写 enabled_tool_ids / tool_opt_ins，也不改 Agent。
+function currentAbilityAgent() {
+  const conversation = state.conversations.find(
+    (item) => String(item.id) === String(state.conversationId || ''),
+  ) || null;
+  const agentId = String(
+    conversation?.agent_id || $('#agentSelect')?.value || state.bootstrap?.default_agent_id || '',
   );
+  const agent = (state.bootstrap?.agents || []).find((item) => String(item.id) === agentId) || null;
+  return { conversation, agent };
+}
+
+function appendAbilityCan(body, tools) {
+  const labels = tools.map(abilityToolLabel).filter(Boolean);
+  const line = document.createElement('p');
+  line.className = 'agent-ability-tools';
+  line.textContent = labels.length ? `能做：${labels.join('、')}。` : '本会话没有可用工具。';
+  body.append(line);
+}
+
+function appendAbilitySkills(body, snapshot, agent) {
+  const names = snapshot
+    ? (Array.isArray(snapshot.skills) ? snapshot.skills : [])
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => String(item.name || item.id || ''))
+      .filter(Boolean)
+    : (Array.isArray(agent?.skill_ids) ? agent.skill_ids : [])
+      .map((id) => (state.bootstrap?.skills || []).find((skill) => String(skill.id) === String(id))?.name || '')
+      .filter(Boolean);
+  if (!names.length) return;
+  const line = document.createElement('p');
+  line.className = 'agent-ability-skills';
+  line.textContent = `技能：${names.join('、')}`;
+  body.append(line);
+}
+
+// 工具目录只在打开面板时取一次：它包含本机所有已注册工具（含当前连着的 MCP），
+// 拿它和首轮快照的差集就是「本会话不能做」的部分。取不到就只显示能做的。
+let abilityCatalogPromise = null;
+async function abilityCatalogTools() {
+  if (Array.isArray(state.toolCatalog?.tools) && state.toolCatalog.tools.length) return state.toolCatalog.tools;
+  if (!abilityCatalogPromise) {
+    abilityCatalogPromise = api('/api/tool_catalog', { method: 'GET' })
+      .then((data) => {
+        if (data?.tools) {
+          state.toolCatalog = data;
+          state.toolCatalogAt = Date.now();
+        }
+        return state.toolCatalog?.tools || null;
+      })
+      .catch(() => null)
+      .finally(() => { abilityCatalogPromise = null; });
+  }
+  return abilityCatalogPromise;
+}
+
+let abilityRenderToken = 0;
+
+export async function renderAgentAbilityPopover() {
+  const body = $('#agentAbilityBody');
+  if (!body) return;
+  const token = ++abilityRenderToken;
   const snapshot = state.firstTurnInfo && typeof state.firstTurnInfo === 'object'
     ? state.firstTurnInfo : null;
-  agentEl.textContent = `当前 Agent：${String(snapshot?.agent_name || configured?.name || $('#agentSelect')?.selectedOptions?.[0]?.textContent || '未确定')}`;
+  const { agent } = currentAbilityAgent();
   body.replaceChildren();
-  if (!snapshot) {
-    statusEl.textContent = '当前会话尚未有可读取的能力快照';
-    renderAbilityEmptyState(body);
+  if (!snapshot && !agent) {
+    renderAbilityEmptyState(
+      body,
+      state.conversationId ? '当前 Agent 不可用，去设置里检查工具集。' : '打开一个会话后显示当前能力。',
+    );
     return;
   }
-  const tools = Array.isArray(snapshot.tools) ? snapshot.tools.filter((item) => item && typeof item === 'object') : [];
-  statusEl.textContent = `本会话首轮已固化 · ${tools.length} 个工具 · 只读展示`;
-  const groups = new Map();
-  for (const tool of tools) {
-    const group = abilityGroupForTool(tool);
-    if (!groups.has(group)) groups.set(group, []);
-    groups.get(group).push(tool);
+
+  let enabledTools = [];
+  let needCatalogForList = false;
+  if (snapshot) {
+    enabledTools = (Array.isArray(snapshot.tools) ? snapshot.tools : [])
+      .filter((item) => item && typeof item === 'object');
+    appendAbilityCan(body, enabledTools);
+    appendAbilitySkills(body, snapshot, agent);
+  } else {
+    const scope = Array.isArray(agent.tool_scope) ? agent.tool_scope.map(String).filter(Boolean) : [];
+    const optIns = Array.isArray(agent.tool_opt_ins) ? agent.tool_opt_ins.map(String).filter(Boolean) : [];
+    if (scope.length) {
+      enabledTools = [...new Set([...scope, ...optIns])].map((name) => ({ name }));
+      appendAbilityCan(body, enabledTools);
+      appendAbilitySkills(body, snapshot, agent);
+    } else {
+      // 未限制工具集的 Agent 要先拿到目录才知道「全部」是多少。
+      needCatalogForList = true;
+    }
   }
-  for (const groupName of ABILITY_GROUP_ORDER) {
-    const members = groups.get(groupName);
-    if (!members?.length) continue;
-    const section = document.createElement('section');
-    section.className = 'agent-ability-group';
-    const heading = document.createElement('strong');
-    heading.textContent = `${groupName}（${members.length}）`;
-    section.append(heading);
-    const list = document.createElement('p');
-    list.className = 'agent-ability-tools';
-    list.textContent = members.map(abilityToolLabel).filter(Boolean).join('、');
-    section.append(list);
-    body.append(section);
+
+  const catalogTools = await abilityCatalogTools();
+  if (token !== abilityRenderToken) return;
+  const catalog = Array.isArray(catalogTools) ? catalogTools : [];
+  if (needCatalogForList) {
+    if (!catalog.length) {
+      body.replaceChildren();
+      renderAbilityEmptyState(body, '工具目录读不到，稍后再试。');
+      return;
+    }
+    const optIns = Array.isArray(agent.tool_opt_ins) ? agent.tool_opt_ins.map(String).filter(Boolean) : [];
+    const names = [
+      ...catalog.filter((item) => item && !item.opt_in).map((item) => String(item.name || '')).filter(Boolean),
+      ...optIns,
+    ];
+    enabledTools = [...new Set(names)].map((name) => catalog.find((item) => item.name === name) || { name });
+    appendAbilityCan(body, enabledTools);
+    appendAbilitySkills(body, snapshot, agent);
   }
-  if (!tools.length) {
-    const empty = document.createElement('p');
-    empty.className = 'agent-ability-empty';
-    empty.textContent = '本会话已固化工具集，但没有启用工具。';
-    body.append(empty);
+
+  const enabled = new Set(enabledTools.map((item) => String(item.name || '')).filter(Boolean));
+  const missing = catalog
+    .filter((item) => item && item.name && !enabled.has(String(item.name)))
+    .map(abilityToolLabel)
+    .filter(Boolean);
+  if (missing.length) {
+    const line = document.createElement('p');
+    line.className = 'agent-ability-cannot';
+    line.textContent = `不能做：${missing.join('、')}。`;
+    body.append(line);
   }
-  const skills = Array.isArray(snapshot.skills) ? snapshot.skills.filter((item) => item && typeof item === 'object') : [];
-  const skillSection = document.createElement('section');
-  skillSection.className = 'agent-ability-group';
-  const skillHeading = document.createElement('strong');
-  skillHeading.textContent = `Skill（${skills.length}）`;
-  skillSection.append(skillHeading);
-  const skillList = document.createElement('p');
-  skillList.className = 'agent-ability-tools';
-  skillList.textContent = skills.length
-    ? skills.map((item) => String(item.name || item.id || '')).filter(Boolean).join('、')
-    : '未加载 Skill';
-  skillSection.append(skillList);
-  body.append(skillSection);
+  positionAgentAbilityPopover();
 }
 
 export function positionAgentAbilityPopover() {

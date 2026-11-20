@@ -344,6 +344,17 @@ class FrontendOptInContractTests(unittest.TestCase):
     def test_block_exists_in_form(self) -> None:
         self.assertIn('id="agentToolOptIns"', self.index_html)
         self.assertIn("agent-tool-optins", self.index_html)
+        self.assertIn('<details class="agent-tool-optins" id="agentToolOptIns"', self.index_html,
+                      "单独授权必须是折叠框，默认收起，不能常驻占满工具列表高度")
+        self.assertIn('<summary class="agent-tool-optins-head">', self.settings_js)
+
+    def test_optin_block_lives_inside_tool_scroll_area(self) -> None:
+        """单独授权块必须在工具滚动区内，否则 8 张卡会把工具列表挤成 0 高（2026-11-20 反馈）。"""
+        scope = self.index_html.split('id="agentToolScope"', 1)[1].split('</div>', 1)[0]
+        self.assertIn('id="agentToolOptIns"', scope)
+        self.assertIn("const optIns = $('#agentToolOptIns');", self.settings_js)
+        self.assertIn("if (optIns) list.append(optIns);", self.settings_js,
+                      "重画分组后要把单独授权节点放回滚动区，不能连事件一起清掉")
 
     def test_save_and_echo_payload(self) -> None:
         self.assertIn("tool_opt_ins: [...new Set(state.agentFormToolOptIns || [])]", self.settings_js,

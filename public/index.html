@@ -225,16 +225,26 @@
         <div class="agent-ability-popover" id="agentAbilityPopover" hidden role="dialog"
              aria-labelledby="agentAbilityTitle">
           <div class="agent-ability-head">
-            <div>
-              <strong id="agentAbilityTitle">当前能力</strong>
-              <p id="agentAbilityAgent" class="agent-ability-agent"></p>
-            </div>
+            <strong id="agentAbilityTitle">当前能力</strong>
             <button class="icon-button tiny" id="agentAbilityClose" type="button"
                     title="关闭当前能力" aria-label="关闭当前能力">×</button>
           </div>
-          <p id="agentAbilityStatus" class="agent-ability-status"></p>
           <div id="agentAbilityBody" class="agent-ability-body"></div>
+          <button class="control-button agent-ability-edit" id="agentAbilityEditTools" type="button">编辑工具集</button>
         </div>
+        <!-- 去编辑前的提示：会话工具在首条消息时固化，改完只对新会话生效。 -->
+        <dialog class="agent-ability-hint" id="agentAbilityEditDialog" aria-labelledby="agentAbilityEditTitle">
+          <div class="agent-ability-hint-body">
+            <h3 id="agentAbilityEditTitle">工具改动什么时候生效</h3>
+            <p>工具集保存后，新开的会话会用上新工具。</p>
+            <p>已经发过消息的会话，工具在第一条消息发出时就固定了，在这个对话里改完也不会变。</p>
+            <p class="agent-ability-hint-note">想马上用新工具，先分支对话，分支时选「更换 Agent」。这个会话还没发过消息的话，保存后下一次提问就会用上。</p>
+            <div class="agent-ability-hint-actions">
+              <button class="control-button" type="button" id="agentAbilityEditCancel">取消</button>
+              <button class="primary-button" type="button" id="agentAbilityEditConfirm">确认</button>
+            </div>
+          </div>
+        </dialog>
         <div class="topbar-actions">
           <button class="control-button file-reopen-button" id="openFileTabs" type="button" hidden title="重新打开面板（保留已打开的文件标签）">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8.5L19 7.5V21H6z"></path><path d="M14.5 3v4.5H19"></path></svg>
@@ -3869,9 +3879,6 @@
                 <button type="button" class="primary-button tiny" id="agentToolEditorSave">保存工具集</button>
               </div>
               <p class="hint tool-unknown-hint" id="agentToolUnknownHint" hidden></p>
-              <!-- 单独授权（opt-in）工具：与上面的预设/全选完全独立，只有这里的勾选能让它生效。
-                   条目由 09-settings.js 按工具目录里的 opt_in 标记渲染（目录为空时整块隐藏）。 -->
-              <div class="agent-tool-optins" id="agentToolOptIns" hidden></div>
               <div class="tool-filter-row">
                 <input id="agentToolFilter" class="tool-filter-input" type="search" autocomplete="off"
                        placeholder="搜索工具名或说明（如 vision、PDF、job）"
@@ -3880,7 +3887,12 @@
                         aria-pressed="false"
                         title="只显示当前已勾选的工具（按分类摊开，方便核对这一套到底开了什么）">只看已选 0</button>
               </div>
-              <div class="agent-tool-scope" id="agentToolScope"></div>
+              <div class="agent-tool-scope" id="agentToolScope">
+                <!-- 单独授权（opt-in）工具：与上面的预设/全选完全独立，只有这里的勾选能让它生效。
+                     必须放在滚动区内：8 张卡展开后高度远超工具列表，放在外面会把列表挤成 0 高、
+                     让整块只有它自己可滚。条目由 09-settings.js 按目录的 opt_in 标记渲染。 -->
+                <details class="agent-tool-optins" id="agentToolOptIns" hidden></details>
+              </div>
             </div>
           </div>
         </section>

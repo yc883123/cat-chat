@@ -1718,6 +1718,25 @@ export function bindEvents() {
   // 当前能力只读弹层：内容来自当前会话 first_turn 快照，切换会话不保留旧面板。
   $('#agentAbilityButton')?.addEventListener('click', toggleAgentAbilityPopover);
   $('#agentAbilityClose')?.addEventListener('click', closeAgentAbilityPopover);
+  // 「编辑工具集」先讲清生效时机，确认后直通当前 Agent 的「工具集」页签。
+  $('#agentAbilityEditTools')?.addEventListener('click', () => {
+    closeAgentAbilityPopover();
+    $('#agentAbilityEditDialog')?.showModal();
+  });
+  $('#agentAbilityEditCancel')?.addEventListener('click', () => $('#agentAbilityEditDialog')?.close());
+  $('#agentAbilityEditConfirm')?.addEventListener('click', () => {
+    $('#agentAbilityEditDialog')?.close();
+    const agentId = String($('#agentSelect')?.value || '');
+    const agent = (state.bootstrap?.agents || []).find((item) => String(item.id) === agentId);
+    if (!agent) {
+      $('#settingsDialog').showModal();
+      switchSettingsTab('agent');
+      return;
+    }
+    openAgentCard(agentId);
+    switchAgentTab('tools');
+    $('#agentToolFilter')?.focus();
+  });
   $('#agentAbilityPopover')?.addEventListener('click', (event) => event.stopPropagation());
   window.addEventListener('resize', positionAgentAbilityPopover);
   window.addEventListener('scroll', positionAgentAbilityPopover, true);

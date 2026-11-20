@@ -2067,15 +2067,22 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .agent-ability-button:hover { border-color: var(--line-strong); background: var(--surface-2); }
 .agent-ability-popover { position: fixed; z-index: 1400; width: min(430px, calc(100vw - 24px)); max-height: min(620px, calc(100vh - 24px)); overflow: auto; padding: 14px; border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); color: var(--text); box-shadow: var(--shadow-3); }
 .agent-ability-popover[hidden] { display: none; }
-.agent-ability-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.agent-ability-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .agent-ability-head strong { font-size: 14px; }
-.agent-ability-agent, .agent-ability-status { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
-.agent-ability-status { padding: 8px 10px; border-radius: var(--r-md); background: var(--surface-inset); }
-.agent-ability-body { display: grid; gap: 8px; margin-top: 10px; }
-.agent-ability-group { padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
-.agent-ability-group strong { font-size: 12px; }
-.agent-ability-tools, .agent-ability-empty { margin: 5px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
-.agent-ability-empty { padding: 10px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); }
+.agent-ability-body { margin-top: 10px; }
+/* 一条流水句：只列能力，不分组、不显示工具名和数量。 */
+.agent-ability-tools { margin: 0; color: var(--text); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.agent-ability-cannot { margin: 8px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.65; overflow-wrap: anywhere; }
+.agent-ability-skills { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-ability-edit { width: 100%; justify-content: center; margin-top: 12px; }
+.agent-ability-hint { width: min(92vw, 460px); padding: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); color: var(--text); }
+.agent-ability-hint::backdrop { background: rgba(10, 10, 24, .55); }
+.agent-ability-hint-body { padding: 18px; }
+.agent-ability-hint-body h3 { margin: 0 0 10px; font-size: 16px; }
+.agent-ability-hint-body p { margin: 0 0 8px; color: var(--text); font-size: 13px; line-height: 1.65; }
+.agent-ability-hint-body .agent-ability-hint-note { color: var(--muted); }
+.agent-ability-hint-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.agent-ability-empty { margin: 0; padding: 10px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); color: var(--muted); font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
 .agent-form { display: flex; flex-direction: column; flex: 1; min-height: 0; max-height: inherit; }
 .agent-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
 .agent-form input[type="text"], .agent-form textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); }
@@ -2765,14 +2772,22 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 /* ── 工具分类改版（6 组 · 风险徽标 · MCP 二级分组 · 搜索框）──
    分类收敛为「作用对象 + 风险」单一维度；说明与徽标由后端 TOOL_GROUP_INFO 下发。 */
 /* ── 单独授权（opt-in）区块 ──
-   只有工具目录里 opt_in=true 的项会出现在这里。它与上面的预设/全选完全独立：
-   因此视觉上也要分开——独立描边 + 提示条，避免被当成普通分类的一部分。 */
-.agent-tool-optins { padding: 10px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+   只有工具目录里 opt_in=true 的项会出现在这里。它与预设/全选完全独立，
+   外观和下面的工具分组一致：默认收起成一行，展开后是白底列表。 */
+.agent-tool-optins { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
 .agent-tool-optins[hidden] { display: none; }
-.agent-tool-optins-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
-.agent-tool-optins-head b { font-size: 12.5px; color: var(--text); }
-.agent-tool-optins-head small { font-size: 11px; line-height: 1.5; color: var(--muted); }
-.agent-tool-optins-list { display: grid; gap: 7px; }
+.agent-tool-optins-head {
+  display: grid; grid-template-columns: auto auto max-content minmax(0, 1fr) auto;
+  align-items: center; gap: 8px; padding: 9px 10px; cursor: pointer; user-select: none; list-style: none;
+}
+.agent-tool-optins-head::-webkit-details-marker { display: none; }
+/* 对齐下面工具分组那行：分组有 16px 全选框，这里用同宽占位补上。 */
+.agent-tool-optins-spacer { width: 16px; height: 16px; }
+.agent-tool-optins-head:hover,
+.agent-tool-optins[open] .agent-tool-optins-head { background: var(--surface-2); }
+.agent-tool-optins-head .group-title { display: inline-flex; align-items: center; gap: 6px; }
+.agent-tool-optins[open] .group-caret { transform: rotate(90deg); }
+.agent-tool-optins-list { display: grid; gap: 7px; padding: 8px 10px 10px; border-top: 1px solid var(--line); background: var(--surface); }
 .agent-tool-optin-card {
   display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px;
   padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius);
@@ -7798,6 +7813,10 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
   #studioView .wb-header-main .labeler-view-tabs { display: flex; flex-basis: 100%; margin: 0; }
   #studioView .wb-header-actions .comfyui-statusbar { justify-content: flex-end; }
   #studioView .wb-header-actions .comfyui-status-text { max-width: 72px; }
+  /* 造梦机窄档：分档条不再困在标题列里。状态栏绝对定位贴右上，位置和原布局一致，
+     宽度不再从分档条身上扣；分档条因此能独占整行，320 宽四档也全部露出，不用横向滚。 */
+  #studioView #studioPageComfyui.wb-resource-header { position: relative; display: block; }
+  #studioView #studioPageComfyui > .wb-header-actions { position: absolute; top: 8px; right: 12px; }
   #studioView .wb-header-actions :is(.wb-book-more, .wb-media-menu > summary) { min-width: 40px; min-height: 40px; }
   .resource-monitor-dialog { position: fixed; inset: auto 0 0; margin: 0; width: 100%; max-width: 100%; max-height: 85dvh; border-radius: var(--r-xl) var(--r-xl) 0 0; padding-bottom: env(safe-area-inset-bottom); }
   .resource-monitor-dialog .icon-button { min-width: 40px; min-height: 40px; }

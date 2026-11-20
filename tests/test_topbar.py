@@ -287,11 +287,15 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn('id="agentHelpPopover"', header)
         self.assertNotEqual(header.index('id="agentAbilityPopover"'), header.index('id="agentHelpPopover"'))
 
-    def test_agent_ability_is_read_only_snapshot_projection(self) -> None:
+    def test_agent_ability_projects_snapshot_or_default_agent_preview(self) -> None:
+        """有首轮快照用快照；还没发消息的会话按当前 Agent 配置默认显示，不再给空态。"""
         models = (ROOT / "public/js/07-models-agents.js").read_text(encoding="utf-8")
         self.assertIn("state.firstTurnInfo", models)
-        self.assertIn("发送首条消息后确定本会话能力", models)
+        self.assertIn("currentAbilityAgent", models)
+        self.assertIn("agent.tool_scope", models)
         self.assertIn("tool_opt_ins", models)
+        self.assertIn("工具目录读不到", models)
+        self.assertNotIn("发送首条消息后确定本会话能力", models)
         self.assertIn("mcp__", models)
         self.assertIn("export function positionAgentAbilityPopover", models)
         self.assertIn("export function toggleAgentAbilityPopover", models)
@@ -301,6 +305,29 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn("$('#agentAbilityButton')?.addEventListener('click'", bind)
         self.assertIn("window.addEventListener('resize', positionAgentAbilityPopover)", bind)
         self.assertIn("document.addEventListener('click', closeAgentAbilityPopover)", bind)
+
+    def test_agent_ability_lists_capabilities_in_plain_chinese(self) -> None:
+        """弹窗只讲能做什么、不能做什么：不列调用名、不分组、不显示数量或快照状态。"""
+        index = self._index()
+        self.assertNotIn('id="agentAbilityStatus"', index)
+        self.assertNotIn('id="agentAbilityAgent"', index)
+        self.assertIn('id="agentAbilityEditTools"', index)
+        self.assertIn('id="agentAbilityEditDialog"', index)
+        self.assertIn("工具在第一条消息发出时就固定了", index)
+        self.assertIn("先分支对话，分支时选「更换 Agent」", index)
+        models = (ROOT / "public/js/07-models-agents.js").read_text(encoding="utf-8")
+        self.assertIn("ABILITY_TOOL_LABELS", models)
+        self.assertIn("['read_file', '读文件']", models)
+        self.assertIn("['dream_submit', '提交造梦机生成']", models)
+        self.assertIn("能做：", models)
+        self.assertIn("不能做：", models)
+        self.assertNotIn("ABILITY_GROUP_ORDER", models)
+        self.assertNotIn("本会话首轮已固化", models)
+        bind = self._bind()
+        self.assertIn("$('#agentAbilityEditTools')?.addEventListener('click'", bind)
+        self.assertIn("$('#agentAbilityEditConfirm')?.addEventListener('click'", bind)
+        self.assertIn("openAgentCard(agentId)", bind)
+        self.assertIn("switchAgentTab('tools')", bind)
 
     def test_agent_ability_mobile_visibility_is_scoped(self) -> None:
         css = self._css()

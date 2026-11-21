@@ -22,7 +22,7 @@ class GoalTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="naiba-goal-")
         self.addCleanup(self.tmp.cleanup)
-        root = Path(self.tmp.name)
+        root = Path(self.tmp.name).resolve()  # CI 临时目录可能带 8.3 短名，与应用内 resolve 后的长名保持一致
         self.workspace = root / "work"
         self.workspace.mkdir()
         self.paths = PathContext.local(root, root / "config.json")

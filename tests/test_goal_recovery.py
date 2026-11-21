@@ -879,7 +879,9 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
         self.repo = Path(__file__).resolve().parents[1]
         self.tmp = tempfile.TemporaryDirectory(prefix="naiba-goal-process-")
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        # CI runner 的 TEMP 是 8.3 短名（RUNNER~1）：夹具一律 resolve 成长名，
+        # 与子进程应用内 resolve() 后写进回执/检查点的路径同一形态。
+        self.root = Path(self.tmp.name).resolve()
         self.requests = []
         self.http_errors = []
         self.http_lock = threading.Lock()

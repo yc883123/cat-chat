@@ -17,6 +17,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -414,7 +415,7 @@ class ShowMediaToolMigrationTests(unittest.TestCase):
         return json.loads(raw or "[]")
 
     def test_version_and_id_constant(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 32)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 34)
         with closing(sqlite3.connect(self.root / "chat.db")) as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             thread_columns = {row[1] for row in db.execute("PRAGMA table_info(super_threads)")}
@@ -568,6 +569,86 @@ class DetachedJobMigrationTests(unittest.TestCase):
         row = storage.get_background_task(str(detached["id"]))
         self.assertTrue(row["detached"])
         self.assertEqual(row["origin_run_id"], str(blocking["id"]))
+
+
+class GoalMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "chat.db"
+        with patch.object(storage_module, "CURRENT_SCHEMA_VERSION", 32):
+            self.storage = ChatStorage(self.path)
+        self.assertEqual(self.storage.get_user_version(), 32)
+        self.assertEqual(self._goal_schema(), [])
+        self.conversation = self.storage.create_conversation(title="旧会话")
+        self.message = self.storage.add_message(self.conversation["id"], "user", "保留旧消息")
+        # Seed the old Run before v33 exists, without its new admission query.
+        with patch.object(storage_module, "require_no_goal"):
+            self.old_run = self.storage.create_run(self.conversation["id"], "旧任务",
+                {"id": "master", "name": "Agent", "system_prompt": "", "skill_ids": []}, {})
+        self.storage.update_background_task(self.old_run["id"], status="completed", finished=True)
+        self.previous = self._old_rows()
+
+    def _goal_schema(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            return db.execute("SELECT type,name,sql FROM sqlite_master WHERE name LIKE 'chat_goal%' ORDER BY name").fetchall()
+
+    def _old_rows(self):
+        with closing(sqlite3.connect(self.path)) as db:
+            return [db.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+                    for table in ("conversations", "messages", "background_tasks")]
+
+    def _assert_upgraded(self):
+        self.assertEqual(self.storage.get_user_version(), 34)
+        names = {row[1] for row in self._goal_schema()}
+        self.assertEqual(names, {"chat_goals", "chat_goal_rounds", "chat_goal_actions",
+                                 "chat_goals_one_active", "chat_goals_queue", "chat_goal_budget_receipts",
+                                 "chat_goals_wait_binding"})
+        self.assertEqual(self._old_rows(), self.previous)
+        self.assertTrue(self.storage.check_integrity()["ok"])
+
+    def test_v32_upgrade_creates_goal_schema_without_changing_history(self):
+        self.storage.apply_pending_migrations()
+        self._assert_upgraded()
+
+    def test_v33_repeated_migration_keeps_goal_rounds_and_receipts(self):
+        from naiba.storage.goals import insert_goal, migrate_goals
+
+        self.storage.apply_pending_migrations()
+        with closing(sqlite3.connect(self.path)) as db:
+            insert_goal(db, self.conversation["id"], self.message["id"], self.old_run["id"],
+                {"id": "goal", "request_id": "request", "request_hash": "hash", "message": "目标",
+                 "duration_ms": 10000, "criteria": []}, 1000)
+            db.execute("INSERT INTO chat_goal_actions VALUES (?,?,?,?,?)",
+                       ("goal", "action", self.old_run["id"], "pending", "{}"))
+            db.commit()
+        with closing(sqlite3.connect(self.path)) as db:
+            before = [db.execute(f"SELECT * FROM {table}").fetchall()
+                      for table in ("chat_goals", "chat_goal_rounds", "chat_goal_actions")]
+            migrate_goals(db)
+            migrate_goals(db)
+        self.storage.apply_pending_migrations()
+        with closing(sqlite3.connect(self.path)) as db:
+            after = [db.execute(f"SELECT * FROM {table}").fetchall()
+                     for table in ("chat_goals", "chat_goal_rounds", "chat_goal_actions")]
+        self.assertEqual(after, before)
+        self._assert_upgraded()
+
+    def test_v33_ddl_failure_rolls_back_schema_and_version_then_retries(self):
+        migrate = storage_module.MIGRATIONS[33]
+
+        def fail_after_ddl(db):
+            migrate(db)
+            raise RuntimeError("goal migration interrupted")
+
+        with patch.dict(storage_module.MIGRATIONS, {33: fail_after_ddl}):
+            with self.assertRaisesRegex(RuntimeError, "goal migration interrupted"):
+                self.storage.apply_pending_migrations()
+        self.assertEqual(self.storage.get_user_version(), 32)
+        self.assertEqual(self._goal_schema(), [])
+        self.assertEqual(self._old_rows(), self.previous)
+        self.storage.apply_pending_migrations()
+        self._assert_upgraded()
 
 
 if __name__ == "__main__":

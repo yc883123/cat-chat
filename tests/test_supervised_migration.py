@@ -34,7 +34,7 @@ class SupervisedMigrationTests(unittest.TestCase):
         first = ChatStorage(self.path)
         second = ChatStorage(self.path)
         for storage in (first, second):
-            self.assertEqual(storage.get_user_version(), 32)
+            self.assertEqual(storage.get_user_version(), storage_module.CURRENT_SCHEMA_VERSION)
             messages = storage.get_conversation(self.cid)["messages"]
             self.assertEqual(messages[0]["content"], "原有人工消息")
             self.assertNotIn("supervised_source", messages[0]["metadata"])
@@ -56,7 +56,7 @@ class SupervisedMigrationTests(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='super_supervisions'").fetchone())
             self.assertEqual(db.execute("SELECT content FROM messages WHERE conversation_id=?", (self.cid,)).fetchone()[0], "原有人工消息")
         self.storage.apply_pending_migrations()
-        self.assertEqual(self.storage.get_user_version(), 32)
+        self.assertEqual(self.storage.get_user_version(), storage_module.CURRENT_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

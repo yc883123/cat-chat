@@ -9,7 +9,7 @@ _persist_failed_message（事件重建与取消幂等持久化）/recover_interr
 from __future__ import annotations
 
 from naiba.core.contracts import (
-    MetadataKeys, RUN_ORIGIN_DEPENDENCY, RUN_ORIGIN_JOB_WAIT, RUN_ORIGIN_KEY,
+    GOAL_RUN_KEY, MetadataKeys, RUN_ORIGIN_DEPENDENCY, RUN_ORIGIN_GOAL, RUN_ORIGIN_JOB_WAIT, RUN_ORIGIN_KEY,
     RUN_ORIGIN_SUPERVISED, RUN_ORIGIN_USER, RunContext, SUPER_AGENT_BASELINE_KEY,
 )
 from naiba.core.messages import (
@@ -314,6 +314,7 @@ class ConversationRunMixin:
         allowed_tools_limit: list[str] | None = None,
         job_wait_dispatch: dict[str, Any] | None = None,
         workspace_dir_override: str = "",
+        goal_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         conversation_id = str(body.get("conversation_id") or "")
         message = str(body.get("message") or "").strip()
@@ -349,6 +350,13 @@ class ConversationRunMixin:
             raise ValueError(f"附件文件已丢失（可能已被缓存清理）：{shown}。请重新上传后再发送。")
 
         with self._submit_lock:
+            goals = getattr(self.app, "goals", None)
+            if goals is not None:
+                from naiba.storage.goals import GOAL_TERMINAL, GoalConflict
+
+                current_goal = goals.store.latest(conversation_id)
+                if current_goal is not None and current_goal["status"] not in GOAL_TERMINAL:
+                    raise GoalConflict("这条对话有未结束的 GOAL，请先处理目标卡")
             if supervised_context is None and dependency_context is None:
                 if not internal_resume:
                     # 普通人工输入：先推进人工接管代次（监督 + 普通等待）。
@@ -410,6 +418,10 @@ class ConversationRunMixin:
                     chat_supports_images = frozen_capability
                 elif int(frozen_capability if frozen_capability is not None else -1) >= 0:
                     chat_supports_images = bool(int(frozen_capability))
+                elif goal_spec is not None:
+                    # Goal creation must not send an unbudgeted capability probe.
+                    chat_supports_images = bool(chat_profile.get("supports_images", False))
+                    self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
                 elif callable(resolver):
                     chat_supports_images = bool(resolver(chat_profile, probe_if_unknown=True))
                     if not task_model_override:
@@ -518,9 +530,13 @@ class ConversationRunMixin:
                     RUN_ORIGIN_JOB_WAIT if job_wait_dispatch is not None
                     else RUN_ORIGIN_SUPERVISED if supervised_context is not None
                     else RUN_ORIGIN_DEPENDENCY if dependency_context is not None
+                    else RUN_ORIGIN_GOAL if goal_spec is not None
                     else RUN_ORIGIN_USER
                 ),
             }
+            if goal_spec is not None:
+                snapshot[GOAL_RUN_KEY] = {"id": goal_spec["id"], "baseline": goals.baseline(conversation_id),
+                                          "job_ids": list(goal_spec.get("job_ids") or [])}
             if job_wait_dispatch is not None:
                 from naiba.subagent import job_wait_execution_snapshot
 
@@ -578,13 +594,15 @@ class ConversationRunMixin:
                     dependency_context=dependency_context,
                     submission_guard=submission_guard if configuration_fingerprint else None,
                     job_wait_dispatch=job_wait_dispatch,
+                    **({"goal_spec": goal_spec} if goal_spec is not None else {}),
                 )
             except RuntimeError as exc:
                 active_error = self._active_error(exc)
                 if active_error:
                     raise active_error from exc
                 raise
-            self._start(run, self._run_chat)
+            if goal_spec is None:
+                self._start(run, self._run_chat)
             return run
 
     def _notify_job_wait_finished(self, run_id: str, message_id: str, status: str) -> None:
@@ -810,6 +828,8 @@ class ConversationRunMixin:
         self._register_sink(run_id, sink)
         skills: list[dict[str, str]] = []
         run_context: RunContext | None = None
+        goal_cycle = None
+        goal_run = snapshot.get(GOAL_RUN_KEY)
         search_sources: list[dict[str, str]] = []
         vision_trace: dict[str, Any] = {"requests": 0, "cache_hit": False}
         chat_diagnostics: dict[str, Any] = {}
@@ -856,6 +876,9 @@ class ConversationRunMixin:
         try:
             if cancel_event.is_set():
                 raise TaskCancelled("任务已取消")
+            if goal_run:
+                goal_cycle = self.app.goals.cycle(goal_run["id"], run_id, snapshot)
+                run["_goal_cycle"] = goal_cycle
             self.app.storage.update_background_task(
                 run_id, status="running", started=True, detail={"message": "任务开始执行"}
             )
@@ -918,9 +941,11 @@ class ConversationRunMixin:
             # 本轮模型视图。必须在 vision 清洗**之前**：整理后的重建走同一条 build 链路，
             # 图片编码 / 视觉处理对最终视图只跑一次；估算只读不写，off / 未触线的会话
             # 请求字节与没有这个功能时完全一致（前缀缓存零影响）。
+            if goal_cycle is not None and goal_cycle.resume_view:
+                history = goal_cycle.resume_view[1:]
             compaction_info: dict[str, Any] = {}
             try:
-                compaction_info = self._maybe_compact_context(
+                compaction_info = {} if goal_cycle is not None else self._maybe_compact_context(
                     run=run, snapshot=snapshot, conversation_id=conversation_id,
                     conv_kind=conv_kind, frozen_conversation=frozen_conversation,
                     history=history, profile=profile, effective=effective,
@@ -998,6 +1023,9 @@ class ConversationRunMixin:
             options["reasoning_enabled"] = reasoning_effort != "off"
             # 让模型 HTTP 调用可被取消信号中断，避免取消后运行线程卡在 API 请求上。
             options["cancel_event"] = cancel_event
+            if goal_cycle is not None:
+                options["before_request_send"] = goal_cycle.before_send
+                options["observe_network_sends"] = True
             allowed_tools = [str(item) for item in snapshot.get("allowed_tools") or []]
             # 视觉工具对文本/多模态模型暴露同一工具集（vision_analyze 单入口），
             # 模型能力差异由会话化 def 换形态（run_context.tool_defs）处理。
@@ -1023,6 +1051,10 @@ class ConversationRunMixin:
             agent = snapshot.get("agent") or {}
             # 系统提示词只有一个来源：Agent（会话级系统提示词已移除，见维护说明 §四）。
             prompt = str(agent.get("system_prompt") or "").strip()
+            if goal_cycle is not None:
+                from naiba.run.goals import GOAL_SYSTEM
+
+                prompt = (prompt + "\n\n" + GOAL_SYSTEM).strip()
             if conv_kind == "aux":
                 # 辅助对话说明（§3.2）：只读、与主对话隔离，紧跟 Agent 提示词之后常驻。
                 prompt = (
@@ -1199,7 +1231,16 @@ class ConversationRunMixin:
                     )
                 ),
             }
-            if conv_kind != "aux":
+            if goal_cycle is not None:
+                run_context["goal_cycle"] = goal_cycle
+                goal_cycle.cancel_event = cancel_event
+                goal_cycle.event = event
+                run_context["confirmation_ui"] = False
+                run_context["pull_interjections"] = None
+                run_context["mark_interjections_consumed"] = None
+                run_context["execution_guard"] = goal_cycle.guard
+                run_context["compact_context"] = goal_cycle.compact
+            if conv_kind != "aux" and goal_cycle is None:
                 run_context["trace_checkpoint"] = lambda trace, view: self.app.storage.save_context_checkpoint(run_id, trace, view)
                 run_context["compact_context"] = lambda messages, trace_start, limit, budget, used: self._compact_agent_context(
                     run=run, snapshot=snapshot, conversation_id=conversation_id,
@@ -1256,6 +1297,8 @@ class ConversationRunMixin:
                 cancel_event,
                 tool_registry=self.app.tool_registry,
                 run_context=run_context,
+                **({"system_prompt_override": str(goal_cycle.resume_view[0]["content"])}
+                   if goal_cycle is not None and goal_cycle.resume_view else {}),
             )
             chat_diagnostics = dict(getattr(self.app.models, "last_diagnostics", {}) or {})
             # web_search 引用收集改为收尾一次性计算（原始 runs；log_tool_run 死管线已删除）。

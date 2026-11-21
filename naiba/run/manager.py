@@ -318,7 +318,12 @@ class ConversationRunManager(ConversationRunMixin):
             return []
         return self.bus.wait_for_events(run_id, after, timeout)
 
-    def cancel(self, run_id: str) -> dict[str, Any] | None:
+    def cancel(self, run_id: str, *, goal_control: bool = False) -> dict[str, Any] | None:
+        if not goal_control:
+            run = self.get(run_id)
+            goals = getattr(self.app, "goals", None)
+            if run and goals is not None and goals.pause_run(run_id, str(run.get("conversation_id") or "")):
+                return self.get(run_id)
         with self._submit_lock:
             run = self.get(run_id)
             if not run:

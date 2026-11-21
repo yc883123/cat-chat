@@ -8,7 +8,8 @@ import { selectedProvider } from "./07-models-agents.js";
 import { renderPendingFiles } from "./10-upload.js";
 // 输入框自增高（§九.128）：placeholder 与输入区宽度都在 updateContextComposerLock 里变，
 // 必须在那里同步重算一次高度（13-skill-refs 只依赖 01-core/02-markdown，不引入新的成环面）。
-import { resizeTextarea } from "./13-skill-refs.js";
+import { resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
+import { goalBlocksChat, goalCanPause, goalDraftEnabled, goalIsActive } from "./31-goals.js";
 export function fileUrl(source) {
   const value = String(source || '');
   if (/^https?:\/\//i.test(value) && !/^https?:\/\/(?:127\.0\.0\.1|localhost):8188\//i.test(value)) return value;
@@ -1382,25 +1383,38 @@ export function resetContextWarningResume() {
 export function updateContextComposerLock(busy = false) {
   const editing = Boolean(state.editingMessageId);
   const atCeiling = Boolean(state.contextAtCeiling) && !editing;
+  const goalLocked = goalBlocksChat();
+  const goalDraft = goalDraftEnabled();
+  $('#messages')?.classList.toggle('conversation-goal-locked', goalLocked);
   const input = $('#messageInput');
   // 输入区移动到历史消息后继续接受输入；编辑重发会先截断历史，上下文占用随后重算。
-  // 只有普通新消息在上下文已满时锁住输入，disabled/placeholder 仍由这里统一维护。
   if (input) {
-    input.disabled = atCeiling;
+    input.disabled = atCeiling || goalLocked;
     // 编辑态文案按平台切（第 1 项）：粗指针设备上 Shift / Esc 都不存在、裸回车也已改判为换行，
     // 所以那里只能承诺「点右侧按钮」——不许给用户看做不到的提示（§六 同族要求）。
-    input.placeholder = editing
-      ? (isCoarsePointer()
-        ? '编辑消息，点右侧按钮重新发送'
-        : '编辑消息，Enter 重新发送，Shift+Enter 换行，Esc 取消')
-      : (atCeiling
-        ? '上下文已满，请新建对话后继续'
-        : (busy
-          // 运行中同样是「Enter 干什么」的平台差异：桌面 Enter 入队、手机 Enter 换行
-          // （第 1 项把手机裸回车改判为换行）。承诺做不到的事就是假提示。
-          ? (isCoarsePointer() ? '回复进行中…（输入后点插话键加入队列）' : '回复进行中…（输入后 Enter 加入插话队列）')
-          : '输入消息'));
+    input.placeholder = goalLocked
+      ? (goalIsActive() ? '目标未结束，暂不能发送消息' : '正在确认目标状态…')
+      : editing
+        ? (isCoarsePointer()
+          ? '编辑消息，点右侧按钮重新发送'
+          : '编辑消息，Enter 重新发送，Shift+Enter 换行，Esc 取消')
+        : (atCeiling
+          ? '上下文已满，请新建对话后继续'
+          : (busy
+            // 运行中同样是「Enter 干什么」的平台差异：桌面 Enter 入队、手机 Enter 换行
+            ? (isCoarsePointer() ? '回复进行中…（输入后点插话键加入队列）' : '回复进行中…（输入后 Enter 加入插话队列）')
+            : (goalDraft ? '写下目标…' : '输入消息')));
   }
+  const attachButton = $('#attachButton');
+  if (attachButton) attachButton.disabled = goalLocked;
+  const goalChip = $('#goalDraftChip');
+  if (goalChip) goalChip.hidden = !goalDraft || goalIsActive();
+  const planButton = $('#goalPlanButton');
+  if (planButton) planButton.hidden = !(goalDraft && !goalIsActive()
+    && state.pendingFiles.some(file => file.path && !file.folder));
+  $('#composerForm')?.classList.toggle('is-goal-draft', goalDraft && !goalIsActive());
+  const exitGoal = $('#exitGoalDraft');
+  if (exitGoal) exitGoal.disabled = goalLocked;
   // 发送按钮的可用性由 updateSendButtonState 单点维护（含"运行中即停止键"语义）。
   updateSendButtonState();
   // 收尾重算输入框高度（§九.128）：上面刚改了 placeholder，updateSendButtonState 又经
@@ -1426,7 +1440,13 @@ export function updateSendButtonState() {
   const cancelRequested = Boolean(state.cancelRequested);
   let disabled = false;
   let title = '发送';
-  if (busy) {
+  const goalLocked = goalBlocksChat();
+  const pauseGoal = goalCanPause();
+  const goalDraft = goalDraftEnabled();
+  if (goalLocked) {
+    disabled = !pauseGoal;
+    title = pauseGoal ? '暂停目标' : (goalIsActive() ? '目标未结束' : '正在确认目标状态');
+  } else if (busy) {
     disabled = cancelRequested;
     title = cancelRequested ? '正在停止' : '停止当前任务';
   } else if (state.contextAtCeiling && !state.editingMessageId) {
@@ -1437,19 +1457,33 @@ export function updateSendButtonState() {
     const uploading = state.pendingFiles.find((file) => file.uploading);
     const hasText = Boolean(String($('#messageInput')?.value || '').trim());
     const hasAttachment = state.pendingFiles.some((file) => file.path);
-    title = editing ? '重新发送（编辑中）' : '发送';
+    title = editing ? '重新发送（编辑中）' : (goalDraft ? '启动目标' : '发送');
     if (uploading) {
       disabled = true;
       title = `请等待「${uploading.name}」上传完成`;
+    } else if (goalDraft && !stripSkillReferences($('#messageInput')?.value || '')) {
+      disabled = true;
+      title = '写下目标后再发送';
     } else if (!hasText && !hasAttachment) {
       disabled = true;
       title = editing ? '编辑消息或添加文件后重新发送' : '输入消息或添加文件后发送';
     }
   }
+  const stop = goalLocked ? pauseGoal || goalIsActive() : busy;
+  const icon = !goalLocked && cancelRequested ? 'wait' : (stop ? 'stop' : 'send');
+  if (sendBtn.dataset.actionIcon !== icon) {
+    sendBtn.dataset.actionIcon = icon;
+    sendBtn.innerHTML = icon === 'wait'
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><circle cx="12" cy="12" r="3"></circle></svg>'
+      : (stop
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>');
+  }
+  sendBtn.classList.toggle('is-stop', stop);
   sendBtn.disabled = disabled;
   sendBtn.title = title;
   sendBtn.setAttribute('aria-label', title);
-  updateInterjectButtonState(busy);
+  updateInterjectButtonState(busy && !goalLocked);
 }
 
 // 「插话」按钮（回复进行中才出现）的可用性：有文字或附件才可点——空点没有意义。

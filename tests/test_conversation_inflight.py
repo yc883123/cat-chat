@@ -11,6 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for frontend execution")
 class ConversationInflightTests(unittest.TestCase):
+    def test_goal_frontend_state_and_request_interleavings(self):
+        result = subprocess.run(
+            [shutil.which("node"), str(ROOT / "tests" / "goals_frontend.cjs")],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("goal frontend:", result.stdout)
+        self.assertIn("cases passed", result.stdout)
+
     def test_navigation_model_and_run_interleavings(self):
         result = subprocess.run(
             [shutil.which("node"), str(ROOT / "verify" / "conversation_navigation_inflight_test.cjs")],

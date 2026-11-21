@@ -21,6 +21,7 @@ import { updateContextComposerLock } from "./03-media.js";
 import { attachmentChips, folderChips, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { hideSkillPopup, renderInputMirror, resizeTextarea } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
+import { guardGoalChat } from "./31-goals.js";
 
 let editingInterjectionId = '';   // 正在就地编辑的插话（重渲染时必须保住输入框，见 renderRunGuidance）
 let interjectionSubmitting = false;   // 入队请求的互斥标志（连点发送按钮只发一条）
@@ -288,6 +289,7 @@ function interjectDirectSendEnabled() {
  * 请求被拒时把草稿与附件原样还给用户，不让一次网络抖动吞掉刚打的字。
  */
 export async function sendRunInterjection(textOverride = '') {
+  if (guardGoalChat()) return null;
   const input = $('#messageInput');
   const inputText = String(input?.value || '').trim();
   const buttonText = String(textOverride || '').trim();
@@ -334,6 +336,7 @@ export async function sendRunInterjection(textOverride = '') {
         return null;
       }
     }
+    if (guardGoalChat() || state.conversationId !== conversationId) return null;
     // 先清空输入区再发请求（与 sendChatMessage 同序）：连点不会把同一条内容排两次。
     state.pendingFiles = [];
     renderPendingFiles();
@@ -396,6 +399,7 @@ export async function sendRunInterjection(textOverride = '') {
  * 这是「run 结束后残留插话」的唯一可用出口（引导已不可用，见 syncGuideAvailability）。
  */
 export async function reuseInterjection(messageId) {
+  if (guardGoalChat()) return false;
   const id = String(messageId || '');
   const row = interjectionRowFor(id);
   if (!row) return false;
@@ -435,6 +439,7 @@ function rowRunId(row, fallback = '') {
 
 /** 引导一条插话：agent 下一步即取走（后端同时会撤掉该 Run 上待确认的工具卡）。 */
 export async function guideInterjection(messageId) {
+  if (guardGoalChat()) return false;
   const id = String(messageId || '');
   if (!id || !state.conversationId) return false;
   const row = interjectionRowFor(id);
@@ -461,6 +466,7 @@ export async function guideInterjection(messageId) {
 
 /** 依次引导全部「待引导」项（队列顺序 = 落库顺序）。 */
 export async function guideAllInterjections() {
+  if (guardGoalChat()) return 0;
   const container = $('#runGuidanceList');
   const ids = [...(container?.querySelectorAll('.run-guidance-card[data-interjection-state="pending"]') || [])]
     .map((row) => row.dataset.messageId)
@@ -504,6 +510,7 @@ function markInterjectionGuided(messageId) {
 }
 
 export async function deleteInterjection(messageId) {
+  if (guardGoalChat()) return false;
   const id = String(messageId || '');
   if (!id || !state.conversationId) return false;
   const row = interjectionRowFor(id);
@@ -530,6 +537,7 @@ export async function deleteInterjection(messageId) {
 
 /** 就地展开编辑框（不搬走底部输入区，也不进消息流）。 */
 function startEditInterjection(row) {
+  if (guardGoalChat()) return;
   if (!row || row.querySelector('.run-guidance-input')) return;
   const messageId = row.dataset.messageId || '';
   if (!messageId) return;
@@ -590,6 +598,7 @@ function startEditInterjection(row) {
  * 保存成功后用返回的真消息重建这一行，避免前端自己拼出一份与库里不一致的显示。
  */
 async function commitInterjectionEdit(messageId, next) {
+  if (next !== null && guardGoalChat()) return;
   const id = String(messageId || '');
   const row = interjectionRowFor(id);
   if (!row) return;

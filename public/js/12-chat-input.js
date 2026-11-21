@@ -15,6 +15,7 @@ import { insertTextAtCursor, renderInputMirror, resizeTextarea, updateSkillPopup
 import { normalizeChoiceGroups } from "./17-choice-groups.js";
 import { freezeQueuedInterjections, handleInterjectionConsumedEvent, handleUserGuidanceEvent, queuedInterjectionStats } from "./18-interjections.js";
 import { SKILL_SCRIPT_RULES } from "./skill-script-rules.js";
+import { changeGoal, goalBlocksChat } from "./31-goals.js";
 export async function startSkillInstall() {
   if (state.chatRunId || state.abortController) {
     toast('请先等待当前任务结束或停止后再安装 Skill');
@@ -519,6 +520,7 @@ export function markdownFilePreview(text) {
 }
 
 export async function handlePasteImage(event) {
+  if (goalBlocksChat()) return;
   const items = (event.clipboardData && event.clipboardData.items) || [];
   const imageFiles = [];
   for (const item of items) {
@@ -1410,6 +1412,7 @@ function choiceAnswerBlock(entry) {
 }
 
 function syncChoicePanelLock(busy = Boolean(state.abortController)) {
+  busy ||= goalBlocksChat();
   const host = $('#choiceButtons');
   if (!host) return;
   const entry = choiceSelections.get(activeChoiceKey);
@@ -1850,19 +1853,12 @@ export function setBusy(busy) {
   state.chatBusy = busy;
   const mc = $('#messages');
   if (mc) mc.classList.toggle('conversation-running', busy);
-  const sendBtn = $('#sendButton');
-  sendBtn.classList.toggle('is-stop', busy);
-  sendBtn.innerHTML = state.cancelRequested
-    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><circle cx="12" cy="12" r="3"></circle></svg>'
-    : (busy
-      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>'
-      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>');
   // 选择面板：运行中禁用答题，结束时按「是否已选」恢复（下一题/完成要求每题至少选一项，
   // 不能一律 enable；单一写入点见 syncChoicePanelLock）。
   syncChoicePanelLock(busy);
   // 输入框的 disabled/placeholder 与发送按钮一律由 updateContextComposerLock /
   // updateSendButtonState 单点维护（含「上下文已满」与「正在编辑消息」两种锁定原因），
-  // 此处只负责图标与停止态样式——两个写入点会互相覆盖，实测踩过。
+  // 此处不再写图标与停止态，统一交给 updateSendButtonState，避免覆盖目标级暂停。
   updateContextComposerLock(busy);
   updateDeepReasoningButton();
   updateUnloadModelButton();
@@ -1870,6 +1866,7 @@ export function setBusy(busy) {
 }
 
 export async function cancelCurrentRun() {
+  if (goalBlocksChat()) { await changeGoal('pause'); return; }
   const openGeneration = conversationOpenGeneration();
   if (state.cancelRequested) return;
   const runId = String(state.chatRunId || '');

@@ -1125,11 +1125,12 @@ class SkillAgent:
         # block with a user-visible notice instead — silently dropping the oldest
         # turns would both lose context and re-break DeepSeek's token-prefix
         # cache on every later turn.
+        goal_cycle = (run_context or {}).get("goal_cycle")
         fits, limit, used, budget = self._context_fits(
             history, profile, options, system,
-            extra_tokens=self._estimate_content_tokens(user_message),
+            extra_tokens=0 if goal_cycle is not None and goal_cycle.resume_view else self._estimate_content_tokens(user_message),
         )
-        if not fits:
+        if not fits and goal_cycle is None:
             event({
                 "type": "context_full",
                 "limit": limit,
@@ -1155,7 +1156,13 @@ class SkillAgent:
                     message["reasoning_content"] = str(message["reasoning_content"])
                 message.pop("metadata", None)
             messages.append(message)
-        if not messages or messages[-1].get("role") != "user":
+        goal_cycle = (run_context or {}).get("goal_cycle")
+        if goal_cycle is not None and goal_cycle.resume_view:
+            messages = [dict(item) for item in goal_cycle.resume_view]
+            correction = goal_cycle.checkpoint.pop("correction", None)
+            if correction:
+                messages.append({"role": "user", "content": "验收尚未通过，请核对这些目标文件后继续：" + ", ".join(correction)})
+        elif not messages or messages[-1].get("role") != "user":
             messages.append({"role": "user", "content": user_message})
         # 记录“本轮追加的消息”起始位置：agent 循环里新增的工具调用/结果/推理消息，
         # 将被持久化并原样重放，供下一轮历史与上一轮所用上下文逐字节一致（缓存可迁移）。
@@ -1341,6 +1348,8 @@ class SkillAgent:
                 publish_trace(run_context, messages, trace_start)
             if cancel_event and cancel_event.is_set():
                 abort_run()
+            if goal_cycle is not None and goal_cycle.boundary(messages, step, step_limit):
+                return "本轮已保存，目标将按当前状态继续。", runs, reasonings, self._summarize_usage(usages)
             if step_limit and step >= step_limit:
                 # 硬上限：模型一直调工具但拿不到结论时不再无限烧下去（也会一直占着本地锁）。
                 # 与「工具连续失败 / 无进展」两条熔断同口径：给出可读原因 + 返回本轮已完成的
@@ -1376,7 +1385,7 @@ class SkillAgent:
             if observed_dynamic_tokens and context_used >= observed_estimate_tokens:
                 context_used = max(context_used, observed_dynamic_tokens + context_used - observed_estimate_tokens)
             compact_context = (run_context or {}).get("compact_context")
-            if step > 0 and callable(compact_context):
+            if callable(compact_context) and (step > 0 or goal_cycle is not None):
                 compacted = compact_context(
                     messages, trace_start, context_limit, context_budget, context_used,
                 )
@@ -1426,6 +1435,8 @@ class SkillAgent:
                     if truncation_state["truncated"]:
                         run_context["truncation"] = {**truncation_state, "continued": continuation_model_called}
                     publish_trace(run_context, messages, trace_start)
+                if goal_cycle is not None:
+                    goal_cycle.save(messages, outcome="blocked", reason="上下文已达窗口上限，无法安全压缩后继续")
                 return content, runs, reasonings, self._summarize_usage(usages)
             step += 1
             # 每步开头先把已「引导」的插话取进本轮 messages（旧实现挂载位，语义不变）：
@@ -1668,6 +1679,11 @@ class SkillAgent:
                         len(messages) - trace_start,
                         trace_start,
                     )
+                if goal_cycle is not None:
+                    if goal_cycle.stop_reason:
+                        goal_cycle.save(messages, outcome="blocked", reason=goal_cycle.stop_reason)
+                    else:
+                        content = goal_cycle.finish_text(messages, content)
                 return content, runs, reasonings, self._summarize_usage(usages)
 
             calls = action.get("calls") if action.get("type") == "tools" else [action]
@@ -1675,6 +1691,8 @@ class SkillAgent:
                 event({"type": "run_failed", "error": "工具调用解析失败：没有可执行调用"})
                 return "工具调用解析失败，已停止执行。", runs, reasonings, self._summarize_usage(usages)
             normalized_calls = [call if isinstance(call, dict) else {} for call in calls]
+            if goal_cycle is not None and not goal_cycle.reserve_group(messages, len(normalized_calls)):
+                return "本轮已保存，目标将按当前状态继续。", runs, reasonings, self._summarize_usage(usages)
             action_source = str(action.get("source") or "")
             # 来源继承（计划 2026-10-01 §2.1）：`tools.calls` 里嵌套的 `source` 一律忽略，
             # 每个 call 都继承顶层来源。否则整条围栏里的多工具动作只要有一个 call 标
@@ -1685,6 +1703,7 @@ class SkillAgent:
             # 授权，才是「批准一次、后续同类动作直接执行」。
             parallel_safe = bool(
                 len(normalized_calls) > 1
+                and goal_cycle is None
                 and action_source != self.SOURCE_FENCED
                 and tool_registry is not None
                 and all(
@@ -1891,6 +1910,16 @@ class SkillAgent:
                 messages.append(_image_batch_message(batch, batch_turn))
 
             publish_trace(run_context, messages, trace_start)
+            if goal_cycle is not None:
+                goal_cycle.save(messages)
+                if goal_cycle.stop_reason or goal_cycle.checkpoint.pop("rotate", False):
+                    goal_cycle.save(messages, outcome="blocked" if goal_cycle.stop_reason else "continue",
+                                    reason=goal_cycle.stop_reason)
+                    return goal_cycle.stop_reason or "已保存检查点，准备下一轮。", runs, reasonings, self._summarize_usage(usages)
+                if goal_cycle.checkpoint.get("wait_binding"):
+                    # 本组已闭合：转入目标级等待，不请求模型、不触发普通等待续答。
+                    goal_cycle.save(messages, outcome="wait_tool")
+                    return "已登记后台任务等待；任务结束后目标自动续办。", runs, reasonings, self._summarize_usage(usages)
             complete = (run_context or {}).get("tool_loop_complete")
             if callable(complete):
                 if cancel_event and cancel_event.is_set():
@@ -2006,6 +2035,10 @@ class SkillAgent:
                 return tool_registry.execute(tool, arguments, active, run_context)
             return self.executor.execute(tool, arguments, active)
 
+        goal_cycle = (run_context or {}).get("goal_cycle")
+        if goal_cycle is not None:
+            return goal_cycle.exercise(tool, arguments, active, self._run_executor(run_context),
+                                       run_context or {}, source, _dispatch)
         fenced = source == self.SOURCE_FENCED
         if fenced and not self._fenced_approval_active(run_context, allowed):
             if not self._confirmation_ui(run_context):

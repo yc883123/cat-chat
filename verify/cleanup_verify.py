@@ -67,6 +67,7 @@ KEEP = {
     # MCP 连接器分页冒烟（设置独立分页、行高恒定回归锁、搜索与窄屏）
     "mcp_connectors_smoke.cjs",
     # 织书台（原创写作）前端冒烟：第五页接入、三阶段、模板/导入导出、手机三档（隔离实例）
+    "_serve_goal_smoke.py",
     "writer_ui_smoke.cjs", "_serve_writer_draft_ui.py", "writer_draft_offline_test.cjs", "writer_decision_smoke.cjs",
     "writer_freeform_smoke.cjs",
     "writer_novel_import_smoke.cjs", "novel_writer_mobile_smoke.cjs",

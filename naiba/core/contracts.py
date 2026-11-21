@@ -341,6 +341,54 @@ RUN_ORIGIN_USER = "user"
 RUN_ORIGIN_SUPERVISED = "supervised"
 RUN_ORIGIN_DEPENDENCY = "dependency"
 RUN_ORIGIN_JOB_WAIT = "job_wait"
+RUN_ORIGIN_GOAL = "goal"
+GOAL_RUN_KEY = "goal_run"
+GOAL_STATUSES = ("queued", "running", "waiting_tool", "pausing", "paused", "needs_user", "blocked",
+                 "awaiting_review", "cancelling", "cancelled", "completed")
+GOAL_DEFAULT_LIMITS = {"model_requests": 256, "tool_actions": 200, "rounds": 32}
+GOAL_MAX_LIMITS = {"model_requests": 4096, "tool_actions": 4096, "rounds": 512}
+GOAL_COMPLETION_POLICIES = ("machine_all", "mixed", "manual")
+GOAL_CHECK_VERSION = 1
+GOAL_PLAN_VERSION = 1
+GOAL_LOCAL_CHECK_KIND = "goal_check"
+GOAL_STOP_CODES = ("", "budget_model", "budget_tools", "budget_rounds", "deadline", "no_progress",
+                   "configuration", "source_changed", "unknown_write", "job_missing", "job_failed", "check_failed", "error")
+
+
+class GoalCriterion(TypedDict, total=False):
+    id: str
+    kind: str
+    path: str
+    sha256: str
+    contains: str
+    check_id: str
+    params: dict[str, Any]
+    label: str
+    stage_id: str
+    source_line: int
+
+
+class GoalPlanSource(TypedDict):
+    path: str
+    name: str
+    sha256: str
+    parser_version: int
+    criteria: list[GoalCriterion]
+    stages: list[dict[str, Any]]
+    manual_items: list[dict[str, Any]]
+
+
+class GoalWaitBinding(TypedDict, total=False):
+    kind: str
+    target_id: str
+    goal_id: str
+    run_id: str
+    action_id: str
+    state: str
+    result: dict[str, Any]
+    input_fingerprint: str
+    check_version: int
+
 # 等待表状态（storage + 协调器共用；前端直接展示 needs_attention 的原因）。
 JOB_WAIT_STATUSES = (
     "registered", "waiting", "ready", "dispatched", "completed",
@@ -527,7 +575,7 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # callable(messages, trace_start, limit, budget, used) -> {"history", "limit", "budget"}。
     # skills/agent 在步与步之间调用；返回 history 为空 = 本步不整理，照常发请求。
     "compact_context",
-    "trace_view", "trace_checkpoint", "tool_loop_complete", "model_view_transform",
+    "trace_view", "trace_checkpoint", "tool_loop_complete", "model_view_transform", "goal_cycle",
     # 整理完成后，下一次完整请求组装好时推送一次包含 system/schema 的占用估算。
     "context_estimate_pending",
     "model_key", "context_limit", "context_limit_source",
@@ -566,6 +614,7 @@ def default_run_context() -> dict[str, Any]:
         "trace_checkpoint": None,
         "tool_loop_complete": None,
         "model_view_transform": None,
+        "goal_cycle": None,
         "context_estimate_pending": False,
         "model_key": "",
         "context_limit": 0,
@@ -772,6 +821,7 @@ class RunContext(TypedDict, total=False):
     trace_checkpoint: Any            # 整理后持久化原轨迹追加段与投影的可信回调
     tool_loop_complete: Any          # 可信任务适配器的工具组完成钩子，返回正文或 None
     model_view_transform: Any        # 可信任务适配器的下一请求视图变换，不修改原始 trace
+    goal_cycle: Any                  # 可信 GOAL 轮次；模型/普通聊天请求不能填写
     context_estimate_pending: bool   # 下一次正式请求前推送整理后的完整输入估算
     model_key: str                   # 本轮模型键（供实时用量事件标记）
     context_limit: int                # 本轮有效窗口（profile 或类型回退）

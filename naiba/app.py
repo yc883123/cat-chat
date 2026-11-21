@@ -621,7 +621,16 @@ class NaibaChatApp:
         except Exception:  # noqa: BLE001 - 渠道启动失败不阻断应用
             logger.exception("QQ 渠道启动失败")
 
+        from naiba.run.goals import GoalService
+
+        self.goals = GoalService(self)
+        if self.goals.store.pending():
+            self.goals.start()
+
     def stop(self) -> None:
+        goals = getattr(self, "goals", None)
+        if goals is not None:
+            goals.stop()
         try:
             self.onebot.stop()
         except Exception:  # noqa: BLE001 - 收尾不互相阻断

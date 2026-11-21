@@ -15,6 +15,7 @@ import { hideFilePopup } from "./16-file-refs.js";
 import { sendRunInterjection } from "./18-interjections.js";
 import { notifyRunDone } from "./20-sound.js";
 import { SKILL_SCRIPT_RULES } from "./skill-script-rules.js";
+import { goalDraftEnabled, goalPlan, guardGoalChat, submitGoal } from "./31-goals.js";
 
 // 发送前附件存在性校验的互斥标志（模块内私有，不对外共享）：
 // 校验要走一次本地 HTTP，await 期间连点发送不能被放过去。
@@ -539,8 +540,12 @@ export async function resumeConversationRun(conversationId, { openGeneration = c
 }
 
 export async function sendChatMessage(textOverride = '', { skipContextWarning = false } = {}) {
+  if (guardGoalChat()) return;
+  const goalMode = goalDraftEnabled();
   const input = $('#messageInput');
   const inputText = String(input.value || '').trim();
+  const goalDraftFiles = state.pendingFiles;
+  const goalFilesSnapshot = goalMode ? JSON.stringify(state.pendingFiles) : '';
   const buttonText = String(textOverride || '').trim();
   // 点击按钮发送时，把按钮附带的内容与输入框已有内容合并，避免丢失预设（如 agent 预设的 skill 引用）。
   const text = buttonText
@@ -571,7 +576,10 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     catch (error) { toast(`模型设置尚未保存：${error.message}`); return; }
     if (!isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
   }
+  if (guardGoalChat() || goalMode !== goalDraftEnabled() || !isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
+  if (goalMode && !stripSkillReferences(text)) { toast('写下目标后再发送'); return; }
   if (state.chatRunId || state.abortController) {
+    if (goalMode) return;
     // 运行中：改走**插话队列**（入队后由用户决定何时「引导」），而不是把消息丢掉。
     // 不合并 text 而是把按钮附带的那段传下去：sendRunInterjection 会自己与输入框内容
     // 做同样的拼接，这里若传已合并的结果就会把输入框里的字重复一遍。
@@ -602,6 +610,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     } finally {
       attachmentPrecheckPending = false;
     }
+    if (!isConversationOpenCurrent(selectionOpenGeneration, selectionConversation) || guardGoalChat()) return;
+    if (goalMode && (!goalDraftEnabled() || JSON.stringify(state.pendingFiles) !== goalFilesSnapshot)) return;
     if (missing.length) {
       const missingSet = new Set(missing);
       const names = state.pendingFiles
@@ -612,6 +622,37 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
       toast(`附件文件已丢失（可能已被缓存清理）：${(names.length ? names : missing).join('、')}。已从待发送列表移除，请重新上传后再发送。`);
       return;
     }
+  }
+  if (guardGoalChat() || !isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
+  if (goalMode) {
+    // 附件预检期间可以切会话或改草稿，迟到的预检不能启动旧目标。
+    if (!goalDraftEnabled() || String(input.value || '').trim() !== inputText || state.pendingFiles !== goalDraftFiles
+        || JSON.stringify(state.pendingFiles) !== goalFilesSnapshot || state.chatRunId || state.abortController) return;
+    const plan = goalPlan();
+    const accepted = await submitGoal({
+      conversation_id: selectionConversation,
+      message: stripSkillReferences(text),
+      display_message: text,
+      attachments,
+      folders,
+      model_key: $('#modelSelect').value,
+      model_name: composerModelChoice(),
+      skill_policy: { mode: 'exclusive', referenced_ids: parseSkillReferences(text).map(tok => tok.skill.id) },
+      web_search_enabled: state.webSearchEnabled,
+      ...(plan ? { plan } : {}),
+    });
+    if (accepted && isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) {
+      collapseComposerIfExpanded();
+      renderPendingFiles();
+      resizeTextarea();
+      renderInputMirror();
+      hideSkillPopup();
+      hideFilePopup();
+      closeQuickMessagePanel();
+      try { await openConversation(selectionConversation, { expectedGeneration: selectionOpenGeneration }); }
+      catch (error) { toast(`目标已创建，加载对话失败：${error.message}`); }
+    }
+    return;
   }
   // 用户新发起一轮：恢复跟随，让新答复从底部开始流式显示。
   setStickToBottom(true);

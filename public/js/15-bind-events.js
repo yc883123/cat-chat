@@ -3,7 +3,7 @@
 // ============================================================
 
 import { $, $$, api, applyAppearance, applyModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, setAppView, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setAppViewLeaveChat, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
-import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
+import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateContextComposerLock, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelCompaction, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, jobWaitAction, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
@@ -14,8 +14,9 @@ import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadF
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, loadFileTab, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
-import { handleFilePopupClick, handleFilePopupKey, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
+import { handleFilePopupClick, handleFilePopupKey, hideFilePopup, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
 import { guideAllInterjections, sendRunInterjection } from "./18-interjections.js";
+import { changeGoal, clearGoalPlan, goalBlocksChat, loadGoalRounds, previewGoalPlan, refreshGoal, setGoalDraftMode, submitGoalExtend, syncGoalConversation } from "./31-goals.js";
 import { changeOnboardingModel, dismissOnboarding, loadOnboardingModels, resetOnboarding, saveOnboardingProvider, scheduleOnboardingModelCheck, selectOnboardingPreset, testOnboardingConnection } from "./19-onboarding.js";
 // 辅助对话 import 追加在 import 块末尾：守门测试（test_turn_rail / test_context_menu）
 // 按 import 区的**行号**断言 01-core / 04-messages 的位置，插在前面会把它们推后而报红。
@@ -876,9 +877,7 @@ function ensureAttachMenu() {
   menu.id = 'attachMenu';
   menu.className = 'file-action-menu attach-menu';
   menu.setAttribute('role', 'menu');
-  menu.setAttribute('aria-label', '添加文件');
-  menu.innerHTML = '<button type="button" role="menuitem" data-attach-kind="media">照片 / 视频</button>'
-    + '<button type="button" role="menuitem" data-attach-kind="file">文件（PDF / Word / 文本…）</button>';
+  menu.setAttribute('aria-label', '添加');
   menu.hidden = true;
   document.body.append(menu);
   return menu;
@@ -887,12 +886,18 @@ function ensureAttachMenu() {
 function hideAttachMenu() {
   const menu = $('#attachMenu');
   if (menu) menu.hidden = true;
+  $('#attachButton')?.setAttribute('aria-expanded', 'false');
 }
 
 // 动作条贴着附件键**向上**展开：附件键在屏幕最下方，向下弹一定被键盘/屏幕边切掉。
 function showAttachMenu(trigger) {
   const menu = ensureAttachMenu();
+  menu.innerHTML = (isCoarsePointer()
+    ? '<button type="button" role="menuitem" data-attach-kind="media">照片 / 视频</button><button type="button" role="menuitem" data-attach-kind="file">文件（PDF / Word / 文本…）</button>'
+    : '<button type="button" role="menuitem" data-attach-kind="">附件</button>')
+    + `<button type="button" role="menuitem" data-attach-kind="goal" ${goalBlocksChat() || state.chatBusy || state.chatRunId || state.abortController || state.editingMessageId ? 'disabled' : ''}>GOAL</button>`;
   menu.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
   const box = trigger.getBoundingClientRect();
   const { offsetWidth: width, offsetHeight: height } = menu;
   const left = Math.max(6, Math.min(box.left, window.innerWidth - width - 6));
@@ -959,6 +964,34 @@ async function runFileAction(button) {
 }
 
 export function bindEvents() {
+  document.addEventListener('naiba:conversation-changed', (event) => {
+    hideAttachMenu();
+    if (syncGoalConversation({ created: Boolean(event.detail?.created) })) {
+      renderPendingFiles();
+      renderInputMirror();
+      resizeTextarea();
+    }
+  });
+  document.addEventListener('naiba:goal-changed', () => {
+    updateContextComposerLock(state.chatBusy);
+    if (goalBlocksChat()) { hideAttachMenu(); hideSkillPopup(); hideFilePopup(); }
+  });
+  document.addEventListener('visibilitychange', () => { void refreshGoal(); });
+  $('#exitGoalDraft')?.addEventListener('click', () => {
+    if (setGoalDraftMode(false)) $('#messageInput')?.focus();
+  });
+  $('#goalCard')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-goal-action]');
+    if (!button || button.disabled) return;
+    if (button.dataset.goalAction === 'refresh') void refreshGoal();
+    else if (button.dataset.goalAction === 'rounds-more') void loadGoalRounds();
+    else if (button.dataset.goalAction === 'extend-submit') void submitGoalExtend();
+    else void changeGoal(button.dataset.goalAction);
+  });
+  $('#goalPlanButton')?.addEventListener('click', () => { void previewGoalPlan(); });
+  $('#goalPlanSummary')?.addEventListener('click', (event) => {
+    if (event.target.closest?.('[data-plan-action="clear"]')) clearGoalPlan();
+  });
   bindOnebotSettingsEvents();
   // 顶层应用入口唯一绑定点：Chat / Studio / 任务总管。
   $('#openChatMode')?.addEventListener('click', () => {
@@ -1037,17 +1070,40 @@ export function bindEvents() {
   window.addEventListener('blur', hideTextContextMenu);
   window.addEventListener('resize', hideTextContextMenu);
   window.addEventListener('scroll', hideTextContextMenu, true);
-  // 附件动作条（手机）：菜单挂在 body 上，点击与外部收起都在 document 这一层接。
+  // 主对话添加菜单：菜单挂在 body 上，文件选择保持同步点击。
   document.addEventListener('click', (event) => {
     const item = event.target.closest?.('#attachMenu [data-attach-kind]');
     if (!item) return;
     event.preventDefault();
     hideAttachMenu();
-    openFilePicker(item.getAttribute('data-attach-kind'));
+    if (goalBlocksChat()) return;
+    const kind = item.getAttribute('data-attach-kind');
+    if (kind === 'goal') {
+      if (setGoalDraftMode(true)) $('#messageInput')?.focus();
+      return;
+    }
+    // 必须在用户点击栈中直接打开，手机浏览器不允许 await 后弹出文件选择。
+    openFilePicker(kind);
   });
   document.addEventListener('pointerdown', (event) => {
     if (event.target.closest?.('#attachMenu') || event.target.closest?.('#attachButton')) return;
     hideAttachMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    const menu = $('#attachMenu');
+    if (!menu || menu.hidden || !event.target.closest?.('#attachMenu, #attachButton')) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hideAttachMenu();
+      $('#attachButton')?.focus();
+    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      const buttons = [...menu.querySelectorAll('button:not(:disabled)')];
+      const index = buttons.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+        : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    }
   });
   window.addEventListener('resize', hideAttachMenu);
   window.addEventListener('scroll', hideAttachMenu, true);
@@ -1468,6 +1524,8 @@ export function bindEvents() {
   });
   $('#composerForm').addEventListener('submit', (event) => {
     event.preventDefault();
+    // GOAL 的停止键在换轮空隙仍暂停整个目标，不取消单轮 Run。
+    if (goalBlocksChat()) { void cancelCurrentRun(); return; }
     // 输入区在编辑态下已移到消息处，提交同一表单时确认当前编辑。
     if (state.editingMessageId) { confirmActiveEdit(); return; }
     if (state.chatRunId || state.abortController) cancelCurrentRun();
@@ -1489,6 +1547,7 @@ export function bindEvents() {
   window.visualViewport?.addEventListener('resize', repositionComposerPopups);
   window.visualViewport?.addEventListener('scroll', repositionComposerPopups);
   $('#messageInput').addEventListener('keydown', (event) => {
+    if (goalBlocksChat()) return;
     // @ 工作区引用弹层优先消费按键（Tab 进目录 / Shift+Tab 返回 / Enter 引用）。
     if (handleFilePopupKey(event)) {
       if (event.key === 'Escape') event.stopPropagation();
@@ -1583,13 +1642,9 @@ export function bindEvents() {
   document.addEventListener('click', (event) => {
     if (!event.target.closest('.skills-quick-more')) hideSkillQuickMenu();
   });
-  // 附件按钮：手机上先问「照片/视频」还是「文件」（§九.135 第 4 项）。
-  // 为什么：`#fileInput` 不带 accept 时"手机浏览器给什么入口"因设备/ROM 而异——部分 Android
-  // 直接进相册，用户根本看不到「文件」。而文档上传在链路上**本来就是通的**
-  // （`store_uploaded_file` 只卡 80MB，不做类型白名单），缺的只是那个入口。
-  // 桌面端行为一个字不改：直接开文件选择器，且 accept 复位成空（与改前逐字节一致）。
+  // 主对话「＋」统一为添加菜单，手机保留原来的两种文件选择。
   $('#attachButton').addEventListener('click', (event) => {
-    if (!isCoarsePointer()) { openFilePicker(''); return; }
+    if (goalBlocksChat()) return;
     event.stopPropagation();  // 别让下面的 document 点击兜底立刻把它收起来
     if ($('#attachMenu')?.hidden === false) hideAttachMenu();
     else showAttachMenu(event.currentTarget);
@@ -1613,7 +1668,7 @@ export function bindEvents() {
     if (event.target.closest?.('#starterPromptDialog')) return;
     closeQuickMessagePanel();
   });
-  $('#fileInput').addEventListener('change', (event) => { uploadFiles([...event.target.files]); event.target.value = ''; });
+  $('#fileInput').addEventListener('change', (event) => { if (!goalBlocksChat()) uploadFiles([...event.target.files]); event.target.value = ''; });
   // 全窗口兜底：拖放落点在输入区（或 Skill 上传区）之外时，只吞掉默认行为、什么都不做。
   // 不拦的话 WebView2 会把拖入的文件/文件夹当成 URL **导航走整个页面**（聊天记录、
   // 未发送内容全丢），而"顺手在消息区松手还建了索引 chip"也是没人想要的副作用。
@@ -1648,6 +1703,7 @@ export function bindEvents() {
       if (!event.dataTransfer?.files?.length && !droppedPath) return;
       event.preventDefault();
       composerWrap.classList.remove('dragover');
+      if (goalBlocksChat()) return;
       if (hasDroppedDirectory(event)) {
         // 必须在同步阶段把 File 对象交给原生（dataTransfer 出了事件就失效），
         // 顺便把原生这一步的异常抓下来传给 Python 侧做诊断。

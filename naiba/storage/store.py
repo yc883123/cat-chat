@@ -23,6 +23,7 @@ from naiba.core.contracts import (
 )
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
+from naiba.storage.goals import insert_goal, migrate_goal_extensions, migrate_goals, require_no_goal
 
 logger = logging.getLogger("naiba.storage.store")
 
@@ -32,7 +33,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 32
+CURRENT_SCHEMA_VERSION = 34
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -1123,6 +1124,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     30: _migrate_to_v30,
     31: _migrate_to_v31,
     32: _migrate_to_v32,
+    33: migrate_goals,
+    34: migrate_goal_extensions,
 }
 
 
@@ -2790,6 +2793,9 @@ class ChatStorage:
         「最近更新」口径覆盖。归档语义照 DeepSeek Harness：仅隐藏，不删数据。
         """
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if archived:
+                require_no_goal(db, conversation_id)
             cursor = db.execute(
                 "UPDATE conversations SET archived = ? WHERE id = ?",
                 (1 if bool(archived) else 0, conversation_id),
@@ -2827,6 +2833,9 @@ class ChatStorage:
                 ).fetchall()
             ]
             if existing:
+                if archived:
+                    for conversation_id in existing:
+                        require_no_goal(db, conversation_id)
                 marks = ",".join("?" for _ in existing)
                 db.execute(
                     f"UPDATE conversations SET archived = ? WHERE id IN ({marks})",
@@ -2998,11 +3007,13 @@ class ChatStorage:
         """撤销某条消息上的「新会话」标记（消息本身与其余 metadata 一律保留）。"""
         now = int(time.time() * 1000)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT conversation_id, metadata FROM messages WHERE id = ?", (message_id,)
             ).fetchone()
             if not row:
                 return False
+            require_no_goal(db, row["conversation_id"])
             metadata = json.loads(row["metadata"] or "{}")
             if not isinstance(metadata, dict) or MetadataKeys.SESSION_START not in metadata:
                 return False
@@ -3037,6 +3048,7 @@ class ChatStorage:
             metadata = json.loads(row["metadata"] or "{}")
             if not isinstance(metadata, dict) or not any(key in metadata for key in (MetadataKeys.COMPACTION, MetadataKeys.TRACE_VIEW)):
                 return False
+            require_no_goal(db, row["conversation_id"])
             if db.execute(
                 f"SELECT 1 FROM background_tasks WHERE conversation_id = ? AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} LIMIT 1",
                 (row["conversation_id"],),
@@ -3081,12 +3093,14 @@ class ChatStorage:
         """删除**遗留形态**的边界标记行（role=session；只允许删该角色，避免误删对话消息）。"""
         now = int(time.time() * 1000)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT conversation_id FROM messages WHERE id = ? AND role = 'session'",
                 (message_id,),
             ).fetchone()
             if not row:
                 return False
+            require_no_goal(db, row["conversation_id"])
             db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -3184,6 +3198,9 @@ class ChatStorage:
         values = [json.dumps(patch[key], ensure_ascii=False) for key in keys]
         now = int(time.time() * 1000)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if MetadataKeys.SESSION_START in patch:
+                require_no_goal(db, conversation_id)
             cursor = db.execute(
                 f"UPDATE messages SET metadata = {expression} WHERE id = ? AND conversation_id = ?",
                 (*values, message_id, conversation_id),
@@ -3207,6 +3224,7 @@ class ChatStorage:
                 return False
             # 辅助对话有独立的关闭/过期语义；主对话才受侧栏删除的活动任务保护。
             if str(row["conv_kind"] or "main") == "main":
+                require_no_goal(db, conversation_id)
                 active = db.execute(
                     "SELECT id FROM background_tasks WHERE conversation_id = ? "
                     f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} LIMIT 1",
@@ -3241,6 +3259,9 @@ class ChatStorage:
                 return "missing"
             if str(row["conv_kind"] or "main") != "main":
                 return "not_main"
+            if db.execute("SELECT 1 FROM chat_goals WHERE conversation_id=? AND status NOT IN ('completed','cancelled')",
+                          (conversation_id,)).fetchone():
+                return "busy"
             active = db.execute(
                 "SELECT id FROM background_tasks WHERE conversation_id = ? "
                 f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} LIMIT 1",
@@ -3296,6 +3317,8 @@ class ChatStorage:
     def clear_conversation_messages(self, conversation_id: str) -> int:
         """Clear persisted chat/tool history while retaining the conversation settings."""
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            require_no_goal(db, conversation_id)
             cursor = db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -3315,6 +3338,8 @@ class ChatStorage:
         从而使编辑重发时能命中 OpenAI/DeepSeek 等提供商的自动前缀缓存。
         """
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            require_no_goal(db, conversation_id)
             target = db.execute(
                 "SELECT created_at, rowid FROM messages WHERE id = ? AND conversation_id = ?",
                 (message_id, conversation_id),
@@ -3362,6 +3387,8 @@ class ChatStorage:
         if kind not in self.MESSAGE_DELETE_MODES:
             raise ValueError("mode 必须是 single 或 turn")
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            require_no_goal(db, conversation_id)
             target = db.execute(
                 "SELECT id, role, content, metadata, trace_hash, created_at, rowid AS rid FROM messages "
                 "WHERE id = ? AND conversation_id = ?",
@@ -3445,6 +3472,8 @@ class ChatStorage:
         if not rows_in:
             raise ValueError("messages 不能为空")
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            require_no_goal(db, conversation_id)
             if not db.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone():
                 raise LookupError("对话不存在")
             existing = {
@@ -3683,6 +3712,7 @@ class ChatStorage:
         }
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            require_no_goal(db, conversation_id)
             active = db.execute(
                 "SELECT id FROM background_tasks WHERE id = ? AND conversation_id = ? "
                 f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}",
@@ -3736,6 +3766,7 @@ class ChatStorage:
         now = int(time.time() * 1000)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            require_no_goal(db, conversation_id)
             active = db.execute(
                 "SELECT id FROM background_tasks WHERE id = ? AND conversation_id = ? "
                 f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}",
@@ -3919,6 +3950,7 @@ class ChatStorage:
         dependency_context: dict[str, Any] | None = None,
         submission_guard: Callable[[sqlite3.Connection], None] | None = None,
         job_wait_dispatch: dict[str, Any] | None = None,
+        goal_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically append the user message and create its owning run.
 
@@ -3994,6 +4026,7 @@ class ChatStorage:
             # 对话的 ACTIVE_RUN 互斥位，否则异步 Job 一旦长时间运行/卡住，用户在该
             # 对话发新消息会被 409 拒绝（消息不入库）。
             if not parent_job_id:
+                require_no_goal(db, conversation_id)
                 active = db.execute(
                     "SELECT id FROM background_tasks WHERE conversation_id = ? "
                     f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
@@ -4093,6 +4126,10 @@ class ChatStorage:
                     "json_set(state,'$.run_id',?,'$.input_message_id',?) WHERE thread_id=? AND round=?",
                     (run_id, message_id, supervised_context["thread_id"], supervised_context["round"]),
                 )
+            if goal_spec is not None:
+                if conversation["archived"]:
+                    raise ValueError("已归档的对话不能启动 GOAL")
+                insert_goal(db, conversation_id, message_id, run_id, goal_spec, now)
             if message_count <= 2 and not conversation["title_customized"]:
                 # 纯附件轮次（无文字）没有可用的标题文本：回退到首个附件名，避免所有
                 # 图片/文件首轮都叫"新对话"而无法区分。@ 引用轮次取用户原文（非解析后的路径）。
@@ -4118,6 +4155,9 @@ class ChatStorage:
         detached: bool = False,
         origin_run_id: str = "",
         submission_guard: Callable[[sqlite3.Connection], None] | None = None,
+        goal_bind: Callable[[sqlite3.Connection, str], None] | None = None,
+        job_bind: Callable[[sqlite3.Connection, str], None] | None = None,
+        initial_checkpoint: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         task_id = uuid.uuid4().hex
@@ -4133,6 +4173,8 @@ class ChatStorage:
             # 判定必须用显式 detached 标记，不能只看 parent_job_id 为空（见
             # _migrate_to_v28 的注释：空父 ID 的默认语义是"顶层 Run"）。
             if not parent_job_id and not detached:
+                if goal_bind is None:
+                    require_no_goal(db, conversation_id)
                 active = db.execute(
                     "SELECT id FROM background_tasks WHERE conversation_id = ? "
                     f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
@@ -4167,6 +4209,13 @@ class ChatStorage:
                     origin_run_id,
                 ),
             )
+            if initial_checkpoint is not None:
+                db.execute("UPDATE background_tasks SET checkpoint=? WHERE id=?",
+                           (json.dumps(initial_checkpoint, ensure_ascii=False), task_id))
+            if job_bind is not None:
+                job_bind(db, task_id)
+            if goal_bind is not None:
+                goal_bind(db, task_id)
         return self.get_background_task(task_id) or {}
 
     @_retry_transient_write
@@ -5162,7 +5211,9 @@ class ChatStorage:
                     (str(row["id"]), str(row["kind"] or ""), now),
                 )
             cursor = db.execute(
-                "DELETE FROM background_tasks WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')"
+                "DELETE FROM background_tasks WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted') "
+                "AND id NOT IN (SELECT r.run_id FROM chat_goal_rounds r JOIN chat_goals g ON g.id=r.goal_id "
+                "WHERE g.status NOT IN ('completed','cancelled'))"
             )
             _prune_orphan_message_traces(db)
         return cursor.rowcount

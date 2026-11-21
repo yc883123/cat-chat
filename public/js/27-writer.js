@@ -230,6 +230,8 @@ const writer = {
   draftProviderKey: "", draftModelName: "",
   // 设定表单编辑态：套用模板 / 手改后为 true，保存或放弃后复位。
   setupDirty: false,
+  // 单步重跑：发起后记住步名，链终态刷新完表单后滚到对应字段。
+  pendingSetupStep: "",
   // 批次三：题材树 / 标签多选 / 参考作品 / 角色分区。
   charTab: "lead",
   tags: [],
@@ -2355,6 +2357,11 @@ async function pollPipelineTick() {
       showPipelineOutcome(fresh);
       if (fresh.status === "done") toast(`生成结束：${kindLabel(fresh.kind)}`);
       await refreshPipelineBook(pipelineTarget());
+      // 单步重跑成功收尾：表单已刷新，滚到那一步对应的字段。
+      if (String(fresh.kind || "") === "setup_step" && fresh.status === "done" && writer.pendingSetupStep) {
+        scrollSetupStepField(writer.pendingSetupStep);
+        writer.pendingSetupStep = "";
+      }
     }
   } catch (_error) {
     // 网络抖动不终止轮询；下一轮继续。
@@ -2467,7 +2474,7 @@ async function submitPipeline(kind, opts = {}) {
   const {
     chapterNo = 0, allowDrop = false, partNo = 0, partTitle = "",
     targetChars = 0, wantCount = 0, fromNo = 0, extraNote = "", model: preset = null,
-    partPlan = null, beforeSubmit = null,
+    partPlan = null, beforeSubmit = null, step = "",
   } = opts;
   if (!writer.bookId || writer.busy || writer.draftOperation || !samePipelineTarget(pipelineTarget())) return false;
   if (!canStartPipeline()) return false;
@@ -2519,6 +2526,7 @@ async function submitPipeline(kind, opts = {}) {
     if (!canStartPipeline()) return false;
     const body = {
       kind,
+      step: step || undefined,
       chapter_no: chapterNo || undefined,
       model_key: model.model_key,
       model_name: model.model_name,
@@ -2550,6 +2558,7 @@ async function submitPipeline(kind, opts = {}) {
     const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipelines`, { method: "POST", body });
     if (writer.bookId !== bookId || writer.bookToken !== bookToken) return false;
     beginPipelineWatch(payload.pipeline);
+    if (kind === "setup_step" && step) writer.pendingSetupStep = step;
     if (pipelineWaiting()) showPipelineOutcome(writer.pipeline);
     else setSaveState("已提交", `${kindLabel(kind)}已提交；每完成一步都会自动存一版。`);
     toast("已提交生成");
@@ -2565,6 +2574,119 @@ async function submitPipeline(kind, opts = {}) {
     setBusy(false);
     renderAll();
   }
+}
+
+// ---- 设定单步重跑：先弹输入预览，确认后只跑这一步 ----
+
+// 每步「会改动」的弹层文案与跑完后的滚动目标（与服务端 _apply_setup_or_outline_step 的写回字段一致）。
+const SETUP_STEP_RERUN = {
+  genre: {
+    change: "跑完会更新题材、基调、标签，其他字段不动。",
+    target: "#writerGenrePicker",
+  },
+  title: {
+    change: "跑完只刷新「书名候选」条，点候选才会采用；书名本身保持不变（现在是空的才会自动填）。",
+    target: "#writerTitle",
+  },
+  blurb: {
+    change: "跑完只刷新「简介候选」条，点候选才会采用；简介本身保持不变（现在是空的才会自动填）。",
+    target: "#writerBlurb",
+  },
+  world: {
+    change: "跑完会替换世界观输入框里的内容。",
+    warn: "现在的世界观会被顶掉。想留底不用做任何事——它已经存在左侧「设定版本」里，不满意随时切回。",
+    target: "#writerWorldview",
+  },
+  chars: {
+    change: "跑完会替换整个角色列表（主角与配角按上面滑杆的数量出）。",
+    warn: "现在的角色会被顶掉。想留底不用做任何事——它已经存在左侧「设定版本」里，不满意随时切回。",
+    target: "#writerCharList",
+  },
+};
+
+function scrollSetupStepField(step) {
+  const el = $(SETUP_STEP_RERUN[step]?.target || "");
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function openStepRerunDialog(step) {
+  const meta = SETUP_STEP_RERUN[step];
+  if (!meta || !writer.bookId) return;
+  if (pipelineActive()) {
+    toast("这部作品已有正在进行的生成，请先取消或等它结束");
+    return;
+  }
+  if (writer.busy) return;
+  const model = readModel(...(PLAN_MODEL_FIELDS.setup || ["setupProviderKey", "setupModelName"]));
+  if (!model.model_name) {
+    toast("先在设置里检查模型，再回来选择");
+    return;
+  }
+  const dialog = $("#writerStepRerunDialog");
+  const title = $("#writerStepRerunTitle");
+  const intro = $("#writerStepRerunIntro");
+  const slotsBox = $("#writerStepRerunSlots");
+  const changeEl = $("#writerStepRerunChange");
+  const warnEl = $("#writerStepRerunWarn");
+  const errorEl = $("#writerStepRerunError");
+  const startBtn = $("#writerStepRerunStart");
+  if (!dialog || !title || !intro || !slotsBox || !changeEl || !warnEl || !errorEl || !startBtn) return;
+  title.textContent = `重跑「${STEP_LABELS[step] || step}」`;
+  errorEl.textContent = "";
+  changeEl.textContent = "";
+  warnEl.hidden = true;
+  intro.textContent = "正在读取这一步的输入素材…";
+  slotsBox.replaceChildren();
+  startBtn.disabled = true;
+  startBtn.onclick = null;
+  openDialog("#writerStepRerunDialog");
+  let preview = null;
+  try {
+    preview = await api("/api/writer/generate/preview", {
+      method: "POST",
+      body: {
+        kind: step,
+        book_id: writer.bookId,
+        model_key: model.model_key,
+        char_count: writer.charCount,
+        side_count: writer.sideCount,
+        extra_note: $("#writerSetupNote")?.value || "",
+      },
+    });
+  } catch (error) {
+    if (!dialog.open) return;
+    intro.textContent = "";
+    errorEl.textContent = String(error?.message || error);
+    return;
+  }
+  if (!dialog.open) return;
+  // 等待预览期间页面状态可能变化：切了作品或有生成在跑，弹层直接作废。
+  if (!writer.bookId || pipelineActive()) {
+    closeDialog("#writerStepRerunDialog");
+    return;
+  }
+  const rows = (preview.slots || []).filter((row) => row.included !== false);
+  const list = rows.length ? rows
+    : [{ key: "idea", label: "创作提示词与当前设定", chars: (preview.content || "").length }];
+  intro.textContent = `用当前选中的模型重跑这一步。会带上：`;
+  slotsBox.replaceChildren(...list.map((row) => {
+    const chip = document.createElement("span");
+    chip.className = "writer-step-rerun-slot";
+    const chars = Number(row.chars || 0);
+    chip.textContent = `${row.label || row.key}${chars ? `（约 ${chars} 字）` : ""}`;
+    return chip;
+  }));
+  changeEl.textContent = meta.change;
+  if (meta.warn) {
+    warnEl.textContent = meta.warn;
+    warnEl.hidden = false;
+  }
+  startBtn.onclick = () => {
+    if (!gateByBudget(model, preview.budget)) return;
+    closeDialog("#writerStepRerunDialog");
+    void submitPipeline("setup_step", { step });
+  };
+  startBtn.disabled = false;
 }
 
 async function pipelinePost(command, body, target = pipelineTarget()) {
@@ -5034,6 +5156,11 @@ export function bindWriterEvents() {
   });
   $("#writerSetupSave")?.addEventListener("click", () => void saveSetupManual());
   $("#writerSetupGenerate")?.addEventListener("click", () => void submitPipeline("setup_all"));
+  // 设定单步重跑：点步名先弹输入预览，确认后只跑这一步。
+  for (const button of document.querySelectorAll("[data-writer-step-rerun]")) {
+    button.addEventListener("click", () => void openStepRerunDialog(String(button.dataset.writerStepRerun || "")));
+  }
+  $("#writerStepRerunCancel")?.addEventListener("click", () => closeDialog("#writerStepRerunDialog"));
   for (const id of ["writerCharCount", "writerSideCount"]) {
     $(`#${id}`)?.addEventListener("input", (event) => {
       const value = Number(event.target.value || 0);

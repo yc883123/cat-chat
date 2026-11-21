@@ -1762,7 +1762,7 @@
                         <input type="range" id="writerSideCount" min="0" max="20" step="1" value="4" aria-label="配角数量">
                       </label>
                     </div>
-                    <label class="writer-field">补充要求（只在第一步「题材推断」生效）
+                    <label class="writer-field">补充要求（每一步都会带上）
                       <input type="text" id="writerSetupNote" placeholder="想强调的要求，可留空">
                     </label>
                     <div class="writer-action-bar">
@@ -1776,7 +1776,15 @@
                       <button class="control-button writer-primary" type="button" id="writerSetupGenerate">生成整套设定</button>
                       <button class="control-button" type="button" id="writerSetupSave">保存修改为新版本</button>
                     </div>
-                    <p class="writer-hint">生成的是整套设定（主角与配角都会按上面的数量出）；每完成一步都存一版，失败时保留前面已完成的步骤。这里不再出大纲与章节——大纲请到「大纲」页生成，章节由拆章产出。</p>
+                    <div class="writer-action-bar writer-step-rerun-bar">
+                      <span class="writer-step-rerun-label">只重跑一步：</span>
+                      <button class="control-button tiny" type="button" data-writer-step-rerun="genre">题材</button>
+                      <button class="control-button tiny" type="button" data-writer-step-rerun="title">书名</button>
+                      <button class="control-button tiny" type="button" data-writer-step-rerun="blurb">简介</button>
+                      <button class="control-button tiny" type="button" data-writer-step-rerun="world">世界观</button>
+                      <button class="control-button tiny" type="button" data-writer-step-rerun="chars">角色</button>
+                    </div>
+                    <p class="writer-hint">生成的是整套设定（主角与配角都会按上面的数量出）；每完成一步都存一版，失败时保留前面已完成的步骤。「只重跑一步」先弹预览确认，跑完只替换那一步的内容。这里不再出大纲与章节——大纲请到「大纲」页生成，章节由拆章产出。</p>
                   </div>
 
                   <div class="writer-stage-group" id="writerFreeformGroup" hidden>
@@ -2126,6 +2134,22 @@
               <div class="writer-dialog-actions">
                 <button class="control-button" type="button" id="writerImportCommit">确认导入为新作品</button>
                 <button class="control-button" type="button" id="writerImportCancel">取消</button>
+              </div>
+            </form>
+          </dialog>
+
+          <!-- 单步重跑前的输入预览：会带上什么、只改哪里，确认后才发起。 -->
+          <dialog class="writer-dialog" id="writerStepRerunDialog" aria-labelledby="writerStepRerunTitle">
+            <form method="dialog" class="writer-dialog-form">
+              <h3 id="writerStepRerunTitle">重跑这一步</h3>
+              <p class="writer-note" id="writerStepRerunIntro" role="status"></p>
+              <div class="writer-step-rerun-slots" id="writerStepRerunSlots" aria-label="会带上的素材"></div>
+              <p class="writer-note" id="writerStepRerunChange"></p>
+              <p class="writer-note writer-step-rerun-warn" id="writerStepRerunWarn" hidden></p>
+              <p class="writer-dialog-error" id="writerStepRerunError" role="alert"></p>
+              <div class="writer-dialog-actions">
+                <button class="control-button writer-primary" type="button" id="writerStepRerunStart">开始重跑</button>
+                <button class="control-button" type="button" id="writerStepRerunCancel">取消</button>
               </div>
             </form>
           </dialog>

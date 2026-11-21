@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.7.1-beta
-  RELEASE_TAG: v4.7.1-beta
+  RELEASE_VERSION: 4.7.2-beta
+  RELEASE_TAG: v4.7.2-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.7.1-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.7.2-beta-windows-x64
   # 旧名包：只为兼容留存文档 / 教程 / 口口相传的旧下载链接，内容与 `PACKAGE_NAME` 等价；
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.7.1-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.7.2-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.7.1 Beta release
+      - name: Publish 4.7.2 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.7.1 Beta
+          name: Cat Chat 4.7.2 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,10 +193,13 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.7.1 Beta：拆章抢救、自由文本出口与批量结果清理
-            拆章抢救：模型返回的章节安排格式坏了（输出被截断、多余逗号、字符串里夹换行、表格外带说明文字等）时，程序先自动修复格式再读取；修好且章数齐全的直接继续生成，不再要求整批重来。
-            找回残章：修不完整时，按括号配平找回的章节自动放进「待你处理」的补充编辑器，显示找回数量与缺口；找回内容须经人工检查后「补充继续」，不提供一键接受。
-            截断保留：输出达到长度上限但内容完整可读时，解析出的章节同样保留进编辑器，不随截断丢弃。
-            自由文本出口：关闭 JSON 的作品设定链照常推进，产物原文归档进设定页底部「自由文本输出」，可展开复制、世界观/书名/简介一键填回表单（已有内容先确认）；拆章给出「第N章」候选行确认后落目录，不再因为不认自由文本而断链。
-            验证与边界：本地单元回归 5182 项通过（2 项按环境跳过）、织书台定向回归与前端静态检查通过，使用隔离数据和假模型。未做真实供应商付费探针；本版不包含 GOAL 试验功能。
-            Cat Chat 4.7.1 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            Cat Chat 4.7.2 Beta：GOAL 长任务模式
+            GOAL 入口：主对话输入框点「＋」选「GOAL」进入；输入框出现 GOAL 标签，点发送才创建目标，不用 GOAL 时一切照旧。目标会占住这个对话直到完成或取消，期间编辑、删除、归档、清空历史都会被拒绝保护。
+            自主推进：目标发出后自主连续工作、自动换轮续办，不会中途反复询问；模型请求、工具动作、轮次和截止时间都有持久记账，超限或到时如实停下并说明原因。可暂停、继续、取消，重启后自动从最近进度接续，不会伪造用户新消息，也不会重做已完成的事。
+            独立验收：目标支持文件验收（路径、内容、哈希）与固定本地检查（文件哈希/内容、JSON 结构、文件清单计数），全部条件通过才自动完成；自由目标交付后进入「待验收」等你确认，模型回复不代表验收通过。
+            后台任务等待：目标可以等待本对话已有的后台任务，等待期间不发模型请求、绝不重发任务；任务完成自动续办，失败、取消、中断都会如实说明。
+            追加额度：目标额度用完时可在目标卡详情追加模型请求、工具动作或时限，同一笔追加请求重复提交只生效一次。
+            目标详情：预算用量、验收进度、停止原因、轮次记录、引用计划与等待对象都在目标卡详情里可见。
+            稳定性修复：等待后台任务的目标续办后清除旧等待标记——修复前续办轮再做工具动作会被误判成新的等待，目标永久卡在运行中（暂停后恢复同样命中）。
+            验证与边界：本地单元回归 5289 项通过（3 项按环境跳过）、GOAL 定向与前端确定性场景、五窗口外部强杀恢复测试通过；真实供应商 teres 与 te chat 各跑一次最小目标成功，实测换轮后缓存命中 85–94%。GOAL 自动工具范围仅限工作区文件读写与任务查询，不含命令执行、发布或付费生成；手机端文件选择未实测。
+            Cat Chat 4.7.2 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

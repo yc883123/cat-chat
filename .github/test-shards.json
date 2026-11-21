@@ -139,7 +139,8 @@
   "test_workspace_binding",
   "test_writer_feedback_round2",
   "test_writer_prompts",
-  "test_writer_service"
+  "test_writer_service",
+  "test_writer_step_rerun_frontend"
  ],
  [
   "test_appearance",

@@ -21,7 +21,10 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from naiba.app import NaibaChatApp
+from naiba.core.contracts import GOAL_DEFAULT_LIMITS
+from naiba.jobs import JobRegistry, JobSpec
 from naiba.run import goals as goal_runtime
+from naiba.run import goal_checks as goal_checks_module
 from naiba.storage.goals import GoalConflict
 from tests import test_goals as fixture
 from tests.test_compaction import GOOD_SUMMARY
@@ -225,6 +228,44 @@ class GoalRecoveryTests(unittest.TestCase):
         self.assertEqual(result["id"], goal["id"])
         self.assertEqual(len(self.wire), 1)
         self.assertEqual(sum(m["role"] == "user" for m in self.app.storage.get_conversation(self.cid)["messages"]), 1)
+
+    def test_resume_after_paused_wait_drops_stale_binding_and_continues(self):
+        # 暂停等待中的目标再恢复：旧的等待交接不得泄漏进续办轮，否则
+        # 续办轮工具组闭合会被误判成新等待并因 run_id 不符永久卡死。
+        job_id = self.app.jobs.start(JobSpec(kind="shell", conversation_id=self.cid,
+            params={"command": "Start-Sleep -Seconds 3"}, label="resume-wait-fixture", detached=True))
+        self.app.storage.set_enabled_tool_ids(self.cid,
+            ["read_file", "write_file", "edit_file", "reset_context", "job_wait", "job_status", "job_output"])
+        self.reply = lambda body: (self.call("job_wait", {"job_id": job_id}, "wait-r") if len(self.wire) == 1
+            else self.call("write_file", {"path": "result.txt", "content": "after-wait"}, "write-r")
+            if len(self.wire) == 2 else self.text("已创建。\nGOAL: completed"))
+        goal = self.submit(criteria=[{"path": "result.txt", "contains": "after-wait"}], job_ids=[job_id])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            row = self.app.goals.store.get(goal["id"])
+            if row["status"] == "waiting_tool":
+                break
+            time.sleep(.02)
+        else:
+            self.fail(f"goal never entered wait: {row}")
+        with patch.object(self.app.goals, "start"):
+            self.app.goals.control(goal["id"], "pause", row["version"])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            paused = self.app.goals.store.get(goal["id"])
+            if paused["status"] == "paused":
+                break
+            time.sleep(.02)
+        else:
+            self.fail(f"goal never paused: {paused}")
+        with patch.object(self.app.goals, "start"):
+            resumed = self.app.goals.control(goal["id"], "resume", paused["version"])
+        self.assertEqual(resumed["status"], "queued")
+        self.assertEqual(resumed["wait_binding"], {})
+        result = self.drive(goal["id"])
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertEqual((result["model_requests"], result["tool_actions"]), (3, 2))
+        self.assertEqual((self.workspace / "result.txt").read_text(), "after-wait")
         self.assertEqual(len(self.rounds(goal["id"])), 2)
 
     def test_queued_cancel_survives_reinstantiation_without_dispatch(self):
@@ -586,13 +627,15 @@ def _goal_recovery_process(root_text, endpoint, scenario, phase):
     """Child entry point: patch crash windows, never patch recovery decisions."""
     from naiba import net as net_io
     from naiba.config import ConfigStore
+    from naiba.jobs import JobRegistry, JobSpec
     from naiba.paths import PathContext
+    from naiba.run import goal_checks as goal_checks_module
     from naiba.storage.goals import GoalStore
     from naiba.storage.store import ChatStorage
 
     root = Path(root_text).resolve()
     workspace = root / "workspace"
-    target = workspace / "result.txt"
+    targets = {workspace / "result.txt", workspace / "result.json"}
     expected_url = endpoint + "/chat/completions"
     port = urlsplit(endpoint).port
     observations = {"write_calls": 0, "file_mutations": [], "digest_checks": [], "network_denials": []}
@@ -605,7 +648,13 @@ def _goal_recovery_process(root_text, endpoint, scenario, phase):
         threading.Event().wait()  # Only the parent's Popen.kill() releases this process.
 
     def same_target(raw):
-        return isinstance(raw, (str, bytes, os.PathLike)) and Path(os.fsdecode(raw)).resolve() == target
+        # 审计事件的 open 首参可能是整数 fd（os.fdopen）；只比对真实路径。
+        if not isinstance(raw, (str, bytes, os.PathLike)):
+            return False
+        try:
+            return Path(os.fsdecode(raw)).resolve() in targets
+        except (OSError, ValueError):
+            return False
 
     def audit(event, args):
         if event == "open" and same_target(args[0]):
@@ -625,6 +674,10 @@ def _goal_recovery_process(root_text, endpoint, scenario, phase):
     original_digest = goal_runtime._file_digest
     original_create = ChatStorage.create_run
     original_finish = GoalStore.finish_action
+    original_transition = GoalStore.transition
+    original_extend = GoalStore.extend
+    original_start_registered = JobRegistry.start_registered
+    original_execute = goal_checks_module.execute
 
     def deny_network(value):
         observations["network_denials"].append(str(value))
@@ -669,6 +722,34 @@ def _goal_recovery_process(root_text, endpoint, scenario, phase):
         if phase == "crash" and scenario == "confirmed":
             barrier(goal_id=goal_id, action_id=action_id, window="confirmed")
 
+    def transition_then_block(store, row, status, *args, **kwargs):
+        result = original_transition(store, row, status, *args, **kwargs)
+        binding = kwargs.get("wait_binding") or {}
+        if phase == "crash" and scenario == "job_wait" and result and status == "waiting_tool" \
+                and binding.get("kind") == "job":
+            # waiting_tool 与等待绑定已提交；调度线程停在这里，Job 工人线程照常运行。
+            barrier(target_id=binding.get("target_id"), window="job_wait")
+        return result
+
+    def extend_then_block(store, goal_id, version, request_id, increments, extra_minutes):
+        row = original_extend(store, goal_id, version, request_id, increments, extra_minutes)
+        if phase == "crash" and scenario == "extend":
+            # 回执与限额已同事务提交；HTTP 响应永远不会送达，客户端只能按原请求重放。
+            barrier(goal_id=goal_id, request_id=request_id, window="extend")
+        return row
+
+    def start_registered_then_block(registry, job_id, spec):
+        if phase == "crash" and scenario == "goal_check_bind":
+            # bind_check 已随 create_run 事务提交，检查工人尚未启动。
+            barrier(job_id=job_id, window="goal_check_bind")
+        return original_start_registered(registry, job_id, spec)
+
+    def execute_then_block(snapshot, cancel_event=None):
+        if phase == "crash" and scenario == "goal_check_run":
+            # 检查任务已置 running，但核对尚未执行。
+            barrier(window="goal_check_run")
+        return original_execute(snapshot, cancel_event=cancel_event)
+
     app = None
     with ExitStack() as stack:
         stack.enter_context(patch.object(net_io, "open", local_open))
@@ -679,6 +760,10 @@ def _goal_recovery_process(root_text, endpoint, scenario, phase):
         stack.enter_context(patch.object(goal_runtime, "_file_digest", observe_digest))
         stack.enter_context(patch.object(ChatStorage, "create_run", create_then_block))
         stack.enter_context(patch.object(GoalStore, "finish_action", finish_then_block))
+        stack.enter_context(patch.object(GoalStore, "transition", transition_then_block))
+        stack.enter_context(patch.object(GoalStore, "extend", extend_then_block))
+        stack.enter_context(patch.object(JobRegistry, "start_registered", start_registered_then_block))
+        stack.enter_context(patch.object(goal_checks_module, "execute", execute_then_block))
         paths = PathContext.local(root, root / "config.json")
         if phase == "crash":
             workspace.mkdir()
@@ -697,33 +782,91 @@ def _goal_recovery_process(root_text, endpoint, scenario, phase):
                 cid = app.storage.create_conversation("Process recovery fixture", model_key="online:goal-fixture",
                     model_name="goal-fixture", permission_mode="full", workspace_dir=str(workspace),
                     reasoning_effort="off")["id"]
-                app.storage.set_enabled_tool_ids(cid, ["read_file", "write_file", "edit_file", "reset_context"])
+                tools = (["job_status", "job_output", "job_wait", "write_file"] if scenario == "job_wait"
+                         else ["read_file", "write_file", "edit_file", "reset_context"])
+                app.storage.set_enabled_tool_ids(cid, tools)
                 app.storage.set_conversation_chat_supports_images(cid, False)
                 app.storage.update_conversation_settings(cid, stream_enabled=False)
-                app.goals.submit({"conversation_id": cid, "message": "Create result.txt once, then verify completion.",
-                    "request_id": "external-process-once", "criteria": [{"path": "result.txt",
-                        "contains": "verified-once", "sha256": hashlib.sha256(b"verified-once").hexdigest()}]})
+                if scenario == "job_wait":
+                    job_id = app.jobs.start(JobSpec(kind="shell", conversation_id=cid,
+                        params={"command": "Start-Sleep -Seconds 6"}, label="GOAL 等待夹具", detached=True))
+                    emit("info", job_id=job_id)
+                    app.goals.submit({"conversation_id": cid,
+                        "message": "等待后台任务完成后创建 result.txt 并验收完成。",
+                        "request_id": "external-process-once", "job_ids": [job_id],
+                        "criteria": [{"path": "result.txt", "contains": "verified-once",
+                            "sha256": hashlib.sha256(b"verified-once").hexdigest()}]})
+                elif scenario in {"goal_check_bind", "goal_check_run"}:
+                    app.goals.submit({"conversation_id": cid,
+                        "message": "创建 result.json，通过本地验收后完成。",
+                        "request_id": "external-process-once",
+                        "criteria": [{"kind": "json_structure", "params": {"path": "result.json",
+                            "schema": {"type": "object", "required": ["ok"],
+                                       "properties": {"ok": {"type": "boolean"}}}}}]})
+                elif scenario == "extend":
+                    created = app.goals.submit({"conversation_id": cid, "message": "推进目标直至完成。",
+                        "request_id": "external-process-once"})
+                    deadline = time.monotonic() + 25
+                    while time.monotonic() < deadline:
+                        row = app.goals.store.get(created["id"])
+                        if row["status"] == "blocked":
+                            break
+                        time.sleep(.02)
+                    else:
+                        raise AssertionError(f"extend fixture never settled: {row}")
+                    app.goals.extend(created["id"], {"version": row["version"], "request_id": "extend-once",
+                        "increments": {"model_requests": 5}})
+                    return  # extend_then_block 内部已 barrier；只有父进程 kill 能释放。
+                else:
+                    app.goals.submit({"conversation_id": cid, "message": "Create result.txt once, then verify completion.",
+                        "request_id": "external-process-once", "criteria": [{"path": "result.txt",
+                            "contains": "verified-once", "sha256": hashlib.sha256(b"verified-once").hexdigest()}]})
                 threading.Event().wait()
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:
                 with app.storage._connect() as db:
                     row = dict(db.execute("SELECT * FROM chat_goals").fetchone())
-                if row["status"] not in {"queued", "running", "pausing", "cancelling"}:
+                # waiting_tool 在集合内：crash 阶段主线程原地打转直到被杀，
+                # restart 阶段等调度器把持久等待解析成 queued/终态。
+                if row["status"] not in {"queued", "running", "waiting_tool", "pausing", "cancelling"}:
                     break
                 time.sleep(.02)
             else:
                 raise AssertionError(f"Restart did not settle: {row}")
+            extend_report = None
+            if phase == "restart" and scenario == "extend":
+                with app.storage._connect() as db:
+                    goal_id = db.execute("SELECT id FROM chat_goals").fetchone()[0]
+                    receipt = json.loads(db.execute(
+                        "SELECT receipt FROM chat_goal_budget_receipts WHERE request_id='extend-once'").fetchone()[0])
+                # 客户端按原请求体重放：同一 request_id 与内容；version 只是 CAS 旁观者。
+                replayed = app.goals.extend(goal_id, {"version": receipt["version"] - 1,
+                    "request_id": "extend-once", "increments": {"model_requests": 5}})
+                settled_row = app.goals.store.get(goal_id)
+                with app.storage._connect() as db:
+                    receipt_count = db.execute("SELECT COUNT(*) FROM chat_goal_budget_receipts").fetchone()[0]
+                extend_report = {"limits": dict(replayed["limits"]), "receipts": receipt_count,
+                    "version": settled_row["version"], "model_requests": settled_row["model_requests"]}
+                app.goals.control(goal_id, "cancel", settled_row["version"])
+                deadline = time.monotonic() + 25
+                while time.monotonic() < deadline:
+                    row = app.goals.store.get(goal_id)
+                    if row["status"] == "cancelled":
+                        break
+                    time.sleep(.02)
+                else:
+                    raise AssertionError(f"extend replay did not cancel: {row}")
             # Leave the real scheduler running for multiple scans; catch late sends/writes.
             time.sleep(.7)
             resume_rejected = False
-            if scenario != "next_round":
+            if scenario not in {"next_round", "extend"}:
                 current = app.goals.store.get(row["id"])
                 try:
                     app.goals.control(row["id"], "resume", current["version"])
                 except GoalConflict:
                     resume_rejected = True
             emit("settled", observations=observations, resume_rejected=resume_rejected,
-                 module_path=str(Path(goal_runtime.__file__).resolve()), pid=os.getpid())
+                 module_path=str(Path(goal_runtime.__file__).resolve()), pid=os.getpid(), extend=extend_report)
         finally:
             if app is not None:
                 app.stop()
@@ -740,6 +883,9 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
         self.requests = []
         self.http_errors = []
         self.http_lock = threading.Lock()
+        self.scenario = "next_round"
+        self.max_requests = 2
+        self.job_id = ""
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -748,11 +894,9 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
                 with owner.http_lock:
                     owner.requests.append(body)
                     number = len(owner.requests)
-                    if self.path != "/v1/chat/completions" or number > 2:
+                    if self.path != "/v1/chat/completions" or number > owner.max_requests:
                         owner.http_errors.append({"path": self.path, "number": number})
-                response = (fixture.GoalTests.call("write_file", {"path": "result.txt", "content": "verified-once"},
-                                                  "external-write-once") if number == 1 else
-                            fixture.GoalTests.text("Verified.\nGOAL: completed"))
+                response = owner.model_reply(number)
                 data = json.dumps(response).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -769,6 +913,26 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
         self.addCleanup(self.close_http)
         self.endpoint = f"http://127.0.0.1:{self.http.server_port}/v1"
 
+    def model_reply(self, number):
+        """Per-scenario scripted model turns; restart phases continue the counter."""
+        if self.scenario == "job_wait":
+            if number == 1:
+                return fixture.GoalTests.call("job_wait", {"job_id": self.job_id}, "wait-once")
+            if number == 2:
+                return fixture.GoalTests.call("write_file", {"path": "result.txt", "content": "verified-once"},
+                                              "write-once")
+            return fixture.GoalTests.text("后台任务已完成，产物已创建。\nGOAL: completed")
+        if self.scenario in {"goal_check_bind", "goal_check_run"}:
+            if number == 1:
+                return fixture.GoalTests.call("write_file", {"path": "result.json", "content": "{\"ok\": true}"},
+                                              "write-json")
+            return fixture.GoalTests.text("已写入 result.json。\nGOAL: completed")
+        if self.scenario == "extend":
+            return fixture.GoalTests.text("遇到外部阻塞，先停在这里。\nGOAL: blocked")
+        return (fixture.GoalTests.call("write_file", {"path": "result.txt", "content": "verified-once"},
+                                       "external-write-once") if number == 1 else
+                fixture.GoalTests.text("Verified.\nGOAL: completed"))
+
     def close_http(self):
         self.http.shutdown()
         self.http.server_close()
@@ -776,6 +940,8 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
         self.assertFalse(self.http_thread.is_alive(), "fake HTTP server leaked")
 
     def launch(self, root, scenario, phase):
+        self.scenario = scenario
+        self.max_requests = {"job_wait": 3, "extend": 1}.get(scenario, 2)
         env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(self.repo), str(self.repo / "tests"))),
                    PYTHONUTF8="1", PYTHONIOENCODING="utf-8", NAIBA_ERROR_DUMP_DIR=str(root / "errors"))
         command = "from tests.test_goal_recovery import _goal_recovery_process; import sys; _goal_recovery_process(*sys.argv[1:])"
@@ -789,7 +955,10 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
                 for line in process.stdout:
                     output.append(line.rstrip())
                     if line.startswith(_PROCESS_EVENT_PREFIX):
-                        events.put(json.loads(line[len(_PROCESS_EVENT_PREFIX):]))
+                        event = json.loads(line[len(_PROCESS_EVENT_PREFIX):])
+                        if event.get("kind") == "info" and event.get("job_id"):
+                            self.job_id = event["job_id"]
+                        events.put(event)
             finally:
                 events.put({"kind": "eof"})
 
@@ -826,7 +995,9 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
                 return {"goal": goal, "rounds": rows("SELECT * FROM chat_goal_rounds ORDER BY generation"),
                     "actions": rows("SELECT * FROM chat_goal_actions"),
                     "users": rows("SELECT id,role,content FROM messages WHERE role='user'"),
-                    "runs": rows("SELECT id,status,input_message_id,origin_run_id FROM background_tasks"),
+                    "runs": rows("SELECT id,status,input_message_id,origin_run_id,kind FROM background_tasks"),
+                    "jobs": rows("SELECT id,kind,status FROM background_tasks WHERE kind<>'chat'"),
+                    "receipts": rows("SELECT goal_id,request_id,request_hash FROM chat_goal_budget_receipts"),
                     "started": rows("SELECT run_id FROM run_events WHERE event_type='run_started'")}
         finally:
             connection.close()
@@ -878,6 +1049,41 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"verified-once")
         self.assertEqual(target.stat().st_mtime_ns, before["file_stat"].st_mtime_ns)
         return after, report
+
+    def wait_job_terminal(self, root, job_id, status="completed", timeout=30):
+        deadline = time.monotonic() + timeout
+        uri = (root / "data" / "chat.db").as_uri() + "?mode=ro"
+        while time.monotonic() < deadline:
+            connection = sqlite3.connect(uri, uri=True)
+            try:
+                row = connection.execute("SELECT status FROM background_tasks WHERE id=?", (job_id,)).fetchone()
+            finally:
+                connection.close()
+            if row and row[0] == status:
+                return
+            time.sleep(.05)
+        self.fail(f"job {job_id[:12]} never reached {status}")
+
+    def kill_and_restart(self, root, scenario):
+        """Crash at the scenario's committed window, then restart and settle."""
+        process, events, output = self.launch(root, scenario, "crash")
+        event = self.event(process, events, output, "barrier")
+        self.assertEqual(event["window"], scenario, output)
+        before = self.snapshot(root)
+        before["files"] = {p.name: p.stat().st_mtime_ns for p in root.glob("workspace/*") if p.is_file()}
+        self.assertIsNone(process.poll(), output)
+        process.kill()  # TerminateProcess/SIGKILL；没有任何优雅收尾。
+        process.wait(timeout=10)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(self.snapshot(root), {k: v for k, v in before.items() if k != "files"},
+                         "killed child unexpectedly settled its Run")
+        restart_process, events, output = self.launch(root, scenario, "restart")
+        report = self.event(restart_process, events, output, "settled")
+        restart_process.wait(timeout=15)
+        self.assertEqual(restart_process.returncode, 0, "\n".join(output))
+        self.assertNotEqual(restart_process.pid, process.pid)
+        self.assertEqual(Path(report["module_path"]), self.repo / "naiba" / "run" / "goals.py")
+        return before, self.snapshot(root), report
 
     def test_next_round_committed_before_dispatch_recovers_without_duplicate_input(self):
         before, killed_pid = self.kill_at_barrier(self.root, "next_round")
@@ -931,6 +1137,126 @@ class GoalExternalProcessRecoveryTests(unittest.TestCase):
                 self.assertEqual(after["actions"], [{**before["actions"][0], "state": "confirmed"}])
                 self.assertIn(hashlib.sha256(b"verified-once").hexdigest(), report["observations"]["digest_checks"])
                 self.assertTrue(report["resume_rejected"], report)
+
+    def test_job_wait_committed_before_kill_resumes_and_completes_once(self):
+        root = self.root / "job_wait"
+        root.mkdir()
+        process, events, output = self.launch(root, "job_wait", "crash")
+        info = self.event(process, events, output, "info")
+        job_id = info["job_id"]
+        event = self.event(process, events, output, "barrier")
+        self.assertEqual(event["window"], "job_wait")
+        self.assertEqual(event["target_id"], job_id)
+        # 目标调度线程停在被杀窗口里；shell Job 的工人线程照常跑完并落库。
+        self.wait_job_terminal(root, job_id)
+        before = self.snapshot(root)
+        goal = before["goal"]
+        binding = json.loads(goal["wait_binding"])
+        self.assertEqual(goal["status"], "waiting_tool")
+        self.assertEqual(binding, {"kind": "job", "target_id": job_id, "goal_id": goal["id"],
+                                   "run_id": goal["run_id"], "state": "waiting"})
+        self.assertEqual((goal["model_requests"], goal["tool_actions"]), (1, 1))
+        self.assertEqual(len(self.requests), 1, output)
+        self.assertEqual(len(before["users"]), 1)
+        self.assertEqual(before["jobs"], [{"id": job_id, "kind": "shell", "status": "completed"}])
+        self.assertFalse((root / "workspace" / "result.txt").exists())
+        self.assertIsNone(process.poll(), output)
+        process.kill()
+        process.wait(timeout=10)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual(self.snapshot(root), before, "killed child unexpectedly settled its Run")
+        restart_process, events, output = self.launch(root, "job_wait", "restart")
+        report = self.event(restart_process, events, output, "settled")
+        restart_process.wait(timeout=15)
+        self.assertEqual(restart_process.returncode, 0, "\n".join(output))
+        self.assertNotEqual(restart_process.pid, process.pid)
+        after = self.snapshot(root)
+        cp = json.loads(goal["checkpoint"])
+        self.assertTrue(any(m["role"] == "tool" for m in cp["messages"]))
+        from naiba.llm.runtime import ModelRuntime
+        self.assertEqual(self.requests[1]["messages"], ModelRuntime._openai_messages(cp["messages"]))
+        self.assertEqual(self.requests[1]["tools"], self.requests[0]["tools"])
+        # 等待绑定持久化：重启后从库里解析等待、自动续办完成；不重发任务、不新增用户输入。
+        self.assertEqual(after["goal"]["status"], "completed", after["goal"]["reason"])
+        self.assertEqual((after["goal"]["model_requests"], after["goal"]["tool_actions"]), (3, 2))
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(after["users"], before["users"])
+        self.assertEqual([r["generation"] for r in after["rounds"]], [1, 2, 3])
+        self.assertEqual(after["jobs"], [{"id": job_id, "kind": "shell", "status": "completed"}])
+        self.assertEqual((root / "workspace" / "result.txt").read_bytes(), b"verified-once")
+        observations = report["observations"]
+        self.assertEqual(observations["write_calls"], 1, report)
+        self.assertEqual(observations["file_mutations"], ["os.link"], report)
+        self.assertEqual(observations["network_denials"], [], report)
+        self.assertEqual(self.http_errors, [])
+        self.assertIn(hashlib.sha256(b"verified-once").hexdigest(), observations["digest_checks"])
+        self.assertTrue(report["resume_rejected"], report)
+
+    def test_local_check_survives_kill_in_register_and_run_windows(self):
+        for window, job_status in (("goal_check_bind", "queued"), ("goal_check_run", "running")):
+            with self.subTest(window=window):
+                root = self.root / window
+                root.mkdir()
+                with self.http_lock:
+                    self.requests.clear()
+                self.http_errors.clear()
+                before, after, report = self.kill_and_restart(root, window)
+                goal = before["goal"]
+                binding = json.loads(goal["wait_binding"])
+                self.assertEqual(goal["status"], "waiting_tool")
+                self.assertEqual(binding["kind"], "goal_check")
+                self.assertEqual((goal["model_requests"], goal["tool_actions"]), (2, 1))
+                self.assertEqual(len(self.requests), 2, before)
+                self.assertEqual(len(before["users"]), 1)
+                self.assertEqual(before["jobs"],
+                                 [{"id": binding["target_id"], "kind": "goal_check", "status": job_status}])
+                self.assertTrue((root / "workspace" / "result.json").is_file())
+                # 重启后 GOAL 调度器接管：重新驱动本地检查，零模型请求完成验收。
+                self.assertEqual(after["goal"]["status"], "completed", after["goal"]["reason"])
+                self.assertEqual((after["goal"]["model_requests"], after["goal"]["tool_actions"]), (2, 1))
+                self.assertEqual(len(self.requests), 2, "restart dispatched another model request")
+                self.assertEqual(after["users"], before["users"])
+                # _QUANTUM=2：第 1 轮量子续接，第 2 轮交付并派发本地检查。
+                self.assertEqual([r["generation"] for r in after["rounds"]], [1, 2])
+                self.assertEqual(after["jobs"],
+                                 [{"id": binding["target_id"], "kind": "goal_check", "status": "completed"}])
+                evidence = json.loads(after["goal"]["evidence"])
+                self.assertTrue(evidence, after["goal"])
+                self.assertTrue(all(item["passed"] for item in evidence))
+                self.assertEqual([item["check_id"] for item in evidence], ["json_structure"])
+                self.assertEqual((root / "workspace" / "result.json").read_bytes(), b'{"ok": true}')
+                self.assertEqual({p.name: p.stat().st_mtime_ns for p in root.glob("workspace/*") if p.is_file()},
+                                 before["files"])
+                observations = report["observations"]
+                self.assertEqual(observations["write_calls"], 0, report)
+                self.assertEqual(observations["file_mutations"], [], report)
+                self.assertEqual(observations["network_denials"], [], report)
+                self.assertEqual(self.http_errors, [])
+                self.assertTrue(report["resume_rejected"], report)
+
+    def test_extend_receipt_replay_after_process_death_is_idempotent(self):
+        root = self.root / "extend"
+        root.mkdir()
+        before, after, report = self.kill_and_restart(root, "extend")
+        goal = before["goal"]
+        self.assertEqual(goal["status"], "blocked")
+        self.assertEqual(json.loads(goal["limits"])["model_requests"], GOAL_DEFAULT_LIMITS["model_requests"] + 5)
+        self.assertEqual(len(before["receipts"]), 1)
+        self.assertEqual(goal["model_requests"], 1)
+        self.assertEqual(len(before["users"]), 1)
+        self.assertEqual(len(self.requests), 1)
+        # 重放与原请求同 request_id、同内容：只返回既有回执，不二次加额度、不推进版本。
+        extend = report["extend"]
+        self.assertEqual(extend["limits"]["model_requests"], GOAL_DEFAULT_LIMITS["model_requests"] + 5)
+        self.assertEqual(extend["receipts"], 1)
+        self.assertEqual(extend["model_requests"], 1)
+        self.assertEqual(extend["version"], goal["version"])
+        self.assertEqual(json.loads(after["goal"]["limits"]), json.loads(goal["limits"]))
+        self.assertEqual(len(after["receipts"]), 1)
+        self.assertEqual(after["goal"]["status"], "cancelled", after["goal"]["reason"])
+        self.assertEqual(after["goal"]["model_requests"], 1)
+        self.assertEqual(after["users"], before["users"])
+        self.assertEqual(self.http_errors, [])
 
 
 if __name__ == "__main__":

@@ -946,6 +946,19 @@
                 <div class="comfyui-batch-history-head">
                   <strong>批次</strong>
                   <small>批量生成的每一批都留在这里，进行中的实时刷新；点一批看逐条产物、重试或删除，点「编辑」回到填单区改内容</small>
+                  <details class="wb-media-menu comfyui-tasks-actions">
+                    <summary aria-label="批次结果管理" title="结果管理">⋯</summary>
+                    <div class="wb-media-menu-panel">
+                    <button class="control-button tiny" id="comfyuiBatchClearTasks" type="button" title="勾选已结束的批次后删除">清除</button>
+                    </div>
+                  </details>
+                </div>
+                <div class="comfyui-clear-bar" id="comfyuiBatchClearBar" hidden>
+                  <span class="comfyui-clear-count" role="status">已选 0 批</span>
+                  <small class="comfyui-clear-note">全选仅包含已加载的已结束批次；正在生成的批次不参与清除。</small>
+                  <button class="control-button tiny" id="comfyuiBatchClearSelectAll" type="button">全选已加载</button>
+                  <button class="control-button tiny" id="comfyuiBatchClearDelete" type="button" disabled>删除所选</button>
+                  <button class="control-button tiny" id="comfyuiBatchClearCancel" type="button">取消</button>
                 </div>
                 <div class="comfyui-batch-list" id="comfyuiBatchList" aria-label="批次列表"></div>
                 <div class="comfyui-history-footer" id="comfyuiBatchHistoryFooter"><span role="status"></span><button type="button" class="control-button tiny" data-comfyui-history-more="batches">加载更早记录</button></div>
@@ -1758,12 +1771,17 @@
                         <span>结构化字段输出（JSON）</span>
                       </label>
                     </div>
-                    <p class="writer-hint" id="writerOutputModeHint">开启时按阶段字段输出并严格校验；关闭后模型自由发挥，题材、简介、分类、角色和章节不会自动填表，需要手动整理。</p>
+                    <p class="writer-hint" id="writerOutputModeHint">开启时按阶段字段输出并严格校验；关闭后模型自由发挥，原文存档在下方「自由文本输出」，可复制或填入表单；拆章每批生成后会停下来，等你确认成章节才进目录。</p>
                     <div class="writer-action-bar">
                       <button class="control-button writer-primary" type="button" id="writerSetupGenerate">生成整套设定</button>
                       <button class="control-button" type="button" id="writerSetupSave">保存修改为新版本</button>
                     </div>
                     <p class="writer-hint">生成的是整套设定（主角与配角都会按上面的数量出）；每完成一步都存一版，失败时保留前面已完成的步骤。这里不再出大纲与章节——大纲请到「大纲」页生成，章节由拆章产出。</p>
+                  </div>
+
+                  <div class="writer-stage-group" id="writerFreeformGroup" hidden>
+                    <div class="writer-group-head"><strong>自由文本输出</strong><small>非 JSON 模式的原文存档（最近 30 条）；已登记的章节和已采用的字段不在这里重复展示</small></div>
+                    <div class="writer-freeform-list" id="writerFreeformList"></div>
                   </div>
                 </div>
 

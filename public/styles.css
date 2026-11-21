@@ -5067,6 +5067,10 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-batch-row.is-failed .comfyui-batch-progress > span { background: var(--danger); }
 .comfyui-batch-row-wrap { display: flex; align-items: stretch; gap: 6px; }
 .comfyui-batch-row-wrap .comfyui-batch-row { flex: 1 1 auto; min-width: 0; }
+.comfyui-batch-row-wrap.is-selected .comfyui-batch-row { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--violet-line); }
+.comfyui-batch-row-check { flex: none; display: flex; align-items: center; gap: 6px; margin: 0; padding: 0 2px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.comfyui-batch-row-check input[type="checkbox"] { display: inline-block; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; cursor: pointer; }
+.comfyui-batch-row-check span { max-width: 5.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .comfyui-batch-row-edit { flex: none; padding: 0 10px; font: inherit; font-size: 11.5px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); cursor: pointer; }
 .comfyui-batch-row-edit:hover, .comfyui-batch-row-edit:focus-visible { border-color: var(--violet-line); background: var(--surface-2); }
 .comfyui-batch-meta { display: block; font-size: 10.5px; color: var(--muted); }
@@ -6193,6 +6197,30 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .writer-candidate:hover { border-color: var(--violet-line); background: var(--accent-soft); }
+
+/* 自由文本输出（非 JSON 模式的原文存档）：折叠行 + 展开全文。 */
+.writer-freeform-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.writer-freeform-row {
+  min-width: 0; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-inset);
+}
+.writer-freeform-row > summary {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0;
+  cursor: pointer; font-size: 12px; color: var(--text);
+}
+.writer-freeform-row > summary::-webkit-details-marker { display: none; }
+/* 375px 下标签+时间+按钮一行放不下：允许换行，meta 可截断，按钮永不收缩。 */
+.writer-freeform-row > summary small {
+  color: var(--muted); font-size: 11px; white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.writer-freeform-row > summary .control-button { flex: 0 0 auto; }
+.writer-freeform-actions { display: flex; gap: 6px; margin-left: auto; }
+.writer-freeform-text {
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line);
+  font-size: 12px; line-height: 1.7; color: var(--text);
+  white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto;
+}
 
 /* 角色卡 */
 .writer-char-list { display: flex; flex-direction: column; gap: 8px; }

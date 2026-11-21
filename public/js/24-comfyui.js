@@ -58,6 +58,10 @@ const comfyui = {
   clearSelection: new Set(),
   clearEpoch: 0,
   clearRequest: null, // 与模式生命周期分离：切页不会解除仍在执行的删除请求。
+  batchClearMode: false,
+  batchClearSelection: new Set(),
+  batchClearEpoch: 0,
+  batchClearRequest: null, // 批次档的勾选式清除；与单次档互不影响，删除请求同样跨切页存活。
   chatConfig: null,   // 「对话参数」弹窗草稿 {workflowId, workflowName, fingerprint, bindings, params}；关弹窗即弃
 };
 
@@ -390,6 +394,7 @@ export function bindComfyuiEvents() {
       const meter = document.getElementById("comfyuiStepMeter");
       if (meter) meter.hidden = true;
       exitClearMode();
+      exitBatchClearMode();
       stopPolling();
       stopBackgroundRefresh();
       stopBatchPolling();
@@ -410,6 +415,10 @@ export function bindComfyuiEvents() {
   $("#comfyuiClearSelectAll")?.addEventListener("click", toggleClearSelectAll);
   $("#comfyuiClearDelete")?.addEventListener("click", () => void deleteSelectedTasks());
   $("#comfyuiClearCancel")?.addEventListener("click", exitClearMode);
+  $("#comfyuiBatchClearTasks")?.addEventListener("click", enterBatchClearMode);
+  $("#comfyuiBatchClearSelectAll")?.addEventListener("click", toggleBatchClearSelectAll);
+  $("#comfyuiBatchClearDelete")?.addEventListener("click", () => void deleteSelectedBatches());
+  $("#comfyuiBatchClearCancel")?.addEventListener("click", exitBatchClearMode);
   $("#comfyuiFreeModels")?.addEventListener("click", () => void freeModels());
   $("#comfyuiOpenOutputs")?.addEventListener("click", () => void openOutputsFolder());
   $("#comfyuiParamsSave")?.addEventListener("click", () => void saveParamsConfig());
@@ -462,6 +471,7 @@ export function bindComfyuiEvents() {
   }
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiTaskList")?.addEventListener("change", onTaskClearToggle);
+  $("#comfyuiBatchList")?.addEventListener("change", onBatchClearToggle);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#studioPageComfyui")?.addEventListener("click", (event) => {
     const button = event.target.closest?.("[data-comfyui-history-more]");
@@ -563,6 +573,7 @@ function setComfyuiPane(pane) {
 function setComfyuiResultsSegment(seg) {
   comfyui.resultsSegment = seg === "batch" ? "batch" : "single";
   if (comfyui.resultsSegment === "batch") exitClearMode();
+  else exitBatchClearMode();
   const root = $("#studioPageComfyui");
   if (root) root.dataset.resultsSegment = comfyui.resultsSegment;
   document.querySelectorAll("#comfyuiResultsSeg [data-comfyui-results-seg]").forEach((node) => {
@@ -4225,6 +4236,122 @@ async function deleteSelectedTasks() {
   if (current() && !clearableTaskIds().length) exitClearMode();
 }
 
+// ---- 批次档的勾选式清除（对齐单次档）：列表页直接勾批次卡片删除 ----
+// 判定口径与单次一致：正在生成的批次不参与清除（整批删除会先取消在跑条目，
+// 但批量动作不悄悄取消生成，让用户等批次结束后再清）。
+
+function batchRowRunning(row) {
+  return (row.items || []).some((item) => ["queued", "running"].includes(String(item?.status)));
+}
+
+function clearableBatchIds() {
+  return [...new Set(batch.histories.filter((row) => !batchRowRunning(row)
+    && !batch.deletingBatches.has(String(row.id))).map((row) => String(row.id || "")).filter(Boolean))];
+}
+
+function renderBatchClearBar() {
+  const bar = $("#comfyuiBatchClearBar");
+  if (!bar) return;
+  bar.hidden = !comfyui.batchClearMode;
+  if (!comfyui.batchClearMode) return;
+  const ids = clearableBatchIds();
+  const selected = ids.filter((id) => comfyui.batchClearSelection.has(id)).length;
+  const busy = Boolean(comfyui.batchClearRequest);
+  bar.querySelector(".comfyui-clear-count").textContent = `已选 ${selected} / ${ids.length} 批`;
+  const all = $("#comfyuiBatchClearSelectAll");
+  all.textContent = ids.length && selected === ids.length ? "取消全选" : "全选已加载";
+  all.disabled = busy || !ids.length;
+  const remove = $("#comfyuiBatchClearDelete");
+  remove.disabled = busy || !selected;
+  remove.textContent = busy ? "正在删除…" : selected ? `删除所选（${selected}）` : "删除所选";
+}
+
+function enterBatchClearMode() {
+  if (comfyui.batchClearMode) return;
+  if (!clearableBatchIds().length) { toast("没有可清除的批次；正在生成的批次结束后再清除"); return; }
+  comfyui.batchClearEpoch += 1;
+  comfyui.batchClearMode = true;
+  comfyui.batchClearSelection = new Set();
+  $("#comfyuiBatchListSection details.comfyui-tasks-actions")?.removeAttribute("open");
+  renderBatchHistoryList();
+}
+
+function exitBatchClearMode() {
+  if (!comfyui.batchClearMode && !comfyui.batchClearSelection.size) return;
+  comfyui.batchClearEpoch += 1;
+  comfyui.batchClearMode = false;
+  comfyui.batchClearSelection = new Set();
+  // 在途请求仍持锁；退出只改变本次界面，不撤销已经确认的删除。
+  renderBatchHistoryList();
+}
+
+function toggleBatchClearSelectAll() {
+  if (!comfyui.batchClearMode || comfyui.batchClearRequest) return;
+  const ids = clearableBatchIds();
+  const all = ids.length && ids.every((id) => comfyui.batchClearSelection.has(id));
+  comfyui.batchClearSelection = new Set(all ? [] : ids);
+  renderBatchHistoryList();
+}
+
+function onBatchClearToggle(event) {
+  const box = event.target.closest?.("[data-comfyui-batch-check]");
+  if (!box || !comfyui.batchClearMode) return;
+  const id = String(box.dataset.comfyuiBatchCheck || "");
+  const wrap = box.closest(".comfyui-batch-row-wrap");
+  if (comfyui.batchClearRequest || !clearableBatchIds().includes(id)) {
+    box.checked = comfyui.batchClearSelection.has(id);
+    return;
+  }
+  if (box.checked) comfyui.batchClearSelection.add(id);
+  else comfyui.batchClearSelection.delete(id);
+  wrap?.classList.toggle("is-selected", box.checked);
+  renderBatchClearBar();
+}
+
+async function deleteSelectedBatches() {
+  if (!comfyui.batchClearMode || comfyui.batchClearRequest) return;
+  const allowed = new Set(clearableBatchIds());
+  const ids = [...comfyui.batchClearSelection].filter((id) => allowed.has(id));
+  if (!ids.length) return;
+  if (!window.confirm(`删除所选的 ${ids.length} 个批次和它们的全部产物？正在生成的批次不参与清除；批次记录也会移除，无法从历史重新编辑。删除后无法恢复。`)) return;
+  const request = { epoch: comfyui.batchClearEpoch };
+  comfyui.batchClearRequest = request;
+  const current = () => comfyui.batchClearMode && comfyui.batchClearEpoch === request.epoch;
+  let deleted = 0;
+  const failed = [];
+  const removed = [];
+  renderBatchHistoryList();
+  try {
+    // 逐批提交既有整批删除：在跑条目先取消；一批没删干净会整批保留（409），
+    // 不能为凑进度把半删的批次记录悄悄丢掉。
+    for (const id of ids) {
+      try {
+        const payload = await api(`/api/comfyui/batches/${encodeURIComponent(id)}`, {
+          method: "DELETE", body: { delete_outputs: true },
+        });
+        if (payload?.ok === true) { deleted += 1; removed.push(id); }
+        else failed.push({ id, reason: "批次未完整删除，请刷新后重试" });
+      } catch (reason) {
+        // 404 = 批次已经不在（并发删除过）：按已清除处理，不算失败。
+        if (Number(reason?.status) === 404) { deleted += 1; removed.push(id); continue; }
+        failed.push({ id, reason: reason?.message || String(reason) });
+      }
+    }
+  } finally {
+    if (comfyui.batchClearRequest === request) comfyui.batchClearRequest = null;
+    if (current()) {
+      for (const id of removed) comfyui.batchClearSelection.delete(id);
+    }
+    if (removed.length) forgetHistoryRows("batches", removed);
+    renderBatchHistoryList();
+  }
+  const parts = [`已删除 ${deleted} 个批次`];
+  if (failed.length) parts.push(`${failed.length} 个批次未删除：${failed[0]?.reason || "请重试"}`);
+  toast(parts.join("；"));
+  void loadBatchHistories();
+  if (current() && !clearableBatchIds().length) exitBatchClearMode();
+}
+
 // ---- 产物 ----
 
 async function renderLatestOutputs() {
@@ -6810,9 +6937,17 @@ function batchHistoryBadge(row) {
 function renderBatchHistoryList() {
   const host = $("#comfyuiBatchList");
   if (!host) return;
+  if (comfyui.batchClearMode) {
+    const allowed = new Set(clearableBatchIds());
+    for (const id of comfyui.batchClearSelection) if (!allowed.has(id)) comfyui.batchClearSelection.delete(id);
+  }
+  renderBatchClearBar();
   historyViewport("#comfyuiBatchList", {
     key: (row) => row.id,
-    fingerprint: (row) => JSON.stringify([row.title, row.created_at, row.item_count, row.done_count, batchHistoryBadge(row)]),
+    // 清除模式/勾选变化也要触发重渲染：指纹带上档位状态，防止勾选框不出现。
+    fingerprint: (row) => JSON.stringify([row.title, row.created_at, row.item_count, row.done_count, batchHistoryBadge(row),
+      comfyui.batchClearMode ? (comfyui.batchClearSelection.has(String(row.id)) ? "selected" : "clear") : "idle",
+      Boolean(comfyui.batchClearRequest)]),
     render: (row) => {
       const template = document.createElement("template");
       template.innerHTML = batchHistoryRowMarkup(row);
@@ -6829,8 +6964,14 @@ function batchHistoryRowMarkup(row) {
     const total = Number(row.item_count ?? 0) || 0;
     const percent = total ? Math.min(100, Math.round(((Number(row.done_count ?? 0) || 0) / total) * 100)) : 0;
     const created = formatTime(row.created_at);
-    const id = escapeText(String(row.id || ""));
-    return `<div class="comfyui-batch-row-wrap">
+    const rawId = String(row.id || "");
+    const id = escapeText(rawId);
+    // 勾选框放在行按钮外面（button 里不能嵌表单控件）；在跑批次不给勾选框。
+    const selectable = comfyui.batchClearMode && !batchRowRunning(row) && !batch.deletingBatches.has(rawId);
+    const selected = comfyui.batchClearSelection.has(rawId);
+    const check = selectable ? `<label class="comfyui-batch-row-check"><input type="checkbox" data-comfyui-batch-check="${id}"${selected ? " checked" : ""}${comfyui.batchClearRequest ? " disabled" : ""}><span>选择这个批次</span></label>` : "";
+    return `<div class="comfyui-batch-row-wrap${comfyui.batchClearMode && selected ? " is-selected" : ""}">
+      ${check}
       <button type="button" class="comfyui-batch-row${cls === "fail" ? " is-failed" : ""}" data-batch-open="${id}">
         <span class="comfyui-batch-row-top"><strong>${escapeText(row.title || "未命名批次")}</strong><span class="cbm-badge ${cls}">${escapeText(label)}</span></span>
         <span class="comfyui-batch-progress"><span style="width:${percent}%"></span></span>
@@ -6844,6 +6985,7 @@ function batchHistoryRowMarkup(row) {
 // 耗时由服务端任务时间计算（打开详情不重新起算）；详情先置空由轮询拉取。
 function openBatchHistory(id) {
   if (!id) return;
+  exitBatchClearMode();
   batch.runId = String(id);
   batch.runFromHistory = true;
   batch.runData = null;
@@ -7275,6 +7417,7 @@ async function editCurrentBatch(batchIdOverride = "") {
 async function openBatchForEdit(id) {
   const batchId = String(id || "");
   if (!batchId) return;
+  exitBatchClearMode();
   await editCurrentBatch(batchId);
 }
 

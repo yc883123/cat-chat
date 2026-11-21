@@ -373,9 +373,26 @@ async function checkViewport(browser, viewport) {
     await reveal(batchHost, batch(fixture.oldest_batch), 'batches');
     assert.ok((await page.locator('#comfyuiBatchHistoryFooter span').textContent()).includes(`${fixture.batch_count} 个批次`),
       '从空列表新增多页后仍能完整加载批次历史');
+    // 批量档勾选式清除（对齐单次档）：进清除模式出勾选框、全选计数联动、取消退出（不删数据）。
+    await page.locator('#comfyuiBatchListSection details.comfyui-tasks-actions summary').click();
+    await page.locator('#comfyuiBatchClearTasks').click();
+    await page.locator('#comfyuiBatchClearBar').waitFor({ state: 'visible' });
+    assert.ok((await page.locator('#comfyuiBatchList [data-comfyui-batch-check]').count()) > 0,
+      '清除模式下批次卡片出现勾选框');
+    const batchCountText = () => page.locator('#comfyuiBatchClearBar .comfyui-clear-count').textContent();
+    assert.ok((await batchCountText()).includes('已选 0 /'), '进入清除模式默认未选');
+    await page.locator('#comfyuiBatchClearSelectAll').click();
+    await page.waitForTimeout(60);
+    const batchTotal = Number((await batchCountText()).match(/已选 (\d+) \/ (\d+) 批/)[2]);
+    assert.ok(batchTotal > 0 && (await batchCountText()).includes(`已选 ${batchTotal} / ${batchTotal} 批`),
+      '全选后计数联动');
+    await page.locator('#comfyuiBatchClearCancel').click();
+    await page.waitForTimeout(60);
+    assert.ok(await page.locator('#comfyuiBatchClearBar').isHidden(), '取消后退出清除模式');
+    assert.equal(await page.locator('#comfyuiBatchList [data-comfyui-batch-check]').count(), 0, '退出后勾选框消失');
     await checkBounds();
     await page.screenshot({ path: path.join(OUTPUT, `history_${viewport.width}.png`) });
-    console.log(`通过 ${viewport.width}×${viewport.height}：96单次/72批真实分页、虚拟窗口、独立滚动、媒体懒读、提交保留历史、快照高级参数、空列表后多页新增、轮询位置保留与删除并发`);
+    console.log(`通过 ${viewport.width}×${viewport.height}：96单次/72批真实分页、虚拟窗口、独立滚动、媒体懒读、提交保留历史、快照高级参数、空列表后多页新增、轮询位置保留与删除并发、批量档勾选清除`);
   } catch (error) {
     console.error('历史验收错误：', errors);
     await page.screenshot({ path: path.join(OUTPUT, `history_failed_${viewport.width}.png`) });

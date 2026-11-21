@@ -89,6 +89,97 @@ function setup(rows, api) {
         result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_batch_clear_running_exclusion_deletion_and_epoch_lock(self):
+        """批次档勾选式清除：在跑批次不可清、404 按已清除计、失败批次保留、在途请求锁。"""
+        script = r'''
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const source = fs.readFileSync('public/js/24-comfyui.js', 'utf8');
+function extract(name) {
+  const start = source.search(new RegExp('^(?:async )?function ' + name + '\\(', 'm'));
+  assert.ok(start >= 0, name);
+  return source.slice(start, source.indexOf('\n}', start) + 2);
+}
+const functions = ['batchRowRunning', 'clearableBatchIds', 'renderBatchClearBar',
+  'enterBatchClearMode', 'exitBatchClearMode', 'toggleBatchClearSelectAll',
+  'onBatchClearToggle', 'deleteSelectedBatches'].map(extract).join('\n');
+function setup(rows, api) {
+  const context = { comfyui: { batchClearMode: false, batchClearSelection: new Set(),
+      batchClearEpoch: 0, batchClearRequest: null },
+    batch: { histories: rows, deletingBatches: new Set() },
+    $: () => null, window: { confirm: () => true }, api, URLSearchParams, encodeURIComponent,
+    renderBatchHistoryList() {}, renderBatchClearBar() {}, toast() {},
+    loadBatchHistories: async () => {}, removed: [],
+    forgetHistoryRows(kind, ids) {
+      assert.equal(kind, 'batches');
+      this.removed.push(...ids);
+      this.batch.histories = this.batch.histories.filter(row => !ids.includes(row.id));
+    } };
+  context.forgetHistoryRows = context.forgetHistoryRows.bind(context);
+  vm.createContext(context); vm.runInContext(functions, context); return context;
+}
+(async () => {
+  // 在跑批次（running/queued 条目）与删除中的批次都不进可清除集合。
+  const rows = [
+    { id: 'wb-a', items: [{ status: 'completed' }, { status: 'running' }] },
+    { id: 'wb-b', items: [{ status: 'completed' }] },
+    { id: 'wb-c', items: [] },
+    { id: 'wb-d', items: [{ status: 'queued' }] },
+  ];
+  const calls = [];
+  const s = setup(rows, async (url, options) => {
+    calls.push([url, options.method, options.body.delete_outputs]);
+    assert.ok(options.method === 'DELETE' && options.body.delete_outputs === true);
+    return { ok: true, deleted: 2, skipped: [], failed: [] };
+  });
+  s.batch.deletingBatches.add('wb-c');
+  s.enterBatchClearMode();
+  assert.equal(s.comfyui.batchClearMode, true);
+  s.toggleBatchClearSelectAll();
+  assert.deepEqual([...s.comfyui.batchClearSelection].sort(), ['wb-b']);
+  await s.deleteSelectedBatches();
+  assert.deepEqual(calls, [['/api/comfyui/batches/wb-b', 'DELETE', true]]);
+  assert.deepEqual(s.removed, ['wb-b']);
+  assert.equal(s.comfyui.batchClearMode, false, '清完可清批次自动退出清除模式');
+  assert.equal(s.comfyui.batchClearRequest, null);
+
+  // 404 按已清除计；409/失败批次保留在勾选集里等待重试。
+  const rows2 = [{ id: 'wb-x', items: [] }, { id: 'wb-y', items: [] }, { id: 'wb-z', items: [] }];
+  const s2 = setup(rows2, async (url) => {
+    if (url.endsWith('wb-x')) { const e = new Error('批次不存在或已被删除'); e.status = 404; throw e; }
+    if (url.endsWith('wb-y')) return { ok: true, deleted: 1, skipped: [], failed: [] };
+    const e = new Error('有任务没能删掉，批次先保留'); e.status = 409; throw e;
+  });
+  s2.enterBatchClearMode(); s2.toggleBatchClearSelectAll();
+  assert.deepEqual([...s2.comfyui.batchClearSelection].sort(), ['wb-x', 'wb-y', 'wb-z']);
+  await s2.deleteSelectedBatches();
+  assert.deepEqual(s2.removed.sort(), ['wb-x', 'wb-y']);
+  assert.deepEqual([...s2.comfyui.batchClearSelection], ['wb-z']);
+  assert.equal(s2.comfyui.batchClearMode, true, '还有可清批次时保持清除模式');
+
+  // 全是在跑批次时进不了清除模式，提示讲清原因。
+  let notice = '';
+  const s3 = setup([{ id: 'wb-run', items: [{ status: 'running' }] }], async () => { throw new Error('not reached'); });
+  s3.toast = (msg) => { notice = msg; };
+  s3.enterBatchClearMode();
+  assert.equal(s3.comfyui.batchClearMode, false);
+  assert.ok(notice.includes('正在生成'));
+
+  // epoch 锁与单次口径一致：退出/重进不解锁在途请求，旧回包不覆盖新模式。
+  const s4 = setup([{ id: 'wb-a', items: [] }, { id: 'wb-b', items: [] }], async () => new Promise(() => {}));
+  s4.enterBatchClearMode(); s4.comfyui.batchClearSelection.add('wb-a');
+  const pending = s4.deleteSelectedBatches();
+  const request = s4.comfyui.batchClearRequest;
+  s4.exitBatchClearMode(); s4.enterBatchClearMode();
+  assert.equal(s4.comfyui.batchClearRequest, request, '退出不能解除在途请求锁');
+  s4.toggleBatchClearSelectAll(); assert.equal(s4.comfyui.batchClearSelection.size, 0);
+  s4.comfyui.batchClearSelection.add('wb-b');
+  assert.equal(s4.comfyui.batchClearMode, true);
+  s4.exitBatchClearMode();
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_kvmem_old_response_and_error_cannot_overwrite_new_provider(self):
         script = r'''
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');

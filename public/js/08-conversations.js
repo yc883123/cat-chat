@@ -12,6 +12,7 @@ import { closePermissionModeMenu, closeQuickMessagePanel, hideChoiceButtons, upd
 import { prefillPresetSkillsInComposer } from "./13-skill-refs.js";
 import { clearFileRefCache, hideFilePopup } from "./16-file-refs.js";
 import { closeFilePanel, closeSidebar } from "./14-file-panel.js";
+import { goalIsActive } from "./31-goals.js";
 
 let openGeneration = 0;
 let openTargetId = '';
@@ -792,6 +793,7 @@ export async function applySidebarViewPref(kind, value) {
 export async function toggleConversationArchive(id) {
   const conversation = state.conversations.find((item) => item.id === id);
   if (!conversation) return;
+  if (goalIsActive(id)) { toast('目标未结束，请先取消目标再归档'); return; }
   const next = Number(conversation.archived || 0) !== 1;
   closeConversationMenu();
   conversation.archived = next ? 1 : 0;
@@ -930,7 +932,10 @@ async function submitSidebarBatch(action, ids, chunkSize) {
   const verb = action === 'delete' ? '删除' : (action === 'archive' ? '归档' : '取消归档');
   for (let start = 0; start < ids.length; start += chunkSize) {
     if (!sidebarBatchMode) break; // 退出后不再发新批次；已发出的照常收结果
-    const chunk = ids.slice(start, start + chunkSize);
+    const selected = ids.slice(start, start + chunkSize);
+    const chunk = selected.filter(id => !goalIsActive(id));
+    failed.push(...selected.filter(id => goalIsActive(id)).map(id => ({ id, code: 'busy', error: '目标未结束，请先取消目标' })));
+    if (!chunk.length) continue;
     sidebarBatchProgress = `正在${verb} ${Math.min(start + chunk.length, ids.length)}/${ids.length}`;
     syncSidebarBatchBars();
     try {
@@ -1033,6 +1038,7 @@ export async function runSidebarBatchDelete() {
     } else {
       state.firstTurnInfo = null;
       renderMessages([]);
+      document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: '' } }));
       renderPermissionModeSwitch();
     }
   }
@@ -1421,7 +1427,7 @@ export async function createConversation(workspaceGroup = '', workspaceDir = '',
   renderMessages([]);
   renderPermissionModeSwitch();
   state.conversationSnapshot = conversationSnapshot(conversation);
-  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: conversation.id } }));
+  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: conversation.id, created: true } }));
   closeSidebar();
   if (prefillSkills) prefillPresetSkillsInComposer(conversation);
   $('#messageInput').focus();
@@ -2220,6 +2226,7 @@ export async function clearTerminalTasks() {
 }
 
 export async function deleteConversation(id) {
+  if (goalIsActive(id)) { toast('目标未结束，请先取消目标再删除对话'); return; }
   closeConversationMenu();
   if (id === state.conversationId && state.chatRunId) {
     toast('请先停止当前回复再删除对话');
@@ -2251,6 +2258,7 @@ export async function deleteConversation(id) {
     // 最后一个会话被删除：清掉其 firstTurnInfo 残留，避免空视图错误展示首轮上下文条
     state.firstTurnInfo = null;
     renderMessages([]);
+    document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: '' } }));
   }
 }
 

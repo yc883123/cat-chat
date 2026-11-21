@@ -465,6 +465,40 @@ class JobRegistry:
         thread.start()
         return job_id
 
+    def start_registered(self, job_id: str, spec: JobSpec) -> None:
+        """Start a host-registered local check without creating another Job."""
+        from naiba.core.contracts import GOAL_LOCAL_CHECK_KIND
+
+        if spec.kind != GOAL_LOCAL_CHECK_KIND:
+            raise ValueError("仅支持已登记的目标本地检查")
+        with self._lock:
+            if job_id in self._threads:
+                return
+            job = self.app.storage.get_background_task(job_id)
+            if not job or job.get("kind") != spec.kind or job.get("status") not in {"queued", "interrupted"}:
+                return
+            cancel = threading.Event()
+            self._cancel[job_id] = cancel
+            self._condition(job_id)
+            thread = threading.Thread(target=self._run_goal_check, args=(job_id, spec, cancel),
+                                      name=f"job-goal-check-{job_id[:8]}", daemon=True)
+            self._threads[job_id] = thread
+            thread.start()
+
+    def _run_goal_check(self, job_id: str, spec: JobSpec, cancel: threading.Event) -> None:
+        from naiba.run.goal_checks import execute
+
+        try:
+            self._set_status(job_id, "running", started=True, current_step="正在核对目标产物")
+            result = execute(spec.params["input_snapshot"], cancel_event=cancel)
+            self._finish(job_id, "cancelled" if cancel.is_set() else "completed", result=result)
+        except Exception as exc:
+            self._finish(job_id, "failed", error=str(exc)[:1000])
+        finally:
+            with self._lock:
+                self._threads.pop(job_id, None)
+                self._cancel.pop(job_id, None)
+
     def get(self, job_id: str, owner: str | None = None) -> dict[str, Any] | None:
         job = self.app.storage.get_background_task(job_id)
         if not job:

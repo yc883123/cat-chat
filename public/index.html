@@ -2312,6 +2312,7 @@
       </dialog>
 
       <section class="composer-wrap">
+        <section class="goal-card" id="goalCard" aria-label="目标状态" hidden></section>
         <div class="active-task-bar" id="activeTaskBar" hidden></div>
         <div class="pending-files" id="pendingFiles" hidden></div>
         <!-- 插话队列（运行中排队的新指令）：紧贴输入框上方，与「选择」面板同层但互斥——
@@ -2319,10 +2320,13 @@
         <div class="run-guidance-list" id="runGuidanceList" hidden aria-live="polite"></div>
         <form class="composer" id="composerForm">
           <input id="fileInput" type="file" multiple hidden>
-          <button class="icon-button attach-button" type="button" id="attachButton" title="添加文件" aria-label="添加文件">
+          <button class="icon-button attach-button" type="button" id="attachButton" title="添加" aria-label="添加" aria-haspopup="menu" aria-expanded="false" aria-controls="attachMenu">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9"></path><path d="M12 7v10M7 12h10"></path></svg>
           </button>
           <div class="composer-input">
+            <span class="goal-draft-chip" id="goalDraftChip" hidden title="使用当前对话的 Agent、模型和工作区。发送后开始执行。">GOAL<button type="button" id="exitGoalDraft" aria-label="退出 GOAL，保留草稿" title="退出 GOAL，保留草稿">×</button></span>
+            <button type="button" class="goal-plan-button" id="goalPlanButton" hidden title="把已添加的附件解析为目标计划">解析计划</button>
+            <div class="goal-plan-summary" id="goalPlanSummary" hidden aria-live="polite"></div>
             <div class="skill-popup" id="skillPopup" role="listbox" hidden></div>
             <div class="file-popup" id="filePopup" role="listbox" hidden></div>
             <div class="input-mirror" id="inputMirror" aria-hidden="true"></div>

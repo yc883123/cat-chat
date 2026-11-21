@@ -1187,6 +1187,44 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .active-task-bar button { border: 0; background: transparent; color: var(--accent); padding: 0; font-weight: 600; }
 .composer { min-height: 52px; display: flex; align-items: flex-end; gap: 6px; padding: 6px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg); box-shadow: var(--shadow-2); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--brand-500-rgb), .12); }
+/* GOAL 标签在输入框内占一行，窄屏不再挤压正文宽度；镜像与 textarea 同步下移。 */
+.goal-draft-chip { position: relative; z-index: 2; display: flex; width: fit-content; align-items: center; gap: 4px; margin: 2px 6px 0; padding: 0 3px 0 7px; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; height: 28px; }
+.goal-draft-chip[hidden] { display: none; }
+.goal-draft-chip button { width: 28px; height: 28px; border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 17px; }
+.composer.is-goal-draft .input-mirror { top: 30px; height: calc(100% - 30px); }
+#goalCard { min-width: 0; max-height: min(36vh, 320px); overflow: auto; margin-bottom: 8px; }
+#goalCard[hidden] { display: none; }
+#goalCard header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+#goalCard header span { color: var(--muted); }
+#goalCard .goal-card-message, #goalCard .goal-card-reason { white-space: pre-wrap; overflow-wrap: anywhere; }
+#goalCard .goal-card-message { max-height: 5.1em; overflow: auto; }
+#goalCard p { margin: 5px 0; }
+#goalCard .goal-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+#goalCard pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+#goalCard summary { cursor: pointer; color: var(--muted); }
+#goalCard .goal-rounds ul { margin: 4px 0; padding-left: 18px; }
+#goalCard .goal-rounds li { margin: 3px 0; font-size: 12px; }
+#goalCard .goal-round-reason { color: var(--muted); }
+.goal-extend { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+.goal-extend p { color: var(--muted); font-size: 12px; }
+.goal-extend-fields { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 4px 0; }
+.goal-extend-field { display: flex; align-items: center; gap: 6px; }
+.goal-extend-field span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+/* 不放进 <label>（§9.169 全局 label input 规则会改成 40px 块级），用 div+span 组合。 */
+.goal-extend-field input { width: 90px; min-width: 0; height: 28px; padding: 2px 6px; display: block; }
+.goal-plan-button { position: relative; z-index: 2; height: 28px; margin: 2px 0 0 4px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--surface); color: var(--muted); font-size: 11px; cursor: pointer; }
+.goal-plan-button[hidden] { display: none; }
+.goal-plan-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; width: 100%; margin: 4px 0 0; padding: 6px 8px; border: 1px dashed var(--line-strong); border-radius: var(--r-sm); color: var(--muted); font-size: 12px; }
+.goal-plan-summary[hidden] { display: none; }
+.goal-plan-summary strong { color: var(--accent); font-size: 12px; }
+.goal-plan-summary button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0; }
+.conversation-goal-locked :is([data-edit-message], [data-delete-message], [data-regenerate-message], [data-session-start-after], [data-cancel-session-start], [data-cancel-compaction]) { display: none; }
+@media (pointer: coarse) {
+  .goal-draft-chip, .goal-draft-chip button { height: 36px; }
+  .goal-draft-chip button { width: 36px; }
+  .composer.is-goal-draft .input-mirror { top: 38px; height: calc(100% - 38px); }
+  #goalCard .control-button { min-height: 44px; }
+}
 .composer textarea { flex: 1; resize: none; border: 0; outline: 0; max-height: 180px; min-height: 38px; padding: 8px 6px; line-height: 1.45; color: var(--text); background: transparent; }
 
 /* Skill 快速引用：输入框镜像高亮层 + / 索引弹层 */

@@ -12,6 +12,7 @@ import { hideChoiceButtons, sendMessage, showChoiceButtons } from "./12-chat-inp
 import { hideSkillPopup, renderInputMirror, renderUserContent, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
 import { isQueuedInterjection, renderRunGuidance } from "./18-interjections.js";
+import { goalBlocksChat, goalDraftEnabled, guardGoalChat, setGoalDraftMode } from "./31-goals.js";
 // 当前会话所用 Agent 的自定义头像 URL（没有则空串 → 回退到默认的「AI」圆标）。
 // 与 currentAgentFixedSkillIds 同口径：会话绑定的 Agent 优先，失效时回退默认 Agent。
 export function currentAgentAvatarUrl() {
@@ -429,7 +430,10 @@ function mountEditComposer(row, { wrap, text = '', files = [] } = {}) {
 }
 
 export function startEditMessage(row) {
+  if (guardGoalChat()) return;
   if (!row) return;
+  // 历史消息的编辑重发仍是普通聊天，不能把底部 GOAL 草稿标签带入重发。
+  if (goalDraftEnabled()) setGoalDraftMode(false);
   // #composerForm：移动真实表单节点，不复制它，确保既有事件监听与 @/附件行为全部保留。
   if (state.editingMessageId) cancelActiveEdit();
   const body = row.querySelector('.message-body');
@@ -549,6 +553,8 @@ function resumeEditComposer(snapshot) {
 // 放行口径与 sendChatMessage/submit_chat 一致：**文字与可用附件至少有一个**——纯附件轮次
 // （只发文件/图片、不写字）同样可以重发；只传空文字又无附件才拒绝。
 export async function resendFromUserMessage(userMessageId, text, { successText = '已从该消息重开，编辑点之前的上下文将复用缓存', errorPrefix = '重发', attachments = [], attachmentsOverride = null, folderIndexes = [] } = {}) {
+  if (guardGoalChat()) return false;
+  if (goalDraftEnabled()) setGoalDraftMode(false);
   // 编辑/重发最终仍走同一条输入管线：notifyComposerChanged(input) 会刷新镜像、引用弹层与发送状态。
   const content = String(text ?? '').trim();
   const knownAttachments = Array.isArray(attachments) ? attachments : [];
@@ -639,6 +645,7 @@ export async function confirmEditMessage(row, newText, editedAttachments = null,
 // 截断点与「编辑」相同——都从那条 user 消息处截断，因此反复点击不会累积重复提问，
 // 且 U1..A(N-1) 字节级不动 → 前缀缓存照常命中（这是重发最省钱的理由）。
 export async function regenerateMessage(assistantMessageId) {
+  if (guardGoalChat()) return;
   if (state.chatRunId || state.abortController) {
     toast('请先等待当前回答结束或停止后再重新生成');
     return;
@@ -879,7 +886,7 @@ function hideDeleteUndo() {
 // 撤销：按快照把消息原样插回（后端逐字节还原 id/content/metadata/created_at）。
 export async function undoLastDelete() {
   const pending = deleteUndoState;
-  if (!pending) return;
+  if (!pending || goalBlocksChat(pending.conversationId)) return;
   hideDeleteUndo();
   try {
     await api('/api/messages/restore', {
@@ -894,6 +901,7 @@ export async function undoLastDelete() {
 }
 
 export async function deleteMessageFlow(row) {
+  if (guardGoalChat()) return;
   if (state.chatRunId || state.abortController) {
     toast('请先等待当前回答结束或停止后再删除');
     return;
@@ -929,7 +937,7 @@ export async function deleteMessageFlow(row) {
     notes.push('这条消息带有「新会话」分割线：删除后它之前的内容会重新进入模型上下文。');
   }
   const mode = await askDeleteScope({ isUser, notes });
-  if (!mode) return;
+  if (!mode || goalBlocksChat(conversationId)) return;
   try {
     const result = await api('/api/messages/delete', {
       method: 'POST',
@@ -945,6 +953,7 @@ export async function deleteMessageFlow(row) {
 
 // 在某条 AI 回复之后落一条「新会话」分割线：此线以上的消息不再进入模型上下文。
 export async function startNewSession(afterMessageId) {
+  if (guardGoalChat()) return;
   if (state.abortController || state.chatRunId) {
     toast('请先等待当前回答结束或停止后再划分割线');
     return;
@@ -969,6 +978,7 @@ export async function startNewSession(afterMessageId) {
 
 // 撤销分割线：此线以上的消息重新进入模型上下文。
 export async function cancelSessionStart(messageId) {
+  if (guardGoalChat()) return;
   if (!messageId) return;
   if (!window.confirm('撤销这条分割线？\n\n此线以上的消息会重新进入模型请求。')) return;
   try {
@@ -983,6 +993,7 @@ export async function cancelSessionStart(messageId) {
 // 撤销自动整理：删掉消息上的 compaction 标记，被整理的旧消息全部回到模型上下文。
 // 代价讲清楚：下一轮前缀缓存会从整理前的位置重建一次。
 export async function cancelCompaction(messageId) {
+  if (guardGoalChat()) return;
   if (!messageId) return;
   if (!window.confirm('撤销这次及后续整理？\n\n为避免后续摘要继续覆盖旧内容，本条及后续整理会一起撤销；完整记录重新进入模型上下文，下一轮会重建一次缓存。')) return;
   try {

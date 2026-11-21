@@ -255,6 +255,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(self.app.api_system_resources())
         elif path == "/api/storage/stats":
             self._json(self.app.storage.storage_usage())
+        elif path == "/api/goals":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json({"goal": self.app.goals.latest(str(query.get("conversation_id", [""])[0]))})
+        elif path.startswith("/api/goals/") and path.endswith("/rounds"):
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                page_size = int(str(query.get("page_size", ["20"])[0]))
+                self._json(self.app.goals.rounds(path.strip("/").split("/")[2], page_size,
+                                                 str(query.get("cursor", [""])[0])))
+            except LookupError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except (ValueError, TypeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/usage/stats":
             query = urllib.parse.parse_qs(parsed.query)
             self._json(*self.app.api_usage_stats(query))
@@ -1779,6 +1792,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                         self._json({"retried": True, "job_id": new_id}, HTTPStatus.OK)
                     else:
                         self._json({"error": "Job 不存在或无权访问"}, HTTPStatus.NOT_FOUND)
+        elif path == "/api/goals" or path.startswith("/api/goals/"):
+            from naiba.storage.goals import GoalConflict
+
+            try:
+                if path == "/api/goals":
+                    result = self.app.goals.submit(body)
+                else:
+                    parts = path.strip("/").split("/")
+                    if len(parts) == 3 and parts[2] == "plan-preview":
+                        self._json({"plan": self.app.goals.preview_plan(body)})
+                        return
+                    if len(parts) != 4 or parts[3] not in {"pause", "resume", "cancel", "accept", "extend"}:
+                        raise LookupError("目标操作不存在")
+                    if type(body.get("version")) is not int:
+                        raise ValueError("需要目标状态版本")
+                    result = self.app.goals.control(parts[2], parts[3], body["version"], extras=body)
+                self._json({"goal": result})
+            except (GoalConflict, ActiveRunError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+            except LookupError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except (ValueError, TypeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/chat":
             self._chat(body)
         elif path == "/api/tasks":

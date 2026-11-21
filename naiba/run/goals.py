@@ -645,8 +645,11 @@ class GoalService:
         if target_status in {"queued", "running", "waiting", "stopping", "cancelling"}:
             return
         summary, _ = summarize_wait_target(target) if kind != "job" else summarize_job_result(target)
-        cp = {**(row.get("checkpoint") or {}),
-              "wait_result": {"target_id": target_id, "kind": kind, "status": target_status, "summary": summary}}
+        cp = {**(row.get("checkpoint") or {})}
+        # 等待已解析：必须清掉交接标记，否则续办轮的工具组闭合会被误判成新等待，
+        # 旧的 run_id 再触发「等待绑定不属于当前目标轮次」把目标永久卡在 running。
+        cp.pop("wait_binding", None)
+        cp["wait_result"] = {"target_id": target_id, "kind": kind, "status": target_status, "summary": summary}
         if target_status == "completed":
             self.store.transition(row, "queued", "后台任务已完成，继续目标", checkpoint=cp, settle=True, retry_count=0)
         else:
@@ -881,7 +884,11 @@ class GoalService:
                 if row["deadline_at"] <= goal_now() or row["model_requests"] >= model_limit \
                         or row["tool_actions"] >= tool_limit:
                     raise GoalConflict("目标额度已用完，请先追加额度或时限")
-                self.store.transition(row, "queued", checkpoint={**row["checkpoint"], "outcome": ""},
+                # 行级 wait_binding 由本调用清空；检查点里的旧交接标记一并清掉，
+                # 续办轮的组闭合不得把它当成本轮的新等待。
+                checkpoint = {**row["checkpoint"], "outcome": ""}
+                checkpoint.pop("wait_binding", None)
+                self.store.transition(row, "queued", checkpoint=checkpoint,
                                       no_progress=0, wait_binding={})
             elif action == "accept" and status == "awaiting_review":
                 self.store.transition(row, "completed", "你已确认完成", settle=True)

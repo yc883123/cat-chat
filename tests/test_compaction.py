@@ -674,15 +674,127 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self._compact(cancel_event=token)
         self.assertIs(self.app.models.calls[0]["options"]["cancel_event"], token)
 
+    def test_network_send_count_is_allowlisted_per_attempt(self):
+        def measured(*args, **kwargs):
+            self.app.models.last_diagnostics = {
+                compaction.NETWORK_SEND_COUNT_KEY: 2, "endpoint": "must-not-leak", "proxy_mode": "private",
+            }
+            return GOOD_SUMMARY
+
+        self.app.models.complete = mock.Mock(side_effect=measured)
+        result = self._compact()
+        self.assertTrue(result["compacted"], result)
+        attempt, = result["attempts"]
+        self.assertEqual(attempt[compaction.NETWORK_SEND_COUNT_KEY], 2)
+        self.assertNotIn("must-not-leak", json.dumps(result))
+        self.assertNotIn("proxy_mode", attempt)
+
+    def test_missing_or_invalid_network_observation_is_unknown_not_zero(self):
+        for count in (None, True, -1, "2", 1.5):
+            with self.subTest(count=count):
+                self.app.models.last_diagnostics = {compaction.NETWORK_SEND_COUNT_KEY: 99}
+
+                def unmeasured(*args, **kwargs):
+                    self.app.models.last_diagnostics = {compaction.NETWORK_SEND_COUNT_KEY: count}
+                    return GOOD_SUMMARY
+
+                self.app.models.complete = mock.Mock(side_effect=unmeasured)
+                result = self._compact()
+                self.assertTrue(result["compacted"], result)
+                self.assertNotIn(compaction.NETWORK_SEND_COUNT_KEY, result["attempts"][0])
+        # A substitute with no diagnostics must not retain a previous real call's count.
+        self.app.models.last_diagnostics = {compaction.NETWORK_SEND_COUNT_KEY: 99}
+        self.app.models.complete = mock.Mock(return_value=GOOD_SUMMARY)
+        self.assertNotIn(compaction.NETWORK_SEND_COUNT_KEY, self._compact()["attempts"][0])
+
+    def test_readonly_stale_diagnostics_are_not_observations(self):
+        class ReadOnlyModels:
+            last_diagnostics = property(lambda self: {compaction.NETWORK_SEND_COUNT_KEY: 99})
+            complete = mock.Mock(return_value=GOOD_SUMMARY)
+
+        self.app.models = ReadOnlyModels()
+        self.assertNotIn(compaction.NETWORK_SEND_COUNT_KEY, self._compact()["attempts"][0])
+
+    def test_send_gate_rejection_neither_retries_nor_changes_history(self):
+        from naiba import net as net_io
+        from naiba.llm.runtime import ModelRuntime
+
+        self.app.models = ModelRuntime()
+        rows = self._rows()
+        before = copy.deepcopy(rows)
+        gate = mock.Mock(return_value=False)
+        with mock.patch.object(net_io, "open") as opened:
+            result = self._compact(rows=rows, before_request_send=gate,
+                                   profile={**self.profile, "request_format": "openai_chat",
+                                            "base_url": "http://127.0.0.1:1/v1"})
+        opened.assert_not_called()
+        gate.assert_called_once_with()
+        self.assertFalse(result["compacted"])
+        self.assertEqual(result["reason"], "summary_failed:RequestSendRejected")
+        attempt, = result["attempts"]
+        self.assertEqual(attempt["reason"], "request_send_rejected")
+        self.assertEqual(attempt[compaction.NETWORK_SEND_COUNT_KEY], 0)
+        self.assertEqual(rows, before)
+        self.assertEqual(self.app.storage.calls, [])
+
+    def test_send_gate_rechecks_strategy_recovery_without_executing_hidden_tool(self):
+        from naiba import net as net_io
+        from naiba.llm.runtime import ModelRuntime
+        from tests.test_llm_runtime_retry import FakeResponse
+
+        self.app.models = ModelRuntime()
+        gate = mock.Mock(side_effect=[True, False])
+        hidden = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "hidden-call", "type": "function", "function": {
+                "name": "write_file", "arguments": '{"path":"must-not-execute.txt"}',
+            }},
+        ]}, "finish_reason": "tool_calls"}]}
+        rows = self._rows()
+        before = copy.deepcopy(rows)
+        with mock.patch.object(net_io, "open", return_value=FakeResponse(hidden)) as opened:
+            result = self._compact(rows=rows, before_request_send=gate,
+                                   profile={**self.profile, "request_format": "openai_chat",
+                                            "base_url": "http://127.0.0.1:1/v1"})
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(gate.call_count, 2)
+        self.assertEqual([a["reason"] for a in result["attempts"]],
+                         ["summary_tool_call", "request_send_rejected"])
+        self.assertEqual([a[compaction.NETWORK_SEND_COUNT_KEY] for a in result["attempts"]], [1, 0])
+        self.assertEqual(result["reason"], "summary_failed:RequestSendRejected")
+        self.assertEqual(rows, before)
+        self.assertEqual(self.app.storage.calls, [])
+        # _FakeApp has no tool executor: any hidden execution would fail this call.
+
+    def test_single_attempt_tool_call_keeps_its_failure_category(self):
+        self.app.models.finish_reason = "tool_calls"
+        self.app.models.reply = ""
+        result = compaction.request_summary(self.app, [], profile=self.profile,
+                                           settings=self.settings, attempt_limit=1)
+        self.assertEqual(result["reason"], "summary_tool_call")
+        self.assertEqual(len(self.app.models.calls), 1)
+        self.assertEqual(result["attempts"][0]["reason"], "summary_tool_call")
+
+    def test_summary_tool_shape_recovers_with_changed_instruction_only(self):
+        action = json.dumps({"tool": "write_file", "args": {"path": "forbidden.txt"}})
+        self.app.models.script = [action, GOOD_SUMMARY]
+        result = self._compact()
+        self.assertTrue(result["compacted"], result)
+        self.assertEqual([a["reason"] for a in result["attempts"]], ["summary_tool_call", "accepted"])
+        first, second = self.app.models.calls
+        self.assertEqual(first["messages"][:-1], second["messages"][:-1])
+        self.assertNotEqual(first["messages"][-1], second["messages"][-1])
+        self.assertNotIn(action, str(second["messages"]))
+        self.assertFalse(any("tools" in call["options"] for call in (first, second)))
+
     def test_summary_request_options_are_independent_and_clean(self):
-        """输出预算独立于正常回复；请求 options 只带 stream/max_tokens/cancel_event，
-        诊断元数据不得混进请求。"""
+        """输出预算独立于正常回复；观察派发是内部选项，不进入 wire。"""
         self._compact(cancel_event=mock.Mock(is_set=lambda: False))
         options = self.app.models.calls[0]["options"]
         self.assertEqual(
-            set(options) - {"cancel_event"}, {"stream", "max_tokens"},
+            set(options) - {"cancel_event", compaction.OBSERVE_NETWORK_SENDS_OPTION}, {"stream", "max_tokens"},
             "总结请求 options 不得夹带诊断/窗口字段",
         )
+        self.assertIs(options[compaction.OBSERVE_NETWORK_SENDS_OPTION], True)
         self.assertFalse(options["stream"])
         self.assertEqual(options["max_tokens"], self.settings["summary_max_tokens"])
 

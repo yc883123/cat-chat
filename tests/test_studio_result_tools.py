@@ -75,6 +75,7 @@ class ResultGenerationTests(unittest.TestCase):
         self.models.behavior = lambda *_args: "写好了"
         result = self.run_task()
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["result_issue"], "incomplete")
         self.assertEqual(result["result"], "")
         self.assertEqual(result["result_partial"], "")
         self.assertEqual(len(self.models.calls), 3)
@@ -87,6 +88,7 @@ class ResultGenerationTests(unittest.TestCase):
         self.models.behavior = failure
         result = self.run_task()
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["result_issue"], "")
         self.assertEqual(result["result_partial"], "已确认半篇")
         child = self.jobs.prepare_resume(result["id"], request_key="resume")
         def resumed(messages, options, event):

@@ -146,16 +146,14 @@ const cases = {
   },
   async cancelled_probe() {
     const original = data(); delete original.max_output_tokens; profiles.push(original);
-    const pending = deferred();
-    context.api = (url, options) => { requests.push({ url, body: options.body }); return pending.promise; };
     context.copyProvider('original');
     const saving = context.saveProvider(event);
-    assert.equal(requests[0].url, '/api/providers/models');
-    context.cancelProviderEdit();
-    pending.resolve({ models: [{ id: original.model, max_output_tokens: 4096 }] });
     await saving;
-    assert.equal(requests.length, 1, '预探测中取消不得继续创建副本');
-    assert.equal(profiles.length, 1);
+    assert.equal(requests.length, 1, '保存不应偷偷发起模型能力探测');
+    assert.equal(requests[0].url, '/api/providers');
+    assert.equal(Object.hasOwn(requests[0].body, 'max_output_tokens'), false,
+      '用户留空必须保持留空');
+    assert.equal(profiles.length, 2);
   },
   async late_save() {
     profiles.push(data(), { ...data(), id: 'second', name: '另一个源卡' });

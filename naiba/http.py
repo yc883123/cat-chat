@@ -1074,10 +1074,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 path[len("/api/writer/books/"):-len("/pipelines")], body))
         elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/cancel"):
             self._json(*self.app.writer.api_cancel_pipeline(
-                path[len("/api/writer/books/"):-len("/pipeline/cancel")]))
+                path[len("/api/writer/books/"):-len("/pipeline/cancel")], body))
         elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/retry"):
             self._json(*self.app.writer.api_retry_pipeline(
                 path[len("/api/writer/books/"):-len("/pipeline/retry")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/decision"):
+            self._json(*self.app.writer.api_pipeline_decision(
+                path[len("/api/writer/books/"):-len("/pipeline/decision")], body))
         elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/resume"):
             self._json(*self.app.writer.api_resume_pipeline(
                 path[len("/api/writer/books/"):-len("/pipeline/resume")], body))

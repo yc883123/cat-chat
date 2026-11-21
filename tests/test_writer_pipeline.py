@@ -10,6 +10,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from naiba.writer import prompts  # noqa: E402
 from naiba.writer.pipeline import WriterPipelineManager  # noqa: E402
-from naiba.writer.store import WriterStore  # noqa: E402
+from naiba.writer.store import WriterConflictError, WriterStore, WriterStoreError  # noqa: E402
 
 
 class _Jobs:
@@ -82,6 +83,13 @@ class _App:
         self.config = _Config()
         self.studio = type("S", (), {"jobs": None})()
         self.studio.jobs = _Jobs()
+
+
+def decision_body(record, action, *, key="writer-decision-test", **fields):
+    return {"pipeline_id": record["id"], "step": record["pending_user"]["step"],
+            "step_index": record["step_index"], "attempt": record["attempt"],
+            "decision_revision": record["decision_revision"], "action": action,
+            "request_key": key, **fields}
 
 
 class PipelineTestCase(unittest.TestCase):
@@ -260,10 +268,14 @@ class SetupChainTests(PipelineTestCase):
                        ensure_ascii=False))
         self.tick()
         record = self.current_pipeline()
-        self.assertEqual(record["status"], "failed")
-        self.assertIn("22", record["error"])
-        # 回满 22 个 → 通过。
-        self.manager.retry_pipeline(self.book_id)
+        # 内容问题现在进入待处理；用四动作里的 retry 继续当前步骤。
+        self.assertEqual(record["status"], "needs_user")
+        self.assertEqual(record["pending_user"]["counts"]["target"], 22)
+        self.manager.decide_pipeline(self.book_id, {
+            "action": "retry", "request_key": "retry-chars-1", "pipeline_id": record["id"],
+            "step": "chars", "step_index": record["step_index"], "attempt": record["attempt"],
+            "decision_revision": record["decision_revision"],
+        })
         record = self.current_pipeline()
         rows = [{"name": f"主角{i}", "role": "主角"} for i in range(1, 3)]
         rows += [{"name": f"配角{i}", "role": "配角"} for i in range(1, 21)]
@@ -293,12 +305,81 @@ class SetupChainTests(PipelineTestCase):
         self.app.studio.jobs.finish(task_id, "抱歉，我无法输出 JSON。")
         self.tick()
         record = self.current_pipeline()
-        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["status"], "needs_user")
         self.assertIn("JSON", record["error"])
+        self.assertIn("pending_user", record)
         # 前序成果保留：种子版 + 第 1 步的设定版本都在。
         detail = self.store.get_book(self.book_id)
         self.assertEqual(len(detail["book"]["setup_versions"]), 2)
         self.assertEqual(detail["setup"]["genre"]["cat"], "玄幻")
+
+    def test_needs_user_persists_and_decision_is_idempotent(self):
+        self.start()
+        record = self.current_pipeline()
+        task_id = record["current_task_id"]
+        self.app.studio.jobs.finish(task_id, "解释文字")
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        body = {"action": "skip", "confirmed": True, "reason": "先跳过题材",
+                "request_key": "decision-idempotent-1", "pipeline_id": record["id"],
+                "step": "genre", "step_index": record["step_index"],
+                "attempt": record["attempt"], "decision_revision": record["decision_revision"]}
+        self.manager = WriterPipelineManager(self.app, WriterStore(self.root))
+        self.assertEqual(self.manager.recover(), 0)
+        self.assertEqual(self.manager.get_pipeline(self.book_id)["pipeline"]["pending_user"]["raw"],
+                         record["pending_user"]["raw"])
+        first = self.manager.decide_pipeline(self.book_id, body)
+        submitted = len(self.app.studio.jobs.submitted)
+        second = self.manager.decide_pipeline(self.book_id, body)
+        self.assertEqual(first["pipeline"]["step_index"], 1)
+        self.assertEqual(second, first)
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
+        self.assertEqual(first["decision"]["request_key"], "decision-idempotent-1")
+
+    def test_accept_roles_keeps_only_valid_entries_and_records_gap(self):
+        self.store.save_setup(self.book_id, content={"idea": "港口", "references": [{"title": "原参考"}]})
+        self.start(kind="setup_step", step="chars", char_count=3)
+        task = self.last_task()
+        self.app.studio.jobs.finish(task["id"], '[{"name":"阿河"},{"identity":"尚未起名"}]')
+        self.tick()
+        pending = self.current_pipeline()
+        self.assertEqual(pending["pending_user"]["partial"][1]["identity"], "尚未起名")
+        self.assertNotIn("pending_accepted", self.manager.get_pipeline(self.book_id)["pipeline"])
+        self.assertNotIn("pending_user", self.store.list_books()["books"][0]["active_pipeline"])
+        accepted = self.manager.decide_pipeline(self.book_id, decision_body(pending, "accept"))
+        self.assertEqual(accepted["pipeline"]["status"], "done")
+        self.assertEqual(accepted["decision"]["counts"]["actual"], 1)
+        self.assertTrue(accepted["decision"]["missing"])
+        setup = self.store.load_setup(self.book_id)
+        self.assertEqual([row["name"] for row in setup["characters"]], ["阿河"])
+        self.assertEqual(setup["references"][0]["title"], "原参考")
+        self.assertEqual(setup["kind"], "manual")
+
+    def test_concurrent_book_edit_rejects_old_supplement_without_overwriting(self):
+        self.start()
+        self.app.studio.jobs.finish(self.last_task()["id"], '{"subCat":"走失"}')
+        self.tick()
+        pending = self.current_pipeline()
+        self.store.save_setup(self.book_id, content={"idea": "另外保存的新创意"})
+        with self.assertRaisesRegex(WriterConflictError, "版本冲突"):
+            self.manager.decide_pipeline(self.book_id, decision_body(pending, "supplement", content={"cat": "悬疑"}))
+        self.assertEqual(self.current_pipeline()["status"], "conflict")
+        self.assertEqual(self.store.load_setup(self.book_id)["idea"], "另外保存的新创意")
+        self.assertEqual(len(self.app.studio.jobs.submitted), 1)
+
+    def test_skip_requires_explicit_confirmation_and_pending_cannot_be_replaced(self):
+        self.start()
+        self.app.studio.jobs.finish(self.last_task()["id"], '')
+        self.tick()
+        pending = self.current_pipeline()
+        with self.assertRaisesRegex(WriterConflictError, "待处理"):
+            self.start()
+        with self.assertRaisesRegex(WriterStoreError, "明确确认"):
+            self.manager.decide_pipeline(self.book_id, decision_body(pending, "skip", confirmed="true", reason="稍后补"))
+        self.assertEqual(self.current_pipeline(), pending)
+        self.manager.cancel_pipeline(self.book_id, identity=decision_body(pending, "skip"))
+        self.assertEqual(self.current_pipeline()["status"], "cancelled")
 
     def test_non_done_task_stops_with_real_status(self):
         self.start()
@@ -510,9 +591,76 @@ class ChapterPipelineTests(PipelineTestCase):
         self.app.studio.jobs.finish(task_id, "写到一半", finish_reason="length")
         self.tick()
         record = self.current_pipeline()
-        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["status"], "needs_user")
         self.assertIn("截断", record["error"])
         self.assertEqual(self.store.get_chapter(self.book_id, 1)["content"], "")
+
+    def test_skip_segs_runs_whole_chapter_without_chunking(self):
+        self._prepare_outline()
+        self.start(kind="chapter_segs", chapter_no=1)
+        self.assertIn("段落要点", self.last_task()["input"]["content"])
+        self.app.studio.jobs.finish(self.last_task()["id"], '["只有一条要点"]')
+        self.tick()
+        pending = self.current_pipeline()
+        self.assertIn("accept", pending["pending_user"]["available_actions"])
+        self.manager.decide_pipeline(self.book_id, decision_body(pending, "skip", confirmed=True, reason="整章写"))
+        new_input = self.last_task()["input"]
+        self.assertEqual(new_input["writer"]["step"], "draft")
+        self.assertNotIn("chunked", new_input)
+        self.assertIn("完整正文", new_input["content"])
+
+    def test_skip_draft_never_runs_the_skipped_chapters_state(self):
+        self._prepare_outline()
+        self.store.save_chapter_version(self.book_id, 1, content="第一章原稿")
+        self.start(kind="chapter_all", from_no=1, want_count=2)
+        self.app.studio.jobs.finish(self.last_task()["id"], "半篇", finish_reason="length")
+        self.tick()
+        pending = self.current_pipeline()
+        self.assertNotIn("accept", pending["pending_user"]["available_actions"])
+        self.manager.decide_pipeline(self.book_id, decision_body(pending, "skip", confirmed=True, reason="保留原稿"))
+        new_input = self.last_task()["input"]["writer"]
+        self.assertEqual((new_input["step"], new_input["chapter_no"]), ("draft", 2))
+        self.assertEqual(self.store.get_chapter(self.book_id, 1)["content"], "第一章原稿")
+        self.assertIsNone(self.store.load_chapter_state(self.book_id, 1))
+
+    def test_interrupted_decision_writeback_recovers_once(self):
+        from naiba.writer import writeback
+
+        self._prepare_outline()
+        self.start(kind="chapter", chapter_no=1)
+        self.app.studio.jobs.finish(self.last_task()["id"], "半篇", finish_reason="length")
+        self.tick()
+        pending = self.current_pipeline()
+        body = decision_body(pending, "supplement", content="人工补全的正文。")
+        commit = writeback.commit
+        calls = []
+
+        def interrupted(root, writes):
+            # Fail only after the journal is durable and before a file is published.
+            failed_once = False
+            durable = writeback.durable_write
+            def write(path, data):
+                nonlocal failed_once
+                if path.name == "book.json" and not failed_once:
+                    failed_once = True
+                    raise OSError("simulated write interruption")
+                return durable(path, data)
+            with patch.object(writeback, "durable_write", write):
+                calls.append(list(writes))
+                commit(root, writes)
+
+        with patch.object(writeback, "commit", interrupted), self.assertRaises(OSError):
+            self.manager.decide_pipeline(self.book_id, body)
+        self.manager = WriterPipelineManager(self.app, WriterStore(self.root))
+        self.assertEqual(self.manager.recover(), 1)
+        result = self.manager.decide_pipeline(self.book_id, body)
+        self.assertEqual(result["pipeline"]["status"], "interrupted")
+        self.assertEqual(result["decision"]["action"], "supplement")
+        versions = self.store.get_chapter(self.book_id, 1)["versions"]
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(versions[0]["kind"], "manual")
+        self.assertEqual(len(self.app.studio.jobs.submitted), 1)
+        self.assertEqual(len(calls), 1)
 
     def test_segmented_chapter_uses_chunked_blocks(self):
         self._prepare_outline()
@@ -644,16 +792,20 @@ class ChapterStateFlowTests(PipelineTestCase):
                                                 status=bad_status, error="模型超时")
                 self.tick()
                 record = self.current_pipeline()
-                self.assertEqual(record["status"], "done")
-                self.assertTrue(record.get("state_errors"))
+                if bad_status == "done":
+                    self.assertEqual(record["status"], "needs_user")
+                    self.assertTrue(record["pending_user"]["body_saved"])
+                    self.manager.decide_pipeline(self.book_id, decision_body(record, "skip", confirmed=True,
+                                                                            reason="skip state"))
+                    self.assertEqual(self.current_pipeline()["status"], "done")
+                else:
+                    self.assertEqual(record["status"], "failed")
+                    state = self.store.load_chapter_state(self.book_id, 2)
+                    self.assertEqual(state["effective_status"], "failed")
+                    self.assertIsNone(state["state"])
                 self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"],
                                  "第二章的正文。")
-                state = self.store.load_chapter_state(self.book_id, 2)
-                self.assertEqual(state["status"], "failed")
-                self.assertEqual(state["effective_status"], "failed")
-                self.assertIsNone(state["state"])
                 self.assertEqual(self.store.chapter_context_states(self.book_id, 3), [])
-                # 失败状态可重建：流水线已 done，走 state_rebuild 入口补建（不重写正文）。
                 pl = self.manager.start_pipeline(
                     self.book_id, kind="state_rebuild", from_no=2, want_count=1,
                     model_key="online:probe", model_name="probe")
@@ -980,7 +1132,7 @@ class ContinuationRegressionTests(PipelineTestCase):
         self.manager.retry_pipeline(self.book_id)
         self.app.studio.jobs.finish(self.last_task()["id"], "半截", finish_reason="length")
         self.tick()
-        self.assertEqual(self.current_pipeline()["status"], "failed")
+        self.assertEqual(self.current_pipeline()["status"], "needs_user")
         self.assertEqual(len(self.store.get_chapter(self.book_id, 2)["versions"]), 1)
 
     def test_empty_baseline_refused_before_submit(self):

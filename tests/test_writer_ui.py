@@ -97,9 +97,32 @@ class WriterPageStructureTests(unittest.TestCase):
 
     def test_three_columns_and_dialogs(self):
         for ident in ("writerColumns", "writerChapterList", "writerPlanBody", "writerPipelineBlock",
+                      "writerPipelinePending", "writerPipelineDecisionRetry", "writerPipelineDecisionSupplement",
+                      "writerPipelineDecisionAccept", "writerPipelineDecisionSkip",
                       "writerBooksDialog", "writerTemplateDialog", "writerImportDialog",
                       "writerManageDialog", "writerImportFile", "writerExportMenu"):
             self.assertIn(f'id="{ident}"', self.page, ident)
+
+    def test_pipeline_decision_has_one_editor_and_a_mobile_entry(self):
+        for ident in ("writerPipelinePending", "writerPipelinePendingFields", "writerPipelinePendingRaw",
+                      "writerPipelineMissingList", "writerPipelineHistoryList", "writerPipelineBodySaved",
+                      "writerPipelineSkipReason", "writerPipelineSkipConfirmed", "writerPipelineSkipSubmit",
+                      "writerPipelineDecisionError", "writerAsideBtn", "writerNotesPane"):
+            self.assertEqual(self.page.count(f'id="{ident}"'), 1, ident)
+        self.assertIn('id="writerAsideBtn" type="button" aria-controls="writerNotesPane"', self.page)
+        self.assertIn('id="writerPipelineDecisionError" role="alert"', self.page)
+        self.assertIn('<details id="writerPipelinePendingRaw" hidden>', self.page)
+        self.assertIn('id="writerPipelineSkipConfirmed" type="checkbox"', self.page)
+        css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn('#studioPageWriter[data-wb-size="narrow"] #writerAsideBtn.writer-needs-decision', css)
+
+    def test_pipeline_decision_handles_model_strings_without_html_injection(self):
+        js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
+        decision = js[js.index("const DECISION_BUTTONS"):js.index("function renderPipeline()")]
+        self.assertNotIn("innerHTML", decision)
+        self.assertIn("pending.available_actions", decision)
+        self.assertIn("pending.skip_consequence", decision)
+        self.assertIn("pipeline.decision_history", decision)
 
     def test_no_inline_handlers(self):
         self.assertNotIn("onclick=", self.page, "不写内联 onclick（事件在 27-writer.js 接线）")
@@ -200,7 +223,7 @@ class WriterBackendRoutesTests(unittest.TestCase):
     def test_core_routes_wired(self):
         for piece in ('"/api/writer/books"', '"/api/writer/import"', "/commit\"",
                       '"/pipelines"', '"/pipeline/cancel"', '"/pipeline/retry"',
-                      '"/versions/select"', '"/sync"', '"/api/writer/location"',
+                      '"/pipeline/decision"', '"/versions/select"', '"/sync"', '"/api/writer/location"',
                       '"/api/writer/reveal"', '"/export-file"'):
             self.assertIn(piece, self.http, piece)
 
@@ -283,7 +306,7 @@ class WriterRound3UiTests(unittest.TestCase):
         表现就是「开始拆分」点了毫无反应（2026-11-07 用户报障根因，自 9522d44 起天生如此）。"""
         block = self.js[self.js.index("async function startSplit("):]
         block = block[: block.index("\n}", 1) + 2]
-        self.assertIn("if (!dialog.open) dialog.showModal();", block,
+        self.assertIn("dialog.showModal();", block,
                       "弹窗分支里必须显式 showModal，漏了就是点了没反应")
         self.assertLess(block.index("dialog.showModal()"), block.index("await new Promise"),
                         "先 showModal 再开始等接续/覆盖选择，顺序反了同样永远等不到")
@@ -369,6 +392,30 @@ class WriterDraftSubmissionTests(unittest.TestCase):
             self.assertIn(content[-prompts.CONTINUE_TAIL_CHARS:], preview["content"])
             self.assertNotIn("旧稿唯一标记", preview["content"])
             self.assertNotIn("手动新稿前缀不应进入尾段", preview["content"])
+
+    def test_decision_fixture_simulates_lost_receipt_without_duplicate_write(self):
+        from verify._serve_writer_draft_ui import Fixture
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Fixture(Path(directory), decisions=True)
+            bid = fixture.book_ids[0]
+            pending = fixture.active[bid]
+            body = {"action": "supplement", "request_key": "test_decision_key",
+                    "pipeline_id": pending["id"], "step": "draft", "step_index": 0,
+                    "attempt": pending["attempt"], "decision_revision": pending["decision_revision"],
+                    "content": "手工编辑后的正文"}
+            first, code = fixture.apply_decision(bid, body)
+            self.assertEqual(code, 200)
+            replay, code = fixture.apply_decision(bid, {**body})
+            self.assertEqual((replay, code), (first, 200))
+            self.assertEqual(len(replay["pipeline"]["decision_history"]), 1)
+            self.assertTrue(replay["pipeline"]["pending_user"]["body_saved"])
+            chapter = fixture.service.store.get_chapter(bid, 2)
+            self.assertEqual(chapter["content"], body["content"])
+            self.assertEqual(len(chapter["versions"]), 2)
+            self.assertEqual(fixture.apply_decision(bid, {**body, "content": "不同内容"})[1], 409)
+            fixture.reset_decisions()
+            self.assertEqual(len(fixture.service.store.get_chapter(bid, 2)["versions"]), 1)
 
     def test_fixture_is_offline_and_uses_real_markup_module(self):
         fixture = (ROOT / "verify" / "_serve_writer_draft_ui.py").read_text(encoding="utf-8")

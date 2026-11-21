@@ -131,6 +131,30 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(status, 400, result)
         self.assertEqual(self.app.studio.jobs.submitted, [])
 
+    def test_output_mode_persists_and_does_not_change_pending_snapshot(self):
+        revision = self.service.store.get_book(self.book_id)["book"]["revision"]
+        saved, status = self.service.api_save_output_mode(self.book_id, {"output_mode": "freeform", "revision": revision})
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(self.service.store.get_book(self.book_id)["book"]["output_mode"], "freeform")
+        pipeline, status = self.service.api_start_pipeline(
+            self.book_id, {"kind": "setup_step", "step": "genre", "model_name": "probe"})
+        self.assertEqual(status, 201, pipeline)
+        self.assertEqual(self.service.api_save_output_mode(self.book_id, {"output_mode": "json", "revision": revision})[1], 409)
+        self.app.studio.jobs.finish(pipeline["pipeline"]["current_task_id"], "")
+        self.service.pipeline.tick()
+        self.assertEqual(self.service.api_save_output_mode(self.book_id, {"output_mode": "json", "revision": revision})[1], 200)
+        current = self.service.store.get_active_pipeline(self.book_id)
+        self.assertEqual(current["request_snapshot"]["output_mode"], "freeform")
+        self.assertEqual(current["pending_user"]["editor"], "text")
+        body = {"action": "supplement", "content": "写实悬疑", "request_key": "keep-mode-001",
+                "pipeline_id": current["id"], "step": "genre", "step_index": current["step_index"],
+                "attempt": current["attempt"], "decision_revision": current["decision_revision"]}
+        saved, status = self.service.api_pipeline_decision(self.book_id, body)
+        self.assertEqual(status, 200, saved)
+        setup = self.service.store.load_setup(self.book_id)
+        self.assertEqual(setup["genre"]["cat"], "")
+        self.assertEqual(setup["freeform_outputs"][-1]["text"], "写实悬疑")
+
     def test_book_crud_status_codes(self):
         payload, status = self.service.api_create_book({"title": "新书"})
         self.assertEqual(status, 201)
@@ -365,8 +389,33 @@ class ServiceTestCase(unittest.TestCase):
         self.app.studio.jobs.finish(task_id, "   ")
         self.service.pipeline.tick()
         record = self.service.store.get_active_pipeline(self.book_id)
-        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["status"], "needs_user")
+        self.assertFalse(record["pending_user"]["partial"])
         self.assertEqual(self.service.store.get_chapter(self.book_id, 1)["content"], "")
+
+    def test_pipeline_decision_route_contract(self):
+        self.service.store.save_setup(self.book_id, content={"idea": "创意"}, kind="manual")
+        pipeline, task_id = self._running_chapter_task()
+        self.app.studio.jobs.finish(task_id, "")
+        self.service.pipeline.tick()
+        current = self.service.store.get_active_pipeline(self.book_id)
+        body = {"action": "supplement", "content": "人工正文", "request_key": "service-decision-1",
+                "pipeline_id": current["id"], "step": "draft", "step_index": current["step_index"],
+                "attempt": current["attempt"], "decision_revision": current["decision_revision"]}
+        for changed in ({"step_index": True}, {"step_index": 1}, {"attempt": 2}, {"decision_revision": 0}):
+            self.assertEqual(self.service.api_pipeline_decision(self.book_id, {**body, **changed})[1], 409)
+        payload, status = self.service.api_pipeline_decision(self.book_id, body)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["pipeline"]["status"], "running")
+        self.assertEqual(payload["pipeline"]["step_index"], 1)
+        chapter = self.service.store.get_chapter(self.book_id, 1)
+        self.assertEqual(chapter["versions"][0]["kind"], "manual")
+        self.assertNotIn("request_digest", payload["decision"])
+        repeated, status = self.service.api_pipeline_decision(self.book_id, body)
+        self.assertEqual(status, 200)
+        self.assertEqual(repeated, payload)
+        self.assertEqual(self.service.api_pipeline_decision(self.book_id, {**body, "content": "changed"})[1], 409)
+        self.assertEqual(len(self.service.store.get_chapter(self.book_id, 1)["versions"]), 1)
 
     def test_duplicate_write_back_is_idempotent(self):
         self.service.store.save_setup(self.book_id, content={"idea": "创意"}, kind="manual")

@@ -19,7 +19,7 @@ def declaration(source, name):
         raise AssertionError(f"缺少函数 {name}")
     following = re.search(r"^(?:export )?(?:async )?function \w+\(", source[match.end():], re.M)
     end = match.end() + following.start() if following else len(source)
-    return source[match.start():end]
+    return source[match.start():end].split("\n}", 1)[0] + "\n}"
 
 
 class Elements(HTMLParser):
@@ -85,8 +85,11 @@ class WorkbenchBookRuntimeTests(unittest.TestCase):
         functions = {}
         for prefix, file in [("novel", "25-novel.js"), ("writer", "27-writer.js")]:
             source = (ROOT / "public/js" / file).read_text(encoding="utf-8")
-            functions[prefix] = "\n".join(declaration(source, name) for name in (
-                "paneLayoutSize", "isPaneLayout", "setPane", "applyPaneAccessibility"))
+            names = ["paneLayoutSize", "isPaneLayout", "setPane", "applyPaneAccessibility"]
+            if prefix == "writer":
+                names.insert(0, "pipelineWaiting")
+                names.append("renderPipelineEntry")
+            functions[prefix] = "\n".join(declaration(source, name) for name in names)
         self.run_node(r"""
 const assert=require('node:assert/strict'), vm=require('node:vm');
 const sources=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
@@ -105,7 +108,8 @@ for (const prefix of ['novel','writer']) {
   const state={pane:'editor'};
   const ctx={console,[prefix]:state,workbenchWidth:el=>el.width,
     window:{innerWidth:1440,matchMedia:()=>({matches:false})},
-    $:selector=>selector.endsWith('Columns')?columns:selector.endsWith('AsideBtn')?aside:root,
+    $:selector=>selector.endsWith('Columns')?columns:selector.endsWith('AsideBtn')?aside:
+      selector.includes('data-writer-pane')?buttons.find(btn=>btn.dataset.writerPane==='notes'):root,
     document:{querySelectorAll:()=>buttons,querySelector:selector=>panels[names.find(name=>selector.endsWith('-'+name))]}};
   vm.createContext(ctx);vm.runInContext(sources[prefix],ctx);
   const hidden=name=>panels[name].attributes['aria-hidden']==='true';
@@ -119,6 +123,12 @@ for (const prefix of ['novel','writer']) {
   root.width=1200;ctx.applyPaneAccessibility();assert.ok(names.every(name=>!hidden(name)));
   root.width=0;root.dataset.wbSize='medium';ctx.setPane('invalid');
   assert.equal(state.pane,'editor');assert.equal(hidden(last),true);
+  if(prefix==='writer') {
+    state.pipeline={status:'needs_user'};
+    ctx.applyPaneAccessibility();
+    assert.equal(aside.textContent,'处理生成结果');
+    assert.equal(buttons.find(btn=>btn.dataset.writerPane==='notes').textContent,'待处理');
+  }
 }
 """, functions)
 

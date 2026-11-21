@@ -1789,7 +1789,7 @@ class ConversationRunMixin:
         run["_trace_compaction_attempt"] = {}
         run["_trace_compaction_success_tokens"] = raw_tokens
         event({"type": "compaction", "action": "compacted", "region_messages": end - protected,
-               "freed_est": before - after, "used": used, "limit": limit, "model_key": model_key})
+               "freed_est": before - after, "used": used, "limit": limit, "model_key": model_key, "attempts": attempts})
         trace_info = {"summary": summary, "generator": "model-summary", "model_key": model_key,
                       "source_user_message_id": descriptor["source_user_message_id"],
                       "source_user_sha256": descriptor["source_user_sha256"],

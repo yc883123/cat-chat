@@ -23,6 +23,10 @@ from naiba.paths import PathContext
 
 logger = logging.getLogger("naiba.config")
 
+# Cat Chat 的模型档案输入边界；不是供应商真实能力上限。
+MODEL_TOKEN_LIMIT_MIN = 1
+MODEL_TOKEN_LIMIT_MAX = 1_048_576
+
 # Appearance preferences are intentionally small, stable enums.  Keeping the
 # values in one place lets both config migration and runtime updates apply the
 # same validation rules.
@@ -4282,13 +4286,14 @@ class ConfigStore:
     @staticmethod
     def _positive_context_size(value: Any, field: str) -> int:
         if isinstance(value, bool):
-            raise ValueError(f"{field} 必须是正整数")
+            raise ValueError(f"{field} 必须是 {MODEL_TOKEN_LIMIT_MIN} 到 {MODEL_TOKEN_LIMIT_MAX} 之间的正整数")
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            raise ValueError(f"{field} 必须是正整数") from None
-        if parsed <= 0 or (isinstance(value, float) and not value.is_integer()):
-            raise ValueError(f"{field} 必须是正整数")
+            raise ValueError(f"{field} 必须是 {MODEL_TOKEN_LIMIT_MIN} 到 {MODEL_TOKEN_LIMIT_MAX} 之间的正整数") from None
+        if (parsed < MODEL_TOKEN_LIMIT_MIN or parsed > MODEL_TOKEN_LIMIT_MAX
+                or (isinstance(value, float) and not value.is_integer())):
+            raise ValueError(f"{field} 必须是 {MODEL_TOKEN_LIMIT_MIN} 到 {MODEL_TOKEN_LIMIT_MAX} 之间的正整数")
         return parsed
 
     PRICING_FIELDS = (

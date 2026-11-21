@@ -77,6 +77,8 @@ class WriterService:
             return {"book": book}, 201
         except WriterStoreError as exc:
             return {"error": str(exc)}, 400
+        except OSError as exc:
+            return {"error": f"无法创建作品文件：{exc}"}, 500
 
     def api_get_book(self, book_id: str) -> tuple[dict[str, Any], int]:
         try:
@@ -150,13 +152,20 @@ class WriterService:
         if not isinstance(body, dict):
             return {"error": "请求体必须是对象"}, 400
         try:
-            book = self.store.save_output_mode(
-                book_id, mode=body.get("output_mode"), expected_revision=body.get("revision"),
-            )
+            with self.store._lock:
+                manifest = self.store._load_manifest(book_id)
+                active = manifest.get("active_pipeline")
+                if isinstance(active, dict) and str(active.get("status") or "") in ("running", "stopping"):
+                    raise WriterPipelineError("生成进行中，当前任务结束后才能切换输出模式")
+                book = self.store.save_output_mode(
+                    book_id, mode=body.get("output_mode"), expected_revision=body.get("revision"),
+                )
             return {"book": book}, 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
         except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except WriterPipelineError as exc:
             return {"error": str(exc)}, 409
         except WriterStoreError as exc:
             return {"error": str(exc)}, 400
@@ -328,13 +337,13 @@ class WriterService:
                         "chapter_no": chapter_no, WRITER_CHAPTER_BASELINE_KEY: baseline,
                     })
                     draft_tail = baseline["content"][-prompts.CONTINUE_TAIL_CHARS:]
+                preview_step = "segs" if kind in ("chapter_segs", "segs") else "draft"
                 built = prompts.build_draft_context(
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
                     extra_note=str(body.get("extra_note") or ""), previous_chapter=previous,
                     chapter_states=self.store.chapter_context_states(book_id, chapter_no),
-                    output_mode_value=output_mode,
+                    output_mode_value=output_mode, step=preview_step,
                 )
-                preview_step = "segs" if kind in ("chapter_segs", "segs") else "draft"
                 system = prompts.step_system(preview_step, book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
                 budget = prompts.budget_report(
                     content=built["content"], slots=built["slots"], system=system,
@@ -447,9 +456,22 @@ class WriterService:
         except WriterStoreError as exc:
             return {"error": str(exc)}, 400
 
-    def api_cancel_pipeline(self, book_id: str) -> tuple[dict[str, Any], int]:
+    def api_cancel_pipeline(self, book_id: str, body: dict[str, Any] | None = None) -> tuple[dict[str, Any], int]:
         try:
-            return {"pipeline": self.pipeline.cancel_pipeline(book_id)}, 200
+            pipeline = (self.pipeline.cancel_pipeline(book_id, identity=body) if body
+                        else self.pipeline.cancel_pipeline(book_id))
+            return {"pipeline": self.store.public_pipeline(pipeline)}, 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except (WriterConflictError, WriterPipelineError) as exc:
+            return {"error": str(exc)}, 409
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_retry_pipeline(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        rebase = isinstance(body, dict) and str(body.get("rebase") or "").lower() in ("1", "true", "yes")
+        try:
+            return {"pipeline": self.store.public_pipeline(self.pipeline.retry_pipeline(book_id, rebase=rebase))}, 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
         except WriterStoreError as exc:
@@ -457,16 +479,22 @@ class WriterService:
         except WriterPipelineError as exc:
             return {"error": str(exc)}, 409
 
-    def api_retry_pipeline(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        rebase = isinstance(body, dict) and str(body.get("rebase") or "").lower() in ("1", "true", "yes")
+    def api_pipeline_decision(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """处理流水线当前待用户步骤；决策在服务端按 request_key 幂等。"""
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
         try:
-            return {"pipeline": self.pipeline.retry_pipeline(book_id, rebase=rebase)}, 200
+            return self.pipeline.decide_pipeline(book_id, body), 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
-        except WriterStoreError as exc:
-            return {"error": str(exc)}, 400
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
         except WriterPipelineError as exc:
             return {"error": str(exc)}, 409
+        except (WriterStoreError, prompts.PromptError) as exc:
+            return {"error": str(exc)}, 400
+        except OSError:
+            return {"error": "暂时无法保存这次处理，请保留编辑内容后重试"}, 500
 
     def api_resume_pipeline(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         if not isinstance(body, dict):
@@ -476,7 +504,7 @@ class WriterService:
                 book_id, source_task_id=str(body.get("task_id") or ""),
                 request_key=str(body.get("request_key") or ""),
             )
-            return {"pipeline": pipeline}, 200
+            return {"pipeline": self.store.public_pipeline(pipeline)}, 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
         except (WriterConflictError, WriterPipelineError) as exc:

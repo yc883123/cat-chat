@@ -69,6 +69,40 @@ WRITER_COMPLETED_GENERATIONS_KEY = "completed_generation_ids"
 WRITER_RESULT_RESUME_KEY = "result_resume"
 WRITER_MANUAL_DRAFT_KEY = "manual_draft"
 
+# Persisted Writer decision identity; display/editor data is separate from the
+# server-validated partial result and the receipt's request digest.
+WRITER_PIPELINE_NEEDS_USER = "needs_user"
+WRITER_DECISION_ACTIONS = frozenset({"retry", "supplement", "accept", "skip"})
+WRITER_PENDING_USER_KEY = "pending_user"
+WRITER_PENDING_ACCEPTED_KEY = "pending_accepted"
+WRITER_DECISION_DIGEST_KEY = "request_digest"
+WRITER_DECISION_REVISION_KEY = "decision_revision"
+WRITER_DECISION_HISTORY_KEY = "decision_history"
+WRITER_DECISION_REQUEST_KEY = "request_key"
+STUDIO_RESULT_ISSUE_KEY = "result_issue"
+
+
+class WriterPendingUser(TypedDict):
+    step: str
+    step_index: int
+    attempt: int
+    issue: str
+    category: str
+    editor: str
+    raw: str
+    raw_truncated: bool
+    partial: Any
+    partial_truncated: bool
+    resume_txt: bool
+    missing: list[str]
+    counts: dict[str, int]
+    available_actions: list[str]
+    skip_consequence: str
+    body_saved: bool
+    chapter_no: int
+    part_no: int
+
+
 # Frontend-only provider-change subscription; listeners receive affected model_key
 # strings after bootstrap is updated and shared catalogs/in-flight reads expire.
 FRONTEND_PROVIDERS_CHANGED_HOOK = "onProvidersChanged"

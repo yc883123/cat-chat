@@ -505,7 +505,10 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertIn("button.disabled = true", body)
         self.assertIn("保存中…", body, "与首启向导对齐的保存中态")
         self.assertIn("finally", body, "必须 finally 恢复按钮，否则失败后按钮永久禁用")
-        self.assertIn("正在获取模型上下文参数", body, "慢探测阶段要有提示，否则体感是「点了没反应」")
+        # 保存不再偷偷发起模型目录探测或回填能力值；当前表单留空就直接提交留空。
+        self.assertNotIn("/api/providers/models", body,
+                         "保存不能隐藏发起模型能力探测")
+        self.assertIn("providerFormValue()", body, "保存必须读取当前表单值")
         self.assertIn("toast(`保存失败", body, "弹窗被并发的另一次保存关掉时，错误必须换个地方可见")
         self.assertIn("syncSavedProvider(saved)", body, "两处共用同一份刷新函数")
         # 刷新失败不能把已经保存成功这件事变成「没反应」：刷新调用必须包在 try 里。

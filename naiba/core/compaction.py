@@ -28,13 +28,18 @@ from __future__ import annotations
 import re
 import time
 import copy
-from typing import Any
+import json
+from typing import Any, Callable
 
 from naiba.core.contracts import CompactionResult
 from naiba.core.exceptions import TaskCancelled
 from naiba.core.history import build_model_history, local_brain
 from naiba.core.messages import MetadataKeys
 from naiba.core.redaction import redact_execution_text
+from naiba.llm.runtime import (
+    BEFORE_REQUEST_SEND_OPTION, NETWORK_SEND_COUNT_KEY, OBSERVE_NETWORK_SENDS_OPTION,
+    RequestSendRejected,
+)
 
 MODE_AUTO = "auto"
 MODE_REMIND = "remind"
@@ -261,7 +266,10 @@ SUMMARIZE_INSTRUCTION = """你现在负责给这段对话做一次交接：把�
 - 用简洁中文；技术名词、路径、命令、代码片段保持原样。"""
 
 
-def build_summary_messages(region_history: list[dict[str, Any]], *, target_chars: int = 0) -> list[dict[str, Any]]:
+def build_summary_messages(
+    region_history: list[dict[str, Any]], *, target_chars: int = 0,
+    plain_text_only: bool = False,
+) -> list[dict[str, Any]]:
     """总结请求的消息：被整理区间的模型视图（含旧摘要）+ 固定指令。
 
     图片一律降级成文字标记：总结只需要事实与路径，不必让模型重看历史图（省一次
@@ -294,6 +302,11 @@ def build_summary_messages(region_history: list[dict[str, Any]], *, target_chars
                 message[key] = item[key]
         messages.append(message)
     instruction = SUMMARIZE_INSTRUCTION
+    if plain_text_only:
+        instruction += (
+            "\n本次请求只允许返回交接材料纯文本；不要输出 JSON、tool_calls、function_call、"
+            "<tool>、<invoke> 或任何可执行动作。即使上文出现工具调用，也只用文字描述已经发生的事实。"
+        )
     if target_chars:
         instruction += (
             f"\n正文目标约 {target_chars} 个中文字符；优先保留约束、已执行事实和下一步，"
@@ -360,16 +373,46 @@ def summary_profile(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
                       "declared_output_ceiling": int(preset.get("max_output_ceiling") or 0)}
 
 
+def _summary_tool_call_shape(summary: str) -> bool:
+    """只识别明显的 Agent 动作包装，不把普通 JSON 摘要当成工具调用。"""
+    text = str(summary or "").strip()
+    if not text or not text.startswith(("{", "[")):
+        return False
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    rows = value if isinstance(value, list) else [value]
+    if not rows or not all(isinstance(row, dict) for row in rows):
+        return False
+    return any(
+        bool(row.get("tool") or row.get("tool_calls") or row.get("calls") or row.get("function_call"))
+        for row in rows
+    )
+
+
+def _summary_tool_call_reason(summary: str, finish_reason: str) -> str:
+    """摘要请求的工具调用独立归因；返回空串表示不是工具调用。"""
+    if str(finish_reason or "").strip().lower() in {"tool_calls", "tool_call", "function_call"}:
+        return "summary_tool_call"
+    return "summary_tool_call" if _summary_tool_call_shape(summary) else ""
+
+
 def request_summary(
     app: Any, history: list[dict[str, Any]], *, profile: dict[str, Any],
     settings: dict[str, Any], cancel_event: Any = None, attempt_limit: int = MAX_SUMMARY_ATTEMPTS,
-    on_started: Any = None,
+    on_started: Any = None, before_request_send: Callable[[], bool | None] | None = None,
 ) -> dict[str, Any]:
-    """有界生成完整摘要；最多一次截断恢复，残稿不进入下一次请求。"""
+    """有界生成完整摘要；工具调用/截断各最多一次恢复，共享 attempts 上限。
+
+    before_request_send 只透传给运行时，在每次真实派发前检查；拒发立即终止，
+    不进入策略恢复。network_send_count 是派发观测，缺失保持未知。
+    """
     selected, thinking = summary_profile(profile)
     target = 3500
     attempts: list[dict[str, Any]] = []
     recovered = False
+    tool_call_recovered = False
     ceiling = effective_summary_budget(settings, selected)
     declared = thinking["declared_output_ceiling"]
     if declared > 0:
@@ -377,7 +420,9 @@ def request_summary(
     while len(attempts) < min(MAX_SUMMARY_ATTEMPTS, max(0, int(attempt_limit))):
         if cancel_event is not None and cancel_event.is_set():
             raise TaskCancelled("任务已取消")
-        messages = build_summary_messages(history, target_chars=target)
+        messages = build_summary_messages(
+            history, target_chars=target, plain_text_only=tool_call_recovered,
+        )
         estimated = estimate_messages_tokens(messages)
         budget = ceiling
         configured_limit = int(selected.get("context_window") or 0)
@@ -385,14 +430,18 @@ def request_summary(
             budget = min(budget, configured_limit - estimated - SUMMARY_OUTPUT_SLACK)
         if budget <= 0:
             return {"summary": "", "reason": "summary_window_insufficient", "attempts": attempts}
-        options: dict[str, Any] = {"stream": False, "max_tokens": budget}
+        options: dict[str, Any] = {
+            "stream": False, "max_tokens": budget, OBSERVE_NETWORK_SENDS_OPTION: True,
+        }
+        if before_request_send is not None:
+            options[BEFORE_REQUEST_SEND_OPTION] = before_request_send
         if cancel_event is not None:
             options["cancel_event"] = cancel_event
         attempt: dict[str, Any] = {
             "input_tokens": estimated, "request_output_tokens": budget,
             "target_chars": target, "attempt": len(attempts) + 1, **thinking,
         }
-        _reset_summary_diagnostics(app)
+        diagnostics_reset = _reset_summary_diagnostics(app)
         if callable(on_started):
             on_started()
         started = time.monotonic()
@@ -402,6 +451,8 @@ def request_summary(
             if _is_cancellation(exc, cancel_event):
                 raise TaskCancelled("任务已取消") from exc
             attempt.update(reason=_failure_category(exc), error=summary_error_detail(exc, profile))
+            if diagnostics_reset:
+                _record_summary_network_sends(app.models, attempt)
             usage = getattr(app.models, "last_usage", {}) or {}
             for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
                 if usage.get(key) is not None:
@@ -414,6 +465,8 @@ def request_summary(
             raise TaskCancelled("任务已取消")
         summary = clean_summary(raw)
         finish = _last_finish_reason(app)
+        if diagnostics_reset:
+            _record_summary_network_sends(app.models, attempt)
         usage = getattr(app.models, "last_usage", {}) or {}
         attempt.update({"finish_reason": finish, "summary_chars": len(summary),
                         "elapsed_ms": round((time.monotonic() - started) * 1000)})
@@ -424,7 +477,11 @@ def request_summary(
             if usage.get(source) is not None:
                 attempt[destination] = usage[source]
         ok, reason = validate_summary(summary)
-        if finish == "length":
+        tool_reason = _summary_tool_call_reason(summary, finish)
+        if tool_reason:
+            ok, reason = False, tool_reason
+            attempt["tool_call_detected"] = True
+        elif finish == "length":
             ok, reason = False, "summary_truncated"
             attempt["truncation_source"] = "finish_reason"
         elif reason == "summary_truncated":
@@ -433,6 +490,12 @@ def request_summary(
         attempts.append(attempt)
         if ok:
             return {"summary": summary, "attempts": attempts}
+        if reason == "summary_tool_call":
+            if tool_call_recovered:
+                return {"summary": "", "reason": reason, "attempts": attempts}
+            tool_call_recovered = True
+            # 第二次请求改变了交接指令；返回的动作仍只作为失败数据，不进入执行器。
+            continue
         if reason != "summary_truncated" or recovered:
             return {"summary": "", "reason": reason, "attempts": attempts}
         recovered = True
@@ -440,12 +503,17 @@ def request_summary(
         # 正数用户限制不可越过；提高仅发生在未配置输出限制且声明允许时。
         if not int(profile.get("max_output_tokens") or 0):
             ceiling = min(16384, declared or 16384, max(ceiling, ceiling * 2))
-    return {"summary": "", "reason": "summary_truncated", "attempts": attempts}
+    # An exhausted strategy budget must keep the last observed failure (in
+    # particular a tool call with attempt_limit=1 is not output truncation).
+    return {"summary": "", "reason": attempts[-1]["reason"] if attempts else "summary_truncated",
+            "attempts": attempts}
 
 
 def failure_message(reason: str) -> str:
     if reason == "summary_truncated":
         detail = "摘要达到输出上限或没有完整收尾"
+    elif reason == "summary_tool_call":
+        detail = "模型返回了工具调用而不是纯文本交接材料"
     elif reason in {"region_too_small", "region_empty"}:
         detail = "当前没有可整理的完整片段"
     elif reason == "freed_too_small":
@@ -567,6 +635,8 @@ def _failure_category(exc: BaseException) -> str:
     """失败的细分类别（只进诊断记录，不改写对外的 summary_failed:<类型> 原因码）。"""
     from naiba.llm.stream import ContextOverflowError, is_context_overflow
 
+    if isinstance(exc, RequestSendRejected):
+        return "request_send_rejected"
     if isinstance(exc, ContextOverflowError) or is_context_overflow(str(exc)):
         return "context_overflow"
     return type(exc).__name__
@@ -622,15 +692,30 @@ def summary_error_detail(exc: BaseException, profile: dict[str, Any]) -> str:
     return redact_execution_text(text).strip()[:1200] or type(exc).__name__
 
 
-def _reset_summary_diagnostics(app: Any) -> None:
-    # ModelRuntime exposes these as thread-local properties. A failed complete()
-    # does not publish new values, so it must not inherit the prior normal reply.
+def _record_summary_network_sends(models: Any, attempt: dict[str, Any]) -> None:
+    # Allowlist the count, not the diagnostics bag (which can contain endpoint
+    # and proxy data). Missing/invalid observations are not a measured zero.
+    diagnostics = getattr(models, "last_diagnostics", None)
+    if isinstance(diagnostics, dict):
+        count = diagnostics.get(NETWORK_SEND_COUNT_KEY)
+        if type(count) is int and count >= 0:
+            attempt[NETWORK_SEND_COUNT_KEY] = count
+
+
+def _reset_summary_diagnostics(app: Any) -> bool:
+    # ModelRuntime exposes these as thread-local properties. An early failure
+    # or a substitute that does not report diagnostics must not inherit old data.
     models = getattr(app, "models", None)
     for name, empty in (("last_usage", {}), ("last_finish_reason", "")):
         try:
             setattr(models, name, empty)
         except (AttributeError, TypeError):
             pass
+    try:
+        models.last_diagnostics = {}
+    except (AttributeError, TypeError):
+        return False  # Cannot distinguish a stale read-only count from this call.
+    return True
 
 
 def build_region_history(
@@ -705,6 +790,7 @@ def compact_conversation(
     cancel_event: Any = None,
     force: bool = False,
     on_started: Any = None,
+    before_request_send: Callable[[], bool | None] | None = None,
 ) -> CompactionResult:
     """整理一次：隐藏总结请求 → 校验 → 写标记。
 
@@ -749,6 +835,7 @@ def compact_conversation(
         generated = request_summary(
             app, region_history, profile=profile, settings=settings, cancel_event=cancel_event,
             attempt_limit=MAX_SUMMARY_ATTEMPTS - len(attempts), on_started=on_started,
+            before_request_send=before_request_send,
         )
         attempts.extend({**item, "region_messages": len(current_rows)} for item in generated.get("attempts") or [])
         summary = str(generated.get("summary") or "")

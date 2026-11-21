@@ -10,7 +10,7 @@
 // - 从 01-core / 07-models-agents / 22-studio 取公共能力，22 不反向 import 本文件，无循环依赖。
 // ============================================================
 
-import { $, api, applyModelSkinFor, localFileUrl, onProvidersChanged, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, localFileUrl, onProvidersChanged, randomUuid, state, toast } from "./01-core.js";
 import { loadModelCatalog } from "./07-models-agents.js";
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
@@ -81,10 +81,15 @@ const PIPELINE_STATUS_LABELS = {
   cancelled: "已取消",
   interrupted: "已中断",
   conflict: "版本冲突",
+  needs_user: "待你处理",
 };
 
 function pipelineActive(pipeline = writer.pipeline) {
   return ["running", "stopping"].includes(String(pipeline?.status || ""));
+}
+
+function pipelineWaiting(pipeline = writer.pipeline) {
+  return pipeline?.status === "needs_user";
 }
 
 // 流水线类型的中文名（与服务端 PIPELINE_KINDS 对齐）。
@@ -239,6 +244,7 @@ const writer = {
   draftEditToken: 0,
   // 正文保存/预检/提交共用一个锁，不能由内层保存提前释放。
   draftOperation: false,
+  splitOperation: false,
   draftPlanKind: "chapter",
   // 跨章连贯性检查：最近一次只读检查报告（null = 还没有报告）。
   continuityReport: null,
@@ -256,6 +262,8 @@ const writer = {
   budgetToken: 0,
   // 迟到响应保护：切作品/切章节都换令牌，旧响应直接丢。
   bookToken: 0,
+  bookSelection: 0,
+  selectedBookId: "",
   chapterToken: 0,
   booksToken: 0,
   // 模板弹窗。
@@ -313,12 +321,17 @@ function applyOutputModeUi() {
   }
   const hint = $("#writerOutputModeHint");
   if (hint) hint.textContent = json
-    ? "开启时按阶段字段输出并严格校验；阶段要求是内置只读规则。"
-    : "关闭后模型自由发挥，结果会保存为原文但不会自动填入题材、简介、分类、角色或章节字段，需要手动整理。";
+    ? "开启时按阶段字段输出并严格校验；只对下一次生成生效，当前任务按开始时的模式执行。"
+    : "关闭后模型自由发挥，结果会保存为原文但不会自动填入题材、简介、分类、角色或章节字段；只对下一次生成生效。";
 }
 
 async function saveOutputMode(mode) {
-  if (!writer.bookId || pipelineActive()) return;
+  if (!writer.bookId) return;
+  if (pipelineActive()) {
+    toast("当前生成还没结束，结束后才能切换输出模式；本次任务仍按开始时的模式执行。");
+    applyOutputModeUi();
+    return;
+  }
   const next = mode === "freeform" ? "freeform" : "json";
   const previous = writer.outputMode;
   writer.outputMode = next;
@@ -353,7 +366,8 @@ function fail(prefix, error) {
 function setBusy(busy) {
   writer.busy = busy;
   for (const id of ["writerSetupGenerate", "writerSetupSave", "writerOutlineGenerate", "writerOutlineSave",
-    "writerOutlineGenerateAll", "writerPartsApply", "writerImportSettingsBtn",
+    "writerOutlineGenerateAll", "writerOutlineReview", "writerPartsApply", "writerImportSettingsBtn",
+    "writerSplitStart", "writerSplitContinue",
     "writerSyncBtn", "writerDraftGenerate", "writerDraftSegs", "writerDraftContinue", "writerDraftRewrite",
     "writerDraftRebuildState", "writerContinuityRun",
     "writerDraftSave", "writerImportCommit", "writerExportBtn", "writerManageBtn",
@@ -497,6 +511,7 @@ function renderPageState() {
   el.textContent = running
     ? `${title} · ${kindLabel(writer.pipeline.kind)} · ${stageName}`
     : `${title} · ${stageName}`;
+  if (pipelineWaiting()) el.textContent += " · 生成待处理";
   // 表单/大纲里有还没写进作品的改动：页头必须能看出来，否则用户会以为已经存了。
   if (writer.setupDirty || writer.partsDirty) el.textContent += " · 有未保存修改";
   el.title = el.textContent;
@@ -1477,6 +1492,11 @@ async function runContinuityCheck() {
 function renderEditor() {
   const placeholder = $("#writerEditorPlaceholder");
   if (placeholder) placeholder.hidden = Boolean(writer.bookId);
+  for (const button of document.querySelectorAll("#writerStages [data-writer-stage]")) {
+    const active = button.dataset.writerStage === writer.stage;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
   for (const panel of document.querySelectorAll("[data-writer-stage-panel]")) {
     panel.hidden = panel.dataset.writerStagePanel !== writer.stage || !writer.bookId;
   }
@@ -1726,123 +1746,442 @@ function sameDraftEdit(snapshot) {
 
 const pipelineArtifactRequests = new Map();
 async function loadPipelineArtifact(taskId) {
-  const bookId = writer.bookId;
-  const token = writer.pollToken;
-  const key = `${bookId}:${token}:${taskId}`;
+  const target = pipelineTarget();
+  const key = JSON.stringify([target, taskId]);
   if (pipelineArtifactRequests.has(key)) return;
   pipelineArtifactRequests.set(key, true);
   try {
     const { task } = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`);
-    if (writer.bookId !== bookId || writer.pollToken !== token || writer.pipeline?.current_task_id !== taskId) return;
+    if (!samePipelineTarget(target) || writer.pipeline?.current_task_id !== taskId) return;
     writer.pipelineTask = task;
     renderPipeline();
   } catch (error) {
-    if (writer.bookId === bookId && writer.pollToken === token) toast(`读取 TXT 状态失败：${error.message}`);
+    if (samePipelineTarget(target) && !pipelineWaiting()) toast(`读取 TXT 状态失败：${error.message}`);
   } finally { pipelineArtifactRequests.delete(key); }
 }
 
-function renderPipeline() {
-  for (const id of ["writerSetupGenerate", "writerOutlineGenerate", "writerOutlineGenerateAll", "writerSplitStart", "writerSplitContinue",
-    "writerDraftGenerate", "writerDraftSegs", "writerDraftContinue", "writerDraftRewrite", "writerDraftRebuildState"]) {
-    const button = $(`#${id}`);
-    if (!button) continue;
-    if (writer.pipeline?.status === "stopping") {
-      if (!button.hasAttribute("data-writer-stop-disabled")) button.dataset.writerStopDisabled = String(button.disabled);
-      button.disabled = true;
-    } else if (button.hasAttribute("data-writer-stop-disabled")) {
-      button.disabled = button.dataset.writerStopDisabled === "true" || writer.busy;
-      delete button.dataset.writerStopDisabled;
-    }
+const DECISION_BUTTONS = {
+  retry: "writerPipelineDecisionRetry", supplement: "writerPipelineDecisionSupplement",
+  accept: "writerPipelineDecisionAccept", skip: "writerPipelineDecisionSkip",
+};
+const DECISION_LABELS = { retry: "重新生成", supplement: "已补充", accept: "接受已有结果", skip: "已跳过", abandon: "已放弃" };
+const DECISION_EDITORS = {
+  genre: "genre", title: "list", blurb: "list", segs: "list", chars: "characters",
+  outline: "chapters", split: "chapters", state: "state",
+};
+const DECISION_FIELD_LABELS = {
+  cat: "题材大类", chapters: "章节", name: "角色姓名", title: "标题", events: "本章事件",
+};
+// The editor is local to a decision point, not to the visible pane or the focused input.
+// Keep only the latest observed decision per book; revisiting the same point restores its draft.
+const decisionDrafts = new Map();
+let renderedDecision = null;
+let pipelineCommand = null;
+
+function pipelineStepKey(pipeline = writer.pipeline) {
+  return JSON.stringify([pipeline?.id, pipeline?.status, pipeline?.step_index, pipeline?.attempt,
+    pipeline?.decision_revision, pipeline?.pending_user?.step]);
+}
+
+function pipelineTarget() {
+  return { bookId: writer.bookId, bookSelection: writer.bookSelection, pollToken: writer.pollToken, stepKey: pipelineStepKey() };
+}
+
+function samePipelineTarget(target) {
+  return writer.bookId === target.bookId && writer.bookSelection === target.bookSelection
+    && (!writer.selectedBookId || writer.selectedBookId === target.bookId)
+    && writer.pollToken === target.pollToken && pipelineStepKey() === target.stepKey;
+}
+
+function pendingIdentity(pipeline, pending) {
+  return { pipeline_id: pipeline.id, step: pending.step, step_index: pending.step_index,
+    attempt: pending.attempt, decision_revision: pipeline.decision_revision };
+}
+
+function decisionText(value) {
+  return value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function decisionRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function decisionRows(value, wrappers = []) {
+  return Array.isArray(value) ? value : wrappers.map((key) => value?.[key]).find(Array.isArray) || [];
+}
+
+function decisionLines(value) {
+  return String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function decisionField(host, label, value, { rows = 0, choices = null, lines = false, id = "" } = {}) {
+  const field = document.createElement("label");
+  field.className = "writer-field";
+  const input = document.createElement(choices ? "select" : rows ? "textarea" : "input");
+  if (choices) {
+    for (const [key, text] of choices) input.append(new Option(text, key));
+    if (value && !choices.some(([key]) => key === value)) input.append(new Option(decisionText(value), decisionText(value)));
   }
+  if (rows) input.rows = rows;
+  if (id) input.id = id;
+  input.value = lines && Array.isArray(value) ? value.map(decisionText).join("\n") : decisionText(value);
+  field.append(label, input);
+  host.append(field);
+  return input;
+}
+
+function decisionRowEditor(host, initial, singular, schema, keyField) {
+  const list = document.createElement("div");
+  list.className = "writer-pipeline-rows";
+  const readers = new Map();
+  const addButton = document.createElement("button");
+  addButton.type = "button";
+  addButton.className = "control-button tiny";
+  addButton.textContent = `添加${singular}`;
+  const add = (value) => {
+    const parsed = decisionRecord(value);
+    const row = parsed === value ? parsed : { [keyField]: decisionText(value) };
+    const box = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = singular;
+    box.append(legend);
+    const fields = schema.map(([key, label, linesOrRows]) => {
+      const lines = linesOrRows === "lines";
+      return [key, lines, decisionField(box, label, row[key], { rows: lines ? 2 : linesOrRows, lines })];
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "control-button tiny";
+    remove.textContent = `移除${singular}`;
+    remove.addEventListener("click", () => {
+      readers.delete(box);
+      box.remove();
+      addButton.focus();
+    });
+    box.append(remove);
+    list.append(box);
+    readers.set(box, () => Object.fromEntries(fields.map(([key, lines, input]) => [key,
+      lines ? decisionLines(input.value) : input.value.trim()])));
+    return fields[0][2];
+  };
+  for (const value of initial.length ? initial : [{}]) add(value);
+  addButton.addEventListener("click", () => add({}).focus());
+  host.append(list, addButton);
+  return () => [...readers.values()].map((read) => read()).filter((row) => Object.values(row).some((value) => value.length));
+}
+
+function makeDecisionEditor(pending) {
+  const node = document.createElement("div");
+  node.className = "writer-pipeline-fields";
+  const { partial, step } = pending;
+  const editor = pending.editor || DECISION_EDITORS[step] || "text";
+  let read;
+  if (editor === "genre") {
+    const row = decisionRecord(partial);
+    const fields = [
+      ["cat", decisionField(node, "题材大类", row.cat ?? row.category ?? row["大类"])],
+      ["channel", decisionField(node, "频道", row.channel, { choices: [["", "未指定"], ["male", "男频"], ["female", "女频"]] })],
+      ["subCat", decisionField(node, "细分题材", row.subCat ?? row.sub_cat)],
+      ["tone", decisionField(node, "基调", row.tone)],
+      ["hook", decisionField(node, "卖点", row.hook, { rows: 2 })],
+      ["tags", decisionField(node, "标签（每行一项）", row.tags, { rows: 2, lines: true })],
+    ];
+    read = () => {
+      if (!fields[0][1].value.trim()) throw new Error("请填写题材大类。");
+      return Object.fromEntries(fields.map(([key, input]) => [key, key === "tags" ? decisionLines(input.value) : input.value.trim()]));
+    };
+  } else if (editor === "list" && step === "blurb") {
+    const rows = decisionRowEditor(node, typeof partial === "string" ? [partial]
+      : decisionRows(partial, ["blurbs", "descriptions", "candidates"]), "简介", [["text", "简介内容", 3]], "text");
+    read = () => rows().map((row) => row.text);
+  } else if (editor === "list") {
+    const label = step === "title" ? "书名候选（每行一个，首行为书名）" : "段落要点（每行一条）";
+    const value = typeof partial === "string" ? partial : decisionRows(partial, ["titles", "candidates", "segments", "points"]);
+    const input = decisionField(node, label, value, { rows: 5, lines: true, id: "writerPipelinePendingContent" });
+    read = () => decisionLines(input.value);
+  } else if (editor === "characters" || editor === "chapters") {
+    const chars = editor === "characters";
+    const rows = decisionRowEditor(node, decisionRows(partial, chars ? ["characters", "角色"] : ["chapters", "outline"]),
+      chars ? "角色" : "章节", chars
+        ? [["name", "角色姓名"], ["role", "角色定位"], ["identity", "身份"], ["goal", "目标"],
+          ["traits", "性格"], ["speech", "说话方式"], ["arc", "成长弧线"], ["background", "背景", 2], ["relations", "关系", 2]]
+        : [["title", "章节标题"], ["beat", "情节简述", 3], ["hook", "章末钩子", 2]], chars ? "name" : "title");
+    read = () => {
+      const result = rows();
+      if (result.some((row) => !(chars ? row.name : row.title))) {
+        throw new Error(chars ? "请给每个角色填写姓名，或移除该角色。" : "请给每章填写标题，或移除该章节。");
+      }
+      return chars ? result : { chapters: result };
+    };
+  } else if (editor === "state") {
+    const row = decisionRecord(partial);
+    const lines = [["events", "本章事件"], ["open_threads", "未解决的线索"], ["next_hooks", "下章钩子"]].map(([key, label]) =>
+      [key, decisionField(node, `${label}（每行一条）`, row[key], { rows: 2, lines: true })]);
+    const advanced = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "角色状态、关系和已知信息";
+    advanced.append(summary);
+    const schemas = [
+      ["characters", "角色状态", [["name", "角色姓名"], ["presence", "出场情况"], ["location", "位置"], ["condition", "状态"]], "name"],
+      ["relations", "关系", [["between", "涉及角色（每行一个）", "lines"], ["change", "关系变化", 2]], "change"],
+      ["knowledge", "知情记录", [["name", "角色姓名"], ["known", "已知事实（每行一条）", "lines"], ["unknown", "未知事实（每行一条）", "lines"]], "name"],
+    ];
+    const groups = schemas.map(([key, label, schema, main]) =>
+      [key, decisionRowEditor(advanced, decisionRows(row[key]), label, schema, main)]);
+    advanced.open = schemas.some(([key]) => row[key]?.length);
+    node.append(advanced);
+    read = () => Object.fromEntries([...lines.map(([key, input]) => [key, decisionLines(input.value)]),
+      ...groups.map(([key, collect]) => [key, collect()])]);
+  } else {
+    const input = decisionField(node, `${stepLabel(step)}内容`, partial, { rows: 7, id: "writerPipelinePendingContent" });
+    read = () => input.value.trim() ? input.value : "";
+  }
+  return { node, read: () => {
+    const content = read();
+    if (!content || (Array.isArray(content) && !content.length)
+      || (editor === "chapters" && !content.chapters.length)
+      || (editor === "state" && !Object.values(content).some((rows) => rows.length))) {
+      throw new Error("请先填写要补充的内容。");
+    }
+    return content;
+  } };
+}
+
+function decisionDraft(pipeline, pending) {
+  const key = JSON.stringify(pendingIdentity(pipeline, pending));
+  let draft = decisionDrafts.get(writer.bookId);
+  if (draft?.key !== key) {
+    draft = { key, editor: null, keys: new Map(), error: "", skipOpen: false, confirmed: false, reason: "", busy: false };
+    decisionDrafts.set(writer.bookId, draft);
+  }
+  return draft;
+}
+
+function renderDecisionError(draft, message) {
+  draft.error = message;
+  const error = $("#writerPipelineDecisionError");
+  if (error) {
+    error.hidden = !message;
+    error.textContent = message;
+  }
+}
+
+function renderPipelineDecision(pipeline) {
+  const box = $("#writerPipelinePending");
+  if (!box) return;
+  const pending = pipeline?.pending_user;
+  box.hidden = !pipelineWaiting(pipeline) || !pending;
+  if (box.hidden) {
+    renderedDecision = null;
+    if (pipeline && !pipelineWaiting(pipeline)) decisionDrafts.delete(writer.bookId);
+    return;
+  }
+  const draft = decisionDraft(pipeline, pending);
+  const actions = Array.isArray(pending.available_actions) ? pending.available_actions : [];
+  const busy = draft.busy || writer.busy;
+  for (const [action, id] of Object.entries(DECISION_BUTTONS)) {
+    const button = $(`#${id}`);
+    button.hidden = !actions.includes(action);
+    button.disabled = busy || Boolean(pipelineCommand && samePipelineTarget(pipelineCommand));
+  }
+  const skipOpen = actions.includes("skip") && draft.skipOpen;
+  $("#writerPipelineSkipForm").hidden = !skipOpen;
+  $("#writerPipelineDecisionSkip").setAttribute("aria-expanded", String(skipOpen));
+  $("#writerPipelineSkipSubmit").disabled = busy || Boolean(pipelineCommand && samePipelineTarget(pipelineCommand));
+  $("#writerPipelineSkipClose").disabled = busy;
+  $("#writerPipelineSkipReason").disabled = busy;
+  $("#writerPipelineSkipConfirmed").disabled = busy;
+  const fields = $("#writerPipelinePendingEditor");
+  fields.hidden = !actions.includes("supplement");
+  fields.disabled = busy || Boolean(pipelineCommand && samePipelineTarget(pipelineCommand));
+  if (!fields.hidden && !draft.editor) draft.editor = makeDecisionEditor(pending);
+  const host = $("#writerPipelinePendingFields");
+  if (draft.editor && host.firstElementChild !== draft.editor.node) host.replaceChildren(draft.editor.node);
+  else if (!draft.editor && host.firstElementChild) host.replaceChildren();
+  if (draft === renderedDecision) return;
+  renderedDecision = draft;
+  $("#writerPipelineSkipReason").value = draft.reason;
+  $("#writerPipelineSkipConfirmed").checked = draft.confirmed;
+  const scope = pending.chapter_no ? `第 ${pending.chapter_no} 章 · ` : pending.part_no ? `第 ${pending.part_no} 部 · ` : "";
+  $("#writerPipelinePendingTitle").textContent = `待处理：${scope}${stepLabel(pending.step)}`;
+  $("#writerPipelineDraftTruncated").hidden = !pending.partial_truncated;
+  $("#writerPipelinePendingReason").textContent = String(pending.issue || "模型结果还不完整，请选择下一步。");
+  const counts = decisionRecord(pending.counts);
+  const countText = [counts.actual != null ? `已有 ${counts.actual}` : "", counts.target != null ? `目标 ${counts.target}` : "",
+    counts.chars != null ? `${counts.chars} 字符` : ""].filter(Boolean).join(" · ");
+  $("#writerPipelinePendingCounts").textContent = countText;
+  $("#writerPipelinePendingCounts").hidden = !countText;
+  const missing = Array.isArray(pending.missing) ? pending.missing : Object.values(decisionRecord(pending.missing));
+  $("#writerPipelinePendingMissing").hidden = !missing.length;
+  $("#writerPipelineMissingList").replaceChildren(...missing.map((value) => Object.assign(document.createElement("li"), {
+    textContent: DECISION_FIELD_LABELS[decisionText(value)] || decisionText(value),
+  })));
+  const saved = $("#writerPipelineBodySaved");
+  saved.hidden = typeof pending.body_saved !== "boolean" || (!pending.body_saved && pending.step !== "draft" && pending.step !== "state");
+  saved.textContent = pending.body_saved ? "正文已保存。处理本步不会改动已经保存的正文。" : "本轮正文未保存。";
+  $("#writerPipelinePendingConsequence").textContent = pending.skip_consequence
+    || (pending.step === "state" ? "本次不会写入章末状态；之后可以重建。" : `本次不会写入${stepLabel(pending.step)}的生成结果。`);
+  const raw = $("#writerPipelinePendingRaw");
+  raw.hidden = !pending.raw;
+  raw.open = false;
+  raw.querySelector("summary").textContent = pending.raw_truncated ? "查看模型原文（已截取）" : "查看模型原文";
+  $("#writerPipelinePendingRawText").textContent = decisionText(pending.raw);
+  renderDecisionError(draft, draft.error);
+}
+
+function renderPipelineHistory(pipeline) {
+  const history = $("#writerPipelineHistory");
+  if (!history) return;
+  const rows = Array.isArray(pipeline.decision_history) ? pipeline.decision_history.filter((row) => row?.step && row.action) : [];
+  history.hidden = !rows.length;
+  $("#writerPipelineHistoryList").replaceChildren(...rows.map((row) => {
+    const item = document.createElement("li");
+    const title = document.createElement("strong");
+    const step = Number.isInteger(row.step_index) ? `第 ${row.step_index + 1} 步 · ` : "";
+    const scope = row.chapter_no ? `第 ${row.chapter_no} 章 · ` : row.part_no ? `第 ${row.part_no} 部 · ` : "";
+    title.textContent = `${step}${scope}${stepLabel(row.step)}：${DECISION_LABELS[row.action] || row.action}`;
+    item.append(title);
+    const details = [row.reason && `原因：${row.reason}`, row.consequence, row.at && fmtTime(row.at)].filter(Boolean);
+    if (details.length) item.append(Object.assign(document.createElement("small"), { textContent: details.join(" · ") }));
+    return item;
+  }));
+}
+
+async function decidePipeline(action) {
+  const pipeline = writer.pipeline;
+  const pending = pipeline?.pending_user;
+  if (!writer.bookId || !pipelineWaiting(pipeline) || !pending?.available_actions?.includes(action) || writer.busy) return;
+  const target = pipelineTarget();
+  if (!samePipelineTarget(target)) return;
+  const draft = decisionDraft(pipeline, pending);
+  if (draft.busy || (pipelineCommand && samePipelineTarget(pipelineCommand))) return;
+  const intent = { action, ...pendingIdentity(pipeline, pending) };
+  try {
+    if (action === "supplement") intent.content = draft.editor.read();
+    if (action === "skip") {
+      if (!draft.confirmed || !draft.reason.trim()) throw new Error("请填写跳过原因，并勾选确认后再提交。");
+      intent.confirmed = true;
+      intent.reason = draft.reason.trim();
+    }
+  } catch (error) {
+    renderDecisionError(draft, error.message);
+    return;
+  }
+  const fingerprint = JSON.stringify(intent);
+  const request_key = draft.keys.get(fingerprint) || randomUuid();
+  draft.keys.set(fingerprint, request_key);
+  draft.busy = true;
+  renderDecisionError(draft, "");
+  renderPipeline();
+  try {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(target.bookId)}/pipeline/decision`, {
+      method: "POST", body: { ...intent, request_key },
+    });
+    if (!samePipelineTarget(target)) return;
+    if (payload.pipeline?.id !== intent.pipeline_id) throw new Error("未收到当前流水线的处理结果。");
+    beginPipelineWatch(payload.pipeline);
+    showPipelineOutcome(payload.pipeline, payload.decision);
+    if (payload.pipeline.status !== "running" || action === "supplement" || action === "accept") {
+      await refreshPipelineBook(pipelineTarget());
+    }
+  } catch (error) {
+    // A transport failure may have happened after commit. Reuse only the key
+    // for the exact same decision; a client/validation error is definitive.
+    if (error.status && error.status < 500) draft.keys.delete(fingerprint);
+    if (samePipelineTarget(target)) {
+      renderDecisionError(draft, error.status && error.status < 500 ? `处理失败：${error.message}`
+        : `未能确认处理结果：${error.message}。可重试相同操作。`);
+    }
+  } finally {
+    draft.busy = false;
+    if (samePipelineTarget(target) || renderedDecision === draft) renderPipeline();
+  }
+}
+
+function renderPipeline() {
+  const pipeline = writer.pipeline;
+  renderPipelineEntry();
+  applyOutputModeUi();
   const block = $("#writerPipelineBlock");
   if (!block) return;
-  const pipeline = writer.pipeline;
   block.hidden = !pipeline;
+  renderPipelineDecision(pipeline);
   if (!pipeline) return;
-  if (pipeline.current_task_id && writer.pipelineTask?.id !== pipeline.current_task_id) {
+  const waiting = pipelineWaiting(pipeline);
+  const active = pipelineActive(pipeline);
+  const showArtifact = !waiting || pipeline.pending_user?.resume_txt === true;
+  if (showArtifact && pipeline.current_task_id && writer.pipelineTask?.id !== pipeline.current_task_id) {
     void loadPipelineArtifact(pipeline.current_task_id);
   }
   const steps = Array.isArray(pipeline.steps) ? pipeline.steps : [];
   const stepIndex = Number(pipeline.step_index || 0);
-  const total = steps.length;
-  const current = pipeline.status === "running"
-    ? (steps[stepIndex] || "")
-    : "";
   const stepsLabel = $("#writerPipelineStepsLabel");
   if (stepsLabel) {
-    stepsLabel.textContent = pipeline.status === "running"
-      ? `${kindLabel(pipeline.kind)} · 第 ${Math.min(stepIndex + 1, total)} / ${total} 步 · ${stepLabel(current)}`
-      : kindLabel(pipeline.kind);
+    const progress = steps.length && (active || waiting) ? ` · 第 ${Math.min(stepIndex + 1, steps.length)} / ${steps.length} 步` : "";
+    stepsLabel.textContent = `${kindLabel(pipeline.kind)}${progress}${active && steps[stepIndex] ? ` · ${stepLabel(steps[stepIndex])}` : ""}`;
   }
   const status = $("#writerPipelineStatus");
   if (status) {
     const label = PIPELINE_STATUS_LABELS[String(pipeline.status || "")] || pipeline.status;
     status.textContent = label;
     status.className = `writer-pill ${pipeline.status === "running" ? "run"
-      : pipeline.status === "done" ? "ok"
-        : pipeline.status === "conflict" ? "wait" : "bad"}`;
+      : pipeline.status === "done" ? "ok" : waiting || pipeline.status === "conflict" ? "wait" : "bad"}`;
   }
   const model = $("#writerPipelineModel");
-  if (model) {
-    const snapshot = pipeline.request_snapshot || {};
-    model.textContent = String(snapshot.model_name || "模型未记录");
-  }
+  if (model) model.textContent = String(pipeline.request_snapshot?.model_name || "模型未记录");
   const taskLine = $("#writerPipelineTask");
   if (taskLine) {
     const taskStatus = String(pipeline.task_status || writer.pipelineTask?.status || "");
-    // 失败态只留红色错误行（writerPipelineError）：这里重复一遍 error 原文，
-    // 用户会在三处看到同一段话（第二次反馈）。白色行只回答「当前任务在干嘛」。
-    taskLine.textContent = pipelineActive(pipeline)
-      ? `当前任务：${taskStatus ? TASK_STATUS_LABELS[taskStatus] || taskStatus : "查询中"}`
-      : "—";
+    taskLine.hidden = !active;
+    taskLine.textContent = `当前任务：${taskStatus ? TASK_STATUS_LABELS[taskStatus] || taskStatus : "查询中"}`;
   }
   const stream = $("#writerPipelineStream");
   if (stream) {
-    const text = hasResultArtifact(writer.pipelineTask) ? resultArtifactText(writer.pipelineTask, writer.streamText)
-      : writer.streamText || writer.pipelineTask?.result_partial || "";
+    const task = showArtifact ? writer.pipelineTask : null;
+    const text = waiting ? "" : hasResultArtifact(task) ? resultArtifactText(task, writer.streamText)
+      : writer.streamText || task?.result_partial || "";
     stream.hidden = !text;
-    if (text) {
-      // 只展示尾部：长正文从头滚没有意义，最新内容才是用户要盯的。
-      stream.textContent = text.length > 2000 ? `……${text.slice(-2000)}` : text;
-      stream.scrollTop = stream.scrollHeight;
-    }
-    const bookId = writer.bookId;
-    const token = writer.pollToken;
-    const taskId = writer.pipelineTask?.id;
-    renderResultArtifact(stream, writer.pipelineTask, { scope: `${bookId}:${pipeline.id}:${pipeline.attempt}:${pipeline.step_index}`,
-      isCurrent: () => writer.bookId === bookId && writer.pollToken === token && writer.pipelineTask?.id === taskId,
-      onResume: pipeline.current_task_id === taskId && ["failed", "cancelled", "interrupted"].includes(pipeline.status)
-        ? async (sourceTaskId, requestKey, current) => {
-          // The artifact control owns this request's busy state. A shared
-          // writer.busy flag would outlive navigation into another book.
-          const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipeline/resume`, {
-            method: "POST", body: { task_id: sourceTaskId, request_key: requestKey },
-          });
-          if (!current()) return;
-          beginPipelineWatch(payload.pipeline);
-          toast("已继续原步骤，保留已确认 TXT 内容");
-        } : null });
+    stream.textContent = text.length > 2000 ? `……${text.slice(-2000)}` : text;
+    if (text) stream.scrollTop = stream.scrollHeight;
+    const target = pipelineTarget();
+    const taskId = task?.id;
+    const allowResume = taskId && pipeline.current_task_id === taskId && (waiting
+      ? pipeline.pending_user?.resume_txt === true : ["failed", "cancelled", "interrupted"].includes(pipeline.status));
+    renderResultArtifact(stream, task, { scope: `${target.bookId}:${target.stepKey}`,
+      isCurrent: () => samePipelineTarget(target) && writer.pipelineTask?.id === taskId,
+      onResume: allowResume ? async (sourceTaskId, requestKey, current) => {
+        if (!current()) return;
+        const payload = await pipelinePost("resume", { task_id: sourceTaskId, request_key: requestKey }, target);
+        if (!payload) return;
+        beginPipelineWatch(payload.pipeline);
+        toast("已继续原步骤，保留已确认 TXT 内容");
+      } : null });
   }
   const error = $("#writerPipelineError");
   if (error) {
-    const showError = pipeline.error && pipeline.status !== "running";
+    const showError = pipeline.error && !active && !waiting;
     error.hidden = !showError;
     if (showError) {
-      // 后端原文只是一句「已有正文，大纲里却没有它」；不告诉用户开关在哪，等于让人卡死。
       const raw = String(pipeline.error || "");
       error.textContent = raw.includes("已有正文")
         ? `${raw}　要删这些章节（含正文），勾选「允许删除已被移出大纲的章节」后重试；不想删就把它们写回大纲。`
         : raw;
     }
   }
+  const commandBusy = Boolean(pipelineCommand && samePipelineTarget(pipelineCommand));
   const cancel = $("#writerPipelineCancel");
-  if (cancel) cancel.hidden = pipeline.status !== "running";
+  if (cancel) {
+    cancel.hidden = pipeline.status !== "running" && !waiting;
+    cancel.disabled = writer.busy || commandBusy || Boolean(renderedDecision?.busy);
+    cancel.textContent = waiting ? "放弃本轮生成…" : "取消生成";
+  }
   const retry = $("#writerPipelineRetry");
   if (retry) {
     retry.hidden = !["failed", "cancelled", "interrupted", "conflict"].includes(String(pipeline.status || ""));
-    retry.disabled = writer.busy;
+    retry.disabled = writer.busy || commandBusy;
     retry.textContent = pipeline.status === "conflict" ? "基于当前版本重新生成" : "重试本步";
   }
+  renderPipelineHistory(pipeline);
   renderPageState();
 }
 
@@ -1863,67 +2202,87 @@ function schedulePipelinePolling() {
   writer.pollTimer = setTimeout(() => void pollPipelineTick(), 1200);
 }
 
-async function pollPipelineTick() {
-  const bookId = writer.bookId;
-  const token = writer.pollToken;
-  if (writer.pollBusy || !bookId || !writer.visible) return;
-  const pipeline = writer.pipeline;
-  if (!pipelineActive(pipeline)) return;
-  writer.pollBusy = true;
+function showPipelineOutcome(pipeline, decision = null) {
+  if (pipelineWaiting(pipeline)) {
+    setSaveState("待你处理", "请在「生成进度」中处理当前步骤，再继续本轮生成。");
+  } else if (pipeline.status === "done") {
+    const incomplete = pipeline.state_errors?.length || pipeline.decision_history?.some((row) => row.action === "skip")
+      || pipeline.skipped_steps?.length;
+    setSaveState(incomplete ? "本轮已结束" : "生成完成", incomplete
+      ? "有阶段未写回；详情见「生成进度」。" : "本轮完成，写入的内容可在各阶段查看。");
+  } else if (!pipelineActive(pipeline)) {
+    const label = PIPELINE_STATUS_LABELS[pipeline.status] || pipeline.status;
+    setSaveState(`生成${label}`, "详情见「生成进度」。");
+  } else if (decision?.action) {
+    setSaveState(DECISION_LABELS[decision.action] || "已处理", "详情见「阶段处理记录」。");
+  }
+}
+
+async function refreshPipelineBook(target) {
+  const path = `/api/writer/books/${encodeURIComponent(target.bookId)}`;
   try {
-    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipeline`);
-    if (token !== writer.pollToken || writer.bookId !== bookId) return;
-    const fresh = payload.pipeline;
-    if (!fresh) return;
-    // 换任务：清空流式缓冲（新任务的事件从零开始）。
-    const taskId = String(fresh.current_task_id || "");
-    if (taskId !== writer.streamTaskId) {
-      writer.streamTaskId = taskId;
-      writer.streamText = "";
-      writer.taskCursor = 0;
-      writer.pipelineTask = null;
+    const payload = await api(path);
+    if (!samePipelineTarget(target) || writer.draftOperation) return;
+    // The GET may already know about a later server step. Never use its active
+    // pipeline to rewind the watch or replace the decision currently on screen.
+    writer.book = payload.book;
+    writer.setup = payload.setup;
+    writer.outline = payload.outline;
+    writer.chapters = payload.chapters || [];
+    writer.broken = payload.broken || [];
+    if (!writer.draftDirty && writer.chapterNo) {
+      if (!writer.chapters.some((row) => Number(row.no) === writer.chapterNo)) {
+        writer.chapter = null;
+        writer.chapterNo = 0;
+        writerBodyContext = null;
+      } else if (writer.stage === "draft") {
+        await openChapter(writer.chapterNo, { silent: true, pipelineGuard: target });
+      }
     }
-    if (taskId) {
+    if (samePipelineTarget(target)) renderAll();
+  } catch (error) {
+    if (samePipelineTarget(target)) fail("无法刷新作品内容", error);
+  }
+}
+
+async function pollPipelineTick() {
+  const target = pipelineTarget();
+  const { bookId } = target;
+  if (writer.pollBusy || !bookId || !writer.visible || !samePipelineTarget(target) || !pipelineActive()) return;
+  if (pipelineCommand && samePipelineTarget(pipelineCommand)) { schedulePipelinePolling(); return; }
+  writer.pollBusy = true;
+  const current = () => samePipelineTarget(target) && !(pipelineCommand && samePipelineTarget(pipelineCommand));
+  try {
+    const { pipeline: fresh } = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipeline`);
+    if (!current() || !fresh) return;
+    const taskId = String(fresh.current_task_id || "");
+    let text = pipelineStepKey(fresh) === target.stepKey && taskId === writer.streamTaskId ? writer.streamText : "";
+    let cursor = pipelineStepKey(fresh) === target.stepKey && taskId === writer.streamTaskId ? writer.taskCursor : 0;
+    let task = taskId === writer.pipelineTask?.id ? writer.pipelineTask : null;
+    if (taskId && pipelineActive(fresh)) {
       try {
-        const { task } = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`);
-        if (token !== writer.pollToken) return;
-        writer.pipelineTask = task;
-        const events = await api(
-          `/api/studio/tasks/${encodeURIComponent(taskId)}/events?after=${writer.taskCursor}`,
-        );
-        if (token !== writer.pollToken) return;
+        ({ task } = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`));
+        if (!current()) return;
+        const events = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}/events?after=${cursor}`);
         for (const row of events.events || []) {
-          if (row.type === "delta" && row.content) writer.streamText += String(row.content);
-          if (typeof row.seq === "number") writer.taskCursor = Math.max(writer.taskCursor, Number(row.seq));
+          if (row.type === "delta" && row.content) text += String(row.content);
+          if (typeof row.seq === "number") cursor = Math.max(cursor, row.seq);
         }
       } catch (_error) {
-        // 事件流读不到时退回用任务记录里的 result_partial，不影响终态判断。
+        // A missing event stream must not prevent the pipeline status updating.
       }
     }
-    const wasRunning = pipelineActive();
+    if (!current()) return;
     writer.pipeline = fresh;
+    writer.streamTaskId = taskId;
+    writer.streamText = text;
+    writer.taskCursor = cursor;
+    writer.pipelineTask = task;
     renderPipeline();
-    if (wasRunning && !pipelineActive(fresh)) {
-      // 终态：流水线可能已写回新版本，重读作品刷新目录与编辑区。
-      // 成功完成的阶段，其「未保存修改」标记要让位——否则生成前留下的脏标记
-      // 会挡住表单回填，看起来就是「生成完了，内容却不显示」（第二次反馈实锤）。
-      if (fresh.status === "done") {
-        if (fresh.kind === "setup_all" || fresh.kind === "setup_step") writer.setupDirty = false;
-        if (fresh.kind === "outline_text" || fresh.kind === "outline_all"
-          || fresh.kind === "outline_review") writer.partsDirty = false;
-        persistDraftAfterSave();
-      }
-      await openBook(bookId, { keepEdits: true, keepStage: true });
-      if (fresh.status === "done") {
-        toast(`生成完成：${kindLabel(fresh.kind)}`);
-        setSaveState("生成完成", "本轮生成的内容已写回作品（可在目录与各阶段里看到）。");
-      } else {
-        const label = PIPELINE_STATUS_LABELS[String(fresh.status || "")] || fresh.status;
-        toast(`生成${label}：可重试`);
-        // 失败原因只写在右栏红色错误行（writerPipelineError），这里不再重复原文。
-        setSaveState("生成未完成", `详情见右栏「生成进度」里的红色错误行。`);
-      }
-      renderAll();
+    if (!pipelineActive(fresh)) {
+      showPipelineOutcome(fresh);
+      if (fresh.status === "done") toast(`生成结束：${kindLabel(fresh.kind)}`);
+      await refreshPipelineBook(pipelineTarget());
     }
   } catch (_error) {
     // 网络抖动不终止轮询；下一轮继续。
@@ -1961,6 +2320,23 @@ function gateByBudget(model, budget = writer.budget) {
     );
   }
   return true;
+}
+
+async function syncBlockedPipeline(bookId, bookToken) {
+  const target = pipelineTarget();
+  try {
+    const { pipeline } = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipeline`);
+    if (writer.bookToken !== bookToken || !samePipelineTarget(target)) return null;
+    if (pipelineWaiting(pipeline) || pipelineActive(pipeline)) {
+      beginPipelineWatch(pipeline);
+      if (pipelineWaiting(pipeline)) {
+        showPipelineOutcome(pipeline);
+        revealPipeline();
+      }
+    }
+  } catch (_error) {
+    // The original submit error is more useful than a failed status refresh.
+  }
 }
 
 /** 生成前把表单里未保存的设定改动先存成一版（人工）。
@@ -2002,13 +2378,27 @@ async function saveSetupBeforeGenerate() {
   }
 }
 
+function canStartPipeline(pipeline = writer.pipeline) {
+  if (pipelineWaiting(pipeline)) {
+    toast("这部作品有待处理的生成。请继续处理，或明确放弃本轮生成。");
+    if (pipelineWaiting()) revealPipeline();
+    return false;
+  }
+  if (pipelineActive(pipeline)) {
+    toast(pipeline.status === "stopping" ? "停止尚未确认，请等待当前任务结束后再生成" : "这部作品已有正在进行的生成，请先取消或等它结束");
+    return false;
+  }
+  return true;
+}
+
 async function submitPipeline(kind, opts = {}) {
   const {
     chapterNo = 0, allowDrop = false, partNo = 0, partTitle = "",
     targetChars = 0, wantCount = 0, fromNo = 0, extraNote = "", model: preset = null,
-    partPlan = null,
+    partPlan = null, beforeSubmit = null,
   } = opts;
-  if (!writer.bookId || writer.busy || writer.draftOperation) return;
+  if (!writer.bookId || writer.busy || writer.draftOperation || !samePipelineTarget(pipelineTarget())) return false;
+  if (!canStartPipeline()) return false;
   const isDraft = DRAFT_KINDS.has(kind);
   if (isDraft && writer.chapter?.read_only) {
     toast("导入的旧章节为只读，请选择新章节进行写作");
@@ -2029,7 +2419,7 @@ async function submitPipeline(kind, opts = {}) {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
-  if (!isDraft && !gateByBudget(model)) return;
+  if (!isDraft && kind !== "split" && !gateByBudget(model)) return false;
   const fallbackNote = stage === "setup" ? $("#writerSetupNote")?.value || ""
     : stage === "outline" ? $("#writerOutlineNote")?.value || ""
       : stage === "chapter" ? $("#writerChapterNote")?.value || ""
@@ -2054,34 +2444,50 @@ async function submitPipeline(kind, opts = {}) {
       if (!preview || !sameDraftEdit(snapshot) || writer.stage !== stage) return;
       if (!gateByBudget(model, preview.budget)) return;
     }
-    if (pipelineActive()) return;
-    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipelines`, {
-      method: "POST",
-      body: {
-        kind,
-        chapter_no: chapterNo || undefined,
-        model_key: model.model_key,
-        model_name: model.model_name,
-        char_count: writer.charCount,
-        side_count: writer.sideCount,
-        part_no: partNo || undefined,
-        part_title: partTitle || undefined,
-        target_chars: targetChars || undefined,
-        want_count: wantCount || undefined,
-        from_no: fromNo || undefined,
-        part_plan: Array.isArray(partPlan) && partPlan.length ? partPlan : undefined,
-        extra_note: note,
-        allow_drop: allowDrop || undefined,
-        revision: writer.book?.revision,
-        chapter_revision: chapterNo ? writer.chapter?.revision : undefined,
-      },
-    });
-    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return;
+    if (!canStartPipeline()) return false;
+    const body = {
+      kind,
+      chapter_no: chapterNo || undefined,
+      model_key: model.model_key,
+      model_name: model.model_name,
+      char_count: writer.charCount,
+      side_count: writer.sideCount,
+      part_no: partNo || undefined,
+      part_title: partTitle || undefined,
+      target_chars: targetChars || undefined,
+      want_count: wantCount || undefined,
+      from_no: fromNo || undefined,
+      part_plan: Array.isArray(partPlan) && partPlan.length ? partPlan : undefined,
+      extra_note: note,
+      allow_drop: allowDrop || undefined,
+      revision: writer.book?.revision,
+      chapter_revision: chapterNo ? writer.chapter?.revision : undefined,
+    };
+    if (kind === "split") {
+      const target = pipelineTarget();
+      const current = () => samePipelineTarget(target) && writer.stage === stage && writer.bookToken === bookToken;
+      const preview = await api("/api/writer/generate/preview", { method: "POST", body: { ...body, book_id: bookId } });
+      if (!current()) return false;
+      if (!preview.budget) throw new Error("未取得拆分预算，请重试");
+      writer.budget = preview.budget;
+      renderPlan();
+      if (!gateByBudget(model, preview.budget)) return false;
+      if (beforeSubmit && !await beforeSubmit(body, current)) return false;
+      if (!current()) return false;
+    }
+    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipelines`, { method: "POST", body });
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return false;
     beginPipelineWatch(payload.pipeline);
-    setSaveState("已提交", `${kindLabel(kind)}已提交；每完成一步都会自动存一版。`);
+    if (pipelineWaiting()) showPipelineOutcome(writer.pipeline);
+    else setSaveState("已提交", `${kindLabel(kind)}已提交；每完成一步都会自动存一版。`);
     toast("已提交生成");
+    return true;
   } catch (error) {
-    fail("提交生成失败", error);
+    if (writer.bookId === bookId && writer.bookToken === bookToken) {
+      if (!isDraft) await syncBlockedPipeline(bookId, bookToken);
+      if (writer.bookId === bookId && writer.bookToken === bookToken) fail("提交生成失败", error);
+    }
+    return false;
   } finally {
     writer.draftOperation = false;
     setBusy(false);
@@ -2089,21 +2495,46 @@ async function submitPipeline(kind, opts = {}) {
   }
 }
 
-async function cancelPipeline() {
-  if (!writer.bookId || writer.pipeline?.status !== "running") return;
-  const bookId = writer.bookId;
-  const pollToken = writer.pollToken;
+async function pipelinePost(command, body, target = pipelineTarget()) {
+  if (!target.bookId || !samePipelineTarget(target) || writer.busy || renderedDecision?.busy
+    || (pipelineCommand && samePipelineTarget(pipelineCommand))) return null;
+  // Ignore an in-flight poll while the command is pending; beginPipelineWatch
+  // invalidates that generation when the command succeeds.
+  const lock = { ...target };
+  pipelineCommand = lock;
+  renderPipeline();
   try {
-    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipeline/cancel`, {
-      method: "POST", body: {},
-    });
-    if (writer.bookId !== bookId || writer.pollToken !== pollToken) return;
-    writer.pipeline = payload.pipeline || writer.pipeline;
-    toast(writer.pipeline.status === "stopping" ? "停止尚未确认；正在等待任务结束" : "已取消；已完成的步骤保留");
-    renderPipeline();
-    schedulePipelinePolling();
+    const payload = await api(`/api/writer/books/${encodeURIComponent(target.bookId)}/pipeline/${command}`, { method: "POST", body });
+    if (!samePipelineTarget(lock)) return null;
+    if (!payload.pipeline) throw new Error("未收到流水线状态。");
+    return payload;
   } catch (error) {
-    fail("取消失败", error);
+    if (samePipelineTarget(lock)) throw error;
+    return null;
+  } finally {
+    if (pipelineCommand === lock) pipelineCommand = null;
+    if (samePipelineTarget(lock)) renderPipeline();
+  }
+}
+
+async function cancelPipeline() {
+  const pipeline = writer.pipeline;
+  if (!writer.bookId || (pipeline?.status !== "running" && !pipelineWaiting(pipeline))) return;
+  const pending = pipeline.pending_user;
+  const waiting = pipelineWaiting(pipeline);
+  if (waiting && !window.confirm("要放弃本轮生成吗？未提交的补充内容不会写入作品；之前已经保存的内容会保留。")) return;
+  try {
+    const payload = await pipelinePost("cancel", waiting && pending ? pendingIdentity(pipeline, pending) : {});
+    if (!payload) return;
+    beginPipelineWatch(payload.pipeline);
+    if (waiting) {
+      setSaveState("已放弃本轮生成", "之前已经保存的内容保留；可以发起新的生成。");
+    } else {
+      toast(writer.pipeline.status === "stopping" ? "停止尚未确认；正在等待任务结束" : "已取消；已完成的步骤保留");
+    }
+  } catch (error) {
+    if (renderedDecision && waiting) renderDecisionError(renderedDecision, `放弃失败：${error.message}`);
+    else fail("取消失败", error);
   }
 }
 
@@ -2119,9 +2550,8 @@ async function retryPipeline() {
     if (!rebase) return;
   }
   try {
-    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/pipeline/retry`, {
-      method: "POST", body: { rebase: rebase || undefined },
-    });
+    const payload = await pipelinePost("retry", { rebase: rebase || undefined });
+    if (!payload) return;
     beginPipelineWatch(payload.pipeline);
     toast("已重试本步");
   } catch (error) {
@@ -2268,14 +2698,22 @@ function renderLocation() {
 }
 
 async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
-  if (writer.draftOperation) return false;
-  if (!await preserveWriterBody()) return false;
+  if (writer.draftOperation || writer.splitOperation) return false;
   const token = ++writer.bookToken;
+  if (writer.selectedBookId !== bookId) {
+    writer.selectedBookId = bookId;
+    writer.bookSelection += 1;
+  }
+  const wasCurrent = pipelineTarget();
   const bodyEditToken = writer.draftEditToken;
   try {
+    if (!await preserveWriterBody() || token !== writer.bookToken) return false;
     const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}`);
-    if (token !== writer.bookToken || writer.draftOperation || bodyEditToken !== writer.draftEditToken) return;
+    if (token !== writer.bookToken || writer.draftOperation || writer.splitOperation || bodyEditToken !== writer.draftEditToken) return false;
     const sameBook = writer.bookId === bookId;
+    // A same-book reload started before a successful action/poll must not put
+    // the old step back. Selecting a different book still takes priority.
+    if (sameBook && !samePipelineTarget(wasCurrent)) return false;
     if (!sameBook) {
       writer.chapter = null;
       writer.chapterNo = 0;
@@ -2284,36 +2722,34 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     writer.bookId = bookId;
     writer.book = payload.book;
     writer.outputMode = String(payload.book?.output_mode || "json");
-    // 换书时「拆哪一部」的选择也跟着换：上一部作品的部号对这一本没有意义。
     if (!sameBook) writer.splitPartNo = 0;
     writer.setup = payload.setup;
     writer.outline = payload.outline;
     writer.chapters = payload.chapters || [];
     writer.broken = payload.broken || [];
+    if (!sameBook || pipelineStepKey(payload.book?.active_pipeline || null) !== pipelineStepKey()) {
+      writer.pollToken += 1;
+      writer.streamTaskId = String(payload.book?.active_pipeline?.current_task_id || "");
+      writer.streamText = "";
+      writer.taskCursor = 0;
+      writer.pipelineTask = null;
+    }
     writer.pipeline = payload.book?.active_pipeline || null;
-    // 换书一律重填：上一本的 dirty 标记留着会让表单/大纲停在上一本的内容上（串稿）。
     const keep = sameBook && keepEdits;
     if (!keep) {
       writer.setupDirty = false;
       writer.draftDirty = false;
       writer.partsDirty = false;
     }
-    // 刷新/重启后恢复没保存的草稿；版本对不上（已保存过或在别处改过）就丢弃，避免复活旧内容。
     const restored = keep
       ? { setup: false, outline: false }
       : applyWriterDraft(bookId, payload.book);
-    if (!keepStage) writer.stage = "setup";
-    // 草稿数据已经写进 writer.setup / writer.outline：先清标记让 renderAll 按它重建 DOM
-    // （守卫只在 dirty 时让路），重建完再把标记置回。
+    if (!keepStage && !sameBook) writer.stage = "setup";
     if (restored.setup) writer.setupDirty = false;
     if (restored.outline) writer.partsDirty = false;
-    // 活动流水线的流式缓冲与新作品/新状态对齐。
-    writer.streamTaskId = String(writer.pipeline?.current_task_id || "");
-    writer.streamText = "";
-    writer.taskCursor = 0;
-    writer.pipelineTask = null;
     try { localStorage.setItem(LAST_BOOK_KEY, bookId); } catch (_error) { /* storage may be unavailable */ }
     setSaveState("已打开", `《${writer.book?.title || ""}》已打开（第 ${writer.book?.revision ?? "?"} 版）。`);
+    if (pipelineWaiting()) showPipelineOutcome(writer.pipeline);
     renderAll();
     void writerBodyPanel.refresh(writerBodyDrafts, bookId);
     if (restored.setup) writer.setupDirty = true;
@@ -2324,7 +2760,6 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
       setSaveState("有未保存修改", "已恢复上次没保存的草稿；点「保存」才会写进作品。");
     }
     schedulePipelinePolling();
-    // 打开的章节还在作品里就重新取一份（版本可能已更新）；不在了就清掉。
     if (writer.chapterNo && !writer.chapters.some((row) => Number(row.no) === writer.chapterNo)) {
       writer.chapter = null;
       writer.chapterNo = 0;
@@ -2333,8 +2768,15 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
       await openChapter(writer.chapterNo, { silent: true });
     }
     void refreshPlan();
+    return true;
   } catch (error) {
-    fail("打开作品失败", error);
+    if (token === writer.bookToken) fail("打开作品失败", error);
+    return false;
+  } finally {
+    if (token === writer.bookToken && writer.selectedBookId !== writer.bookId) {
+      writer.selectedBookId = writer.bookId;
+      schedulePipelinePolling();
+    }
   }
 }
 
@@ -2351,7 +2793,12 @@ async function createBook() {
     if (input) input.value = "";
     closeDialog("#writerBooksDialog");
     toast(`已新建《${book.title}》`);
-    await openBook(book.id);
+    if (!await openBook(book.id)) {
+      const errorEl = $("#writerBooksError");
+      if (errorEl) errorEl.textContent = `作品已创建，但打开失败（ID：${book.id}）。请从列表重试打开。`;
+      toast(`作品已创建，但打开失败（ID：${book.id}）`);
+      return;
+    }
     setStage("setup");
   } catch (error) {
     const errorEl = $("#writerBooksError");
@@ -2390,7 +2837,13 @@ async function deleteBook(bookId, title) {
   try {
     await api(`/api/writer/books/${encodeURIComponent(bookId)}`, { method: "DELETE" });
     toast("已删除作品");
+    decisionDrafts.delete(bookId);
     if (writer.bookId === bookId) {
+      if (writer.selectedBookId === bookId) {
+        writer.selectedBookId = "";
+        writer.bookSelection += 1;
+        writer.bookToken += 1;
+      }
       writer.bookId = "";
       writer.book = null;
       writer.setup = null;
@@ -2472,9 +2925,9 @@ async function renderBooksDialog() {
 // 章节（正文阶段）
 // ============================================================
 
-async function openChapter(chapterNo, { silent = false, bodyDraft = null } = {}) {
-  if (!writer.bookId || writer.draftOperation) return false;
-  if (!await preserveWriterBody()) return false;
+async function openChapter(chapterNo, { silent = false, bodyDraft = null, pipelineGuard = null } = {}) {
+  if (!writer.bookId || writer.draftOperation || writer.splitOperation) return false;
+  if (!await preserveWriterBody() || (pipelineGuard && !samePipelineTarget(pipelineGuard))) return false;
   const bookId = writer.bookId;
   const bookToken = writer.bookToken;
   const editToken = writer.draftEditToken;
@@ -2489,7 +2942,7 @@ async function openChapter(chapterNo, { silent = false, bodyDraft = null } = {})
     } catch (_error) { writerBodyPanel.status("error"); }
     if (token !== writer.chapterToken || writer.bookId !== bookId
       || writer.bookToken !== bookToken || writer.draftEditToken !== editToken
-      || writer.draftOperation) return false;
+      || writer.draftOperation || writer.splitOperation || (pipelineGuard && !samePipelineTarget(pipelineGuard))) return false;
     const base = { ...writerDraftContext(payload), bookId };
     if (recovered && !bodyDraftMatches(recovered, base)) {
       const choice = await chooseBodyDraft(recovered, { canContinue: !payload.read_only });
@@ -2774,7 +3227,7 @@ async function ensurePartsSavedBeforeGenerate() {
 
 /** 生成当前这一部的整篇大纲（outline_text 流水线）。 */
 async function generatePartText() {
-  if (!writer.bookId) return;
+  if (!writer.bookId || writer.busy || !canStartPipeline()) return;
   const model = readModel("outlineProviderKey", "outlineModelName");
   if (!model.model_name) {
     toast("先在设置里检查模型，再回来选择");
@@ -2831,7 +3284,7 @@ function applyPartsTarget() {
 /** 一次性生成全部部的大纲（outline_all）：每步一部，后面的部接住前面的线。
  *  再点一次就是重新生成（抽卡）：已写过内容的部会被替换，旧版本留在历史里。 */
 async function generateAllParts() {
-  if (!writer.bookId) return;
+  if (!writer.bookId || writer.busy || !canStartPipeline()) return;
   const model = readModel("outlineProviderKey", "outlineModelName");
   if (!model.model_name) {
     toast("先在设置里检查模型，再回来选择");
@@ -2857,7 +3310,7 @@ async function generateAllParts() {
 /** 多部统一复核梳理（outline_review）：把已写好的各部放在一起互相核对，
  *  逐部修订衔接、矛盾与重复；每部存一版新大纲，旧版本可切回。 */
 async function generateOutlineReview() {
-  if (!writer.bookId) return;
+  if (!writer.bookId || writer.busy || !canStartPipeline()) return;
   const model = readModel("outlineProviderKey", "outlineModelName");
   if (!model.model_name) {
     toast("先在设置里检查模型，再回来选择");
@@ -2945,21 +3398,26 @@ async function upgradeLegacyOutline() {
 // ---- 章节：拆分 ----
 
 async function saveChapterPlan() {
-  if (!writer.bookId) return;
+  if (!writer.bookId) return false;
+  const bookId = writer.bookId;
+  const bookToken = writer.bookToken;
   const chars = Number($("#writerChapterChars")?.value || 0);
   const ending = String($("#writerChapterEnding")?.value || "suspense");
   const plan = chapterPlan();
-  if (plan.chars === chars && plan.ending === ending) return;
+  if (plan.chars === chars && plan.ending === ending) return true;
   try {
-    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}`, {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}`, {
       method: "PATCH",
       body: { chapter_plan: { chars, ending }, revision: writer.book?.revision },
     });
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return false;
     writer.book = payload.book;
     renderTocLimits();
     setSaveState("已保存", `单章字数${chars ? ` ≤ ${chars} 字` : "不限"} · 结尾${ENDING_LABELS[ending] || ending}`);
+    return true;
   } catch (error) {
-    fail("保存章节设置失败", error);
+    if (writer.bookId === bookId && writer.bookToken === bookToken) fail("保存章节设置失败", error);
+    return false;
   }
 }
 
@@ -3000,76 +3458,100 @@ function applySplitTotalChars() {
 
 /** 拆一批：按 wantCount 与 999 上限切批；接续拆分会带上已拆章节的衔接上下文（服务端）。 */
 async function startSplit() {
-  if (!writer.bookId) return;
+  if (!writer.bookId || writer.busy || writer.splitOperation || !canStartPipeline()) return;
   const want = Number($("#writerSplitCount")?.value || 0);
-  if (!want || want < 1) {
+  if (!Number.isInteger(want) || want < 1 || want > 9999) {
     toast("先填要拆成多少章（1–9999）");
     return;
   }
-  await saveChapterPlan();
+  const bookId = writer.bookId;
+  const bookToken = writer.bookToken;
+  const partNo = splitPartNo();
   const model = readModel("chapterProviderKey", "chapterModelName");
   if (!model.model_name) {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
-  if (!writer.chapters.length) {
-    await submitSplitBatch({ fromNo: 1, partNo: splitPartNo(), model });
-    return;
-  }
-  // 已有章节：让用户选「接续」（从下一章继续）或「覆盖重拆」（清空后从第 1 章开始）。
   const existing = writer.chapters.length;
-  const hasBody = writer.chapters.some((row) => Number(row.len || 0) > 0);
-  const note = $("#writerSplitDialogNote");
-  if (note) {
-    note.textContent = `现在已有 ${existing} 章${hasBody ? "（部分已有正文）" : ""}。`
-      + "接续＝保留现有章节，从它们的下一章继续拆；覆盖重拆＝清空现有章节目录（含全部正文，不能恢复），从第 1 章重新拆。";
-  }
-  const dialog = $("#writerSplitDialog");
-  if (!dialog || typeof dialog.showModal !== "function") {
-    // 弹窗不可用（老内核）：退回 window.confirm 的接续/取消二选一。
-    if (window.confirm(`现在已有 ${existing} 章；接续拆分会从第 ${existing + 1} 章继续（已有章节不会被覆盖）。继续吗？`)) {
-      await submitSplitBatch({ fromNo: existing + 1, partNo: splitPartNo(), model });
-    }
-    return;
-  }
-  const continueBtn = $("#writerSplitContinueChoice");
-  const overwriteBtn = $("#writerSplitOverwriteChoice");
-  const cancelBtn = $("#writerSplitCancelChoice");
-  // 弹窗必须真的弹出来：此前只挂监听不 showModal，<dialog> 没有 open 属性不可见，
-  // 下面的 Promise 等按钮/close 事件永远挂着——「开始拆分」点了毫无反应（自 9522d44 起天生如此）。
-  if (!dialog.open) dialog.showModal();
-  // signal：弹窗一结束就把本轮监听全部摘掉；once 残留下轮会串选择。
-  const signal = new AbortController().signal;
-  const done = await new Promise((resolve) => {
-    const settle = dialog.addEventListener.bind(dialog);
-    settle("close", () => resolve("cancel"), { once: true, signal });
-    continueBtn?.addEventListener("click", () => resolve("continue"), { once: true, signal });
-    overwriteBtn?.addEventListener("click", () => resolve("overwrite"), { once: true, signal });
-    cancelBtn?.addEventListener("click", () => resolve("cancel"), { once: true, signal });
-  });
-  dialog.close();
-  if (done === "continue") {
-    await submitSplitBatch({ fromNo: existing + 1, partNo: splitPartNo(), model });
-    return;
-  }
-  if (done === "overwrite") {
-    if (!window.confirm(
-      `要清空现有 ${existing} 章吗？\n章节目录与全部正文版本都会删除，不能恢复；之后从第 1 章重新拆。`,
-    )) return;
-    try {
-      await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/chapters/clear`, {
-        method: "POST",
-        body: { revision: writer.book?.revision },
+  const nextNo = writer.chapters.reduce((max, row) => Math.max(max, Number(row.no) || 0), 0) + 1;
+  let choice = "continue";
+  if (existing) {
+    const hasBody = writer.chapters.some((row) => Number(row.len || 0) > 0);
+    const note = $("#writerSplitDialogNote");
+    if (note) note.textContent = `现在已有 ${existing} 章${hasBody ? "（部分已有正文）" : ""}。`
+      + "接续＝保留现有章节，从下一章继续拆；覆盖重拆＝在预检通过后清空目录与全部正文版本，从第 1 章重新拆。";
+    const dialog = $("#writerSplitDialog");
+    if (!dialog || typeof dialog.showModal !== "function") {
+      if (!window.confirm(`现在已有 ${existing} 章；接续拆分将从第 ${nextNo} 章开始。继续吗？`)) return;
+    } else {
+      if (dialog.open) return;
+      const controller = new AbortController();
+      const { signal } = controller;
+      dialog.showModal();
+      choice = await new Promise((resolve) => {
+        dialog.addEventListener("close", () => resolve("cancel"), { once: true, signal });
+        for (const [id, value] of [["Continue", "continue"], ["Overwrite", "overwrite"], ["Cancel", "cancel"]]) {
+          $(`#writerSplit${id}Choice`)?.addEventListener("click", () => resolve(value), { once: true, signal });
+        }
       });
-      writer.chapters = [];
-      writer.chapter = null;
-      writer.chapterNo = 0;
-      toast("已清空章节目录；开始覆盖重拆");
-      await submitSplitBatch({ fromNo: 1, partNo: splitPartNo(), model });
-    } catch (error) {
-      fail("清空章节失败", error);
+      controller.abort();
+      dialog.close();
     }
   }
+  if (choice === "cancel" || bookToken !== writer.bookToken || bookId !== writer.bookId || !canStartPipeline()) return;
+  if (choice === "overwrite" && writer.chapters.some((row) => row.read_only)) {
+    toast("目录中有导入的只读章节，不能覆盖重拆；可以选择接续拆分。");
+    return;
+  }
+  if (choice === "overwrite" && !window.confirm(
+    `要清空现有 ${existing} 章吗？\n预检通过后，将删除章节目录与全部正文版本，不能恢复；之后从第 1 章重新拆。`,
+  )) return;
+  writer.splitOperation = true;
+  try {
+    if (!await saveChapterPlan() || !canStartPipeline()) return;
+    await submitSplitBatch({ fromNo: choice === "overwrite" ? 1 : nextNo, partNo, model, target: want,
+      beforeSubmit: choice === "overwrite" ? clearForSplit : null });
+  } finally {
+    writer.splitOperation = false;
+  }
+}
+
+async function clearForSplit(body, current) {
+  const bookId = writer.bookId;
+  const path = `/api/writer/books/${encodeURIComponent(bookId)}`;
+  // Query live state after validating the exact split request, immediately
+  // before the only irreversible action. Fail closed if either read fails.
+  const { pipeline } = await api(`${path}/pipeline`);
+  if (!current()) return false;
+  if (pipelineWaiting(pipeline) || pipelineActive(pipeline)) {
+    beginPipelineWatch(pipeline);
+    showPipelineOutcome(pipeline);
+    return canStartPipeline(pipeline);
+  }
+  if (!Number.isInteger(body.revision)) throw new Error("未取得当前作品版本，请重新打开作品后再重拆");
+  await api(`${path}/chapters/clear`, { method: "POST", body: { revision: body.revision } });
+  if (!current()) return false;
+  writer.chapters = [];
+  writer.chapter = null;
+  writer.chapterNo = 0;
+  writer.chapterToken += 1;
+  writer.draftDirty = false;
+  writerBodyContext = null;
+  setSaveState("章节目录已清空", "尚未提交重拆；如提交失败，可重新点击开始拆分。");
+  const index = await api(path);
+  if (!current()) return false;
+  writer.book = index.book;
+  writer.chapters = index.chapters || [];
+  if (pipelineWaiting(index.book?.active_pipeline) || pipelineActive(index.book?.active_pipeline)) {
+    beginPipelineWatch(index.book.active_pipeline);
+    showPipelineOutcome(index.book.active_pipeline);
+    return canStartPipeline(index.book.active_pipeline);
+  }
+  if (!index.book || !Number.isInteger(index.book.revision) || writer.chapters.length) {
+    throw new Error("清空后作品状态已变化，请重新打开作品再拆分");
+  }
+  body.revision = index.book.revision;
+  return true;
 }
 
 function splitPartNo() {
@@ -3079,8 +3561,9 @@ function splitPartNo() {
 
 /** 继续拆：还剩多少就再拆一批（每批 ≤999）。 */
 async function continueSplit() {
+  if (!writer.bookId || writer.busy || writer.splitOperation || !canStartPipeline()) return;
   const target = Number($("#writerSplitCount")?.value || 0);
-  if (!target) return;
+  if (!Number.isInteger(target) || target < 1 || target > 9999) return;
   const fromNo = writer.chapters.reduce((max, row) => Math.max(max, Number(row.no) || 0), 0) + 1;
   if (fromNo > target) {
     toast("已经拆到目标章数了");
@@ -3092,31 +3575,28 @@ async function continueSplit() {
     return;
   }
   await submitSplitBatch({
-    fromNo, partNo: splitPartNo(), model,
+    fromNo, partNo: splitPartNo(), model, target,
   });
 }
 
-async function submitSplitBatch({ fromNo, partNo, model }) {
-  const target = Number($("#writerSplitCount")?.value || 0);
-  const remaining = Math.max(1, target - fromNo + 1);
-  const wantCount = Math.min(SPLIT_BATCH_MAX, remaining);
-  try {
-    await submitPipeline("split", {
-      partNo,
-      wantCount,
-      fromNo,
-      model,
-      extraNote: String($("#writerChapterNote")?.value || ""),
-    });
-    const btn = $("#writerSplitContinue");
-    if (btn) btn.hidden = fromNo + wantCount > target;
-    const batches = wantCount > SPLIT_STEP_CHAPTERS
-      ? `，会自动按每批 ${SPLIT_STEP_CHAPTERS} 章连拆` : "";
-    setSaveState("已提交拆分",
-      `拆「第 ${partNo} 部」：第 ${fromNo} 章起拆 ${wantCount} 章（目标 ${target} 章）${batches}；完成后章节目录会自动刷新。`);
-  } catch (_error) {
-    // submitPipeline 已提示
+async function submitSplitBatch({ fromNo, partNo, model, target, beforeSubmit = null }) {
+  if (fromNo > target) {
+    toast("已经拆到目标章数了");
+    return;
   }
+  const wantCount = Math.min(SPLIT_BATCH_MAX, target - fromNo + 1);
+  const submitted = await submitPipeline("split", {
+    partNo, wantCount, fromNo, model, beforeSubmit,
+    extraNote: String($("#writerChapterNote")?.value || ""),
+  });
+  if (!submitted) return;
+  const btn = $("#writerSplitContinue");
+  if (btn) btn.hidden = fromNo + wantCount > target;
+  if (pipelineWaiting()) return;
+  const batches = wantCount > SPLIT_STEP_CHAPTERS
+    ? `，会自动按每批 ${SPLIT_STEP_CHAPTERS} 章连拆` : "";
+  setSaveState("已提交拆分",
+    `拆「第 ${partNo} 部」：第 ${fromNo} 章起拆 ${wantCount} 章（目标 ${target} 章）${batches}；完成后章节目录会自动刷新。`);
 }
 
 /** 改章节标题/简述（失焦保存）。 */
@@ -3992,14 +4472,9 @@ function closeDialog(selector) {
 }
 
 function setStage(stage) {
-  if (writer.draftOperation) return;
+  if (writer.draftOperation || writer.splitOperation) return;
   const next = ["setup", "outline", "chapter", "draft"].includes(stage) ? stage : "setup";
   writer.stage = next;
-  document.querySelectorAll("#writerStages [data-writer-stage]").forEach((btn) => {
-    const active = btn.dataset.writerStage === next;
-    btn.classList.toggle("active", active);
-    btn.setAttribute("aria-pressed", String(active));
-  });
   renderEditor();
   renderSide();
   renderChapters();
@@ -4034,6 +4509,27 @@ function setPane(pane) {
   applyPaneAccessibility();
 }
 
+function renderPipelineEntry() {
+  const waiting = pipelineWaiting();
+  const aside = $("#writerAsideBtn");
+  if (aside) {
+    aside.classList.toggle("writer-needs-decision", waiting);
+    aside.setAttribute("aria-expanded", String(writer.pane === "notes"));
+    aside.textContent = writer.pane === "notes" ? "收起说明" : waiting ? "处理生成结果" : "查看说明";
+  }
+  const notes = $("#writerPanes [data-writer-pane=\"notes\"]");
+  if (notes) {
+    notes.classList.toggle("writer-needs-decision", waiting);
+    notes.textContent = waiting ? "待处理" : "说明";
+  }
+}
+
+function revealPipeline() {
+  setPane("notes");
+  const entry = pipelineWaiting() ? $("#writerPipelinePending") : $("#writerPipelineBlock");
+  entry?.scrollIntoView({ block: "nearest" });
+}
+
 /** 分档布局下，隐藏栏里的控件必须对键盘/读屏不可达（inert），否则会「点不到却还在」。
  *  只切可见栏，不复制状态。 */
 function applyPaneAccessibility() {
@@ -4049,11 +4545,7 @@ function applyPaneAccessibility() {
     if (!hidden) panel.removeAttribute("inert");
     else panel.setAttribute("inert", "");
   }
-  const aside = $("#writerAsideBtn");
-  if (aside) {
-    aside.setAttribute("aria-expanded", String(writer.pane === "notes"));
-    aside.textContent = writer.pane === "notes" ? "收起说明" : "查看说明";
-  }
+  renderPipelineEntry();
 }
 
 function closeExportMenu() {
@@ -4280,7 +4772,11 @@ export function bindWriterEvents() {
     bindWorkbenchDialogReturn($(`#${id}`), $("#writerBookMenuBtn"));
   }
   bindWorkbenchDialogReturn($("#writerManageDialog"), $("#writerMoreBtn"));
-  $("#writerAsideBtn")?.addEventListener("click", () => setPane(writer.pane === "notes" ? "editor" : "notes"));
+  $("#writerAsideBtn")?.addEventListener("click", () => {
+    if (writer.pane === "notes") setPane("editor");
+    else if (pipelineWaiting()) revealPipeline();
+    else setPane("notes");
+  });
   $("#writerAsideClose")?.addEventListener("click", () => {
     setPane("editor");
     $("#writerAsideBtn")?.focus();
@@ -4665,6 +5161,30 @@ export function bindWriterEvents() {
   // ---- 流水线 ----
   $("#writerPipelineCancel")?.addEventListener("click", () => void cancelPipeline());
   $("#writerPipelineRetry")?.addEventListener("click", () => void retryPipeline());
+  $("#writerPipelineDecisionRetry")?.addEventListener("click", () => void decidePipeline("retry"));
+  $("#writerPipelineDecisionSupplement")?.addEventListener("click", () => void decidePipeline("supplement"));
+  $("#writerPipelineDecisionAccept")?.addEventListener("click", () => void decidePipeline("accept"));
+  $("#writerPipelineDecisionSkip")?.addEventListener("click", () => {
+    if (!renderedDecision) return;
+    renderedDecision.skipOpen = !renderedDecision.skipOpen;
+    renderPipelineDecision(writer.pipeline);
+    if (renderedDecision.skipOpen) $("#writerPipelineSkipReason")?.focus();
+  });
+  $("#writerPipelineSkipReason")?.addEventListener("input", (event) => {
+    if (renderedDecision) renderedDecision.reason = event.target.value;
+  });
+  $("#writerPipelineSkipConfirmed")?.addEventListener("change", (event) => {
+    if (renderedDecision) renderedDecision.confirmed = event.target.checked;
+  });
+  $("#writerPipelineSkipClose")?.addEventListener("click", () => {
+    if (!renderedDecision) return;
+    renderedDecision.skipOpen = false;
+    renderedDecision.confirmed = false;
+    $("#writerPipelineSkipConfirmed").checked = false;
+    renderPipelineDecision(writer.pipeline);
+    $("#writerPipelineDecisionSkip")?.focus();
+  });
+  $("#writerPipelineSkipSubmit")?.addEventListener("click", () => void decidePipeline("skip"));
 
   // ---- 管理记录 ----
   $("#writerManageTabs")?.addEventListener("click", (event) => {

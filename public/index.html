@@ -1514,7 +1514,7 @@
             </div>
             </div>
             <div class="writer-page-actions wb-header-actions">
-              <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerColumns" aria-expanded="false">查看说明</button>
+              <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerNotesPane" aria-expanded="false">查看说明</button>
               <button class="control-button wb-book-more" id="writerMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerMoreMenu" aria-label="更多作品操作">⋯</button>
               <div class="wb-book-menu" id="writerMoreMenu" role="menu" popover hidden>
               <button class="control-button" type="button" role="menuitem" data-resource-details data-resource-opener="writerMoreBtn">资源监控</button>
@@ -1545,7 +1545,7 @@
           <div class="writer-panes" id="writerPanes" role="group" aria-label="织书台分档">
             <button class="studio-pane-btn writer-pane-btn" type="button" aria-pressed="false" data-writer-pane="book">作品</button>
             <button class="studio-pane-btn writer-pane-btn active" type="button" aria-pressed="true" data-writer-pane="editor">编辑</button>
-            <button class="studio-pane-btn writer-pane-btn" type="button" aria-pressed="false" data-writer-pane="notes">说明</button>
+            <button class="studio-pane-btn writer-pane-btn" type="button" aria-controls="writerNotesPane" aria-pressed="false" data-writer-pane="notes">说明</button>
           </div>
           <div class="writer-columns" id="writerColumns" data-writer-pane="editor">
             <!-- 左：按阶段切换（设定=作品与版本 · 大纲=设定汇总 · 章节=大纲汇总 · 正文=目录） -->
@@ -1956,30 +1956,70 @@
             </section>
 
             <!-- 右：说明与状态 -->
-            <aside class="writer-panel writer-notes" aria-label="说明与状态">
+            <aside class="writer-panel writer-notes" id="writerNotesPane" aria-label="说明与状态">
               <div class="writer-panel-head">
                 <strong>这次会做什么</strong>
                 <small id="writerPlanState">—</small>
                 <button class="control-button wb-book-aside-close" id="writerAsideClose" type="button" aria-label="收起说明">关闭</button>
               </div>
               <div class="writer-scroll">
-                <section class="writer-block" id="writerPlanBlock">
-                  <div class="writer-block-title"><strong>输入来源</strong><small id="writerBudgetMeta"></small></div>
-                  <div class="writer-plan" id="writerPlanBody"></div>
-                </section>
                 <section class="writer-block" id="writerPipelineBlock" hidden>
                   <div class="writer-block-title"><strong>生成进度</strong><small id="writerPipelineStepsLabel"></small></div>
                   <div class="writer-pipeline-status">
                     <span class="writer-pill" id="writerPipelineStatus">进行中</span>
                     <span class="writer-kv-line" id="writerPipelineModel"></span>
                   </div>
-                  <p class="writer-note" id="writerPipelineTask">—</p>
+                  <p class="writer-note" id="writerPipelineTask" hidden></p>
                   <pre class="writer-stream" id="writerPipelineStream" hidden></pre>
                   <p class="writer-note writer-error" id="writerPipelineError" hidden></p>
+                  <section id="writerPipelineHistory" hidden>
+                    <strong>阶段处理记录</strong>
+                    <ol class="writer-pipeline-history" id="writerPipelineHistoryList"></ol>
+                  </section>
+                  <section class="writer-pipeline-pending" id="writerPipelinePending" aria-labelledby="writerPipelinePendingTitle" hidden>
+                    <div class="writer-block-title"><strong id="writerPipelinePendingTitle">待你处理</strong><small id="writerPipelinePendingCounts" hidden></small></div>
+                    <p class="writer-note" id="writerPipelinePendingReason"></p>
+                    <p class="writer-note" id="writerPipelineBodySaved" hidden></p>
+                    <div id="writerPipelinePendingMissing" hidden>
+                      <strong>需要补齐</strong>
+                      <ul id="writerPipelineMissingList"></ul>
+                    </div>
+                    <div class="writer-pipeline-decision-actions" aria-label="可用的处理方式">
+                      <button class="control-button tiny" type="button" id="writerPipelineDecisionRetry" hidden>重新生成本步</button>
+                      <button class="control-button tiny" type="button" id="writerPipelineDecisionAccept" hidden>接受已有结果</button>
+                      <button class="control-button tiny" type="button" id="writerPipelineDecisionSkip" aria-controls="writerPipelineSkipForm" aria-expanded="false" hidden>跳过本步…</button>
+                    </div>
+                    <div class="writer-pipeline-skip" id="writerPipelineSkipForm" hidden>
+                      <p class="writer-note" id="writerPipelinePendingConsequence"></p>
+                      <label class="writer-field">跳过原因
+                        <textarea id="writerPipelineSkipReason" rows="2" maxlength="300"></textarea>
+                      </label>
+                      <label class="writer-pipeline-confirm"><input id="writerPipelineSkipConfirmed" type="checkbox"> 我确认跳过本步</label>
+                      <div class="writer-pipeline-decision-actions">
+                        <button class="control-button tiny" type="button" id="writerPipelineSkipSubmit">确认跳过</button>
+                        <button class="control-button tiny" type="button" id="writerPipelineSkipClose">返回</button>
+                      </div>
+                    </div>
+                    <fieldset class="writer-pipeline-editor" id="writerPipelinePendingEditor" hidden>
+                      <legend>手动补充</legend>
+                      <p class="writer-note" id="writerPipelineDraftTruncated" hidden>待编辑草稿超过上限，未全部带入。可查看模型原文，摘取需要的内容。</p>
+                      <div id="writerPipelinePendingFields"></div>
+                      <button class="control-button tiny" type="button" id="writerPipelineDecisionSupplement" hidden>补充并继续</button>
+                    </fieldset>
+                    <details id="writerPipelinePendingRaw" hidden>
+                      <summary>查看模型原文</summary>
+                      <pre class="writer-stream" id="writerPipelinePendingRawText"></pre>
+                    </details>
+                    <p class="writer-note writer-error" id="writerPipelineDecisionError" role="alert" hidden></p>
+                  </section>
                   <div class="writer-pick-actions">
                     <button class="control-button tiny" type="button" id="writerPipelineCancel">取消生成</button>
                     <button class="control-button tiny" type="button" id="writerPipelineRetry" hidden>重试本步</button>
                   </div>
+                </section>
+                <section class="writer-block" id="writerPlanBlock">
+                  <div class="writer-block-title"><strong>输入来源</strong><small id="writerBudgetMeta"></small></div>
+                  <div class="writer-plan" id="writerPlanBody"></div>
                 </section>
                 <section class="writer-block">
                   <div class="writer-block-title"><strong>保存状态</strong><small id="writerSaveState">—</small></div>
@@ -3690,11 +3730,15 @@
         <label class="provider-field" id="providerContextField">上下文窗口 Tokens（可选）
           <input id="providerContextWindow" type="number" min="1" max="1048576" step="1" placeholder="留空则使用供应商默认值">
           <span id="providerContextSize" hidden aria-hidden="true"></span>
-          <small class="hint" id="providerContextHint">在线与本地模型有效；只限制上下文容量，不限制单次输出长度。</small>
+          <small class="hint" id="providerContextHint">这是 Cat Chat 的历史预算，不等于供应商真实上限；本地部分后端会把它同步为对应的上下文参数。</small>
+          <small class="hint provider-capability-hint" id="providerContextCapability" hidden></small>
+          <button class="control-button tiny provider-capability-apply" id="applyProviderContextCapability" type="button" hidden>采用目录建议</button>
         </label>
         <label class="provider-field" id="providerMaxOutputField">最大输出 Tokens（可选）
           <input id="providerMaxOutputTokens" type="number" min="1" max="1048576" step="1" placeholder="留空则使用供应商默认值">
-          <small class="hint" id="providerMaxOutputHint">在线模型使用供应商自身的模型上限；只限制单次回复长度，不改变上下文窗口。<b>开启思考时留空，会按 min(32768, 该端点上限) 兜底</b>：思考与正文共用这份输出额度，不兜底就等于把额度交给上游默认值（思考失控时会一路烧下去）。</small>
+          <small class="hint" id="providerMaxOutputHint">这是单次回复的输出上限，不改变上下文窗口；目录数字只是建议，不代表端点实际接受的上限。<b>开启思考时留空，会按端点能力使用安全兜底</b>。</small>
+          <small class="hint provider-capability-hint" id="providerMaxOutputCapability" hidden></small>
+          <button class="control-button tiny provider-capability-apply" id="applyProviderMaxOutputCapability" type="button" hidden>采用目录建议</button>
         </label>
         <label class="provider-field" id="providerTemperatureField">温度（可选）
           <input id="providerTemperature" type="number" min="0" max="2" step="0.1" placeholder="留空则使用供应商默认值">

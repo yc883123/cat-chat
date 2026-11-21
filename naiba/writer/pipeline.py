@@ -20,6 +20,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import re
 import threading
 import time
 import traceback
@@ -32,15 +35,28 @@ from naiba.core.contracts import (
     WRITER_PREVIOUS_CHAPTER_KEY,
     WRITER_SETUP_SNAPSHOT_KEY,
     WRITER_PIPELINE_STOPPING,
+    WRITER_PIPELINE_NEEDS_USER,
+    WRITER_PENDING_USER_KEY,
+    WRITER_PENDING_ACCEPTED_KEY,
+    WRITER_DECISION_DIGEST_KEY,
+    WRITER_DECISION_ACTIONS,
+    WRITER_DECISION_REVISION_KEY,
+    WRITER_DECISION_HISTORY_KEY,
+    WRITER_DECISION_REQUEST_KEY,
     WORK_GLOBAL_SYSTEM_PROMPT_KEY,
     WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
     WRITER_COMPLETED_GENERATIONS_KEY,
     WRITER_RESULT_RESUME_KEY,
     WRITER_OUTPUT_MODE_KEY,
+    STUDIO_RESULT_ISSUE_KEY,
+    WriterPendingUser,
 )
 from naiba.writer import prompts
 from naiba.writer.store import (
-    PIPELINE_STATUSES,
+    SETUP_TEXT_MAX_CHARS,
+    LEAD_MAX,
+    SIDE_MAX,
+    normalize_setup,
     WriterConflictError,
     WriterStoreError,
     new_version_id,
@@ -55,8 +71,7 @@ PIPELINE_KINDS = (
     "state_rebuild",
 )
 # 各 kind 的步骤序列（segs → draft 两步；draft 复用 Studio chunked 顺序生成各段）。
-# draft 之后统一跟 state（章末状态提取）：提取失败不丢正文、不阻断后续章节，
-# 只把该章状态落成 failed 记录（跨章连贯性修复计划 §三.B）。
+# draft 之后统一跟 state（章末状态提取）；已保存的正文不依赖状态提取成功。
 KIND_STEPS = {
     "setup_all": tuple(prompts.SETUP_STEPS),
     "outline": ("outline",),
@@ -86,6 +101,9 @@ SETUP_STEP_KINDS = tuple(prompts.SETUP_STEPS)
 TERMINAL_STATUSES = {"done", "failed", "cancelled", "interrupted", "conflict"}
 
 TICK_SECONDS = 0.5
+DECISION_HISTORY_LIMIT = 128
+DECISION_CONTENT_LIMIT = 384_000
+DECISION_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,80}")
 
 
 class WriterPipelineError(ValueError):
@@ -209,8 +227,11 @@ class WriterPipelineManager:
                 from naiba.writer.store import WriterStore
                 WriterStore._check_revision(manifest, base_revision)
             current = manifest.get("active_pipeline")
-            if isinstance(current, dict) and str(current.get("status") or "") in ("running", WRITER_PIPELINE_STOPPING):
-                raise WriterPipelineError("这部作品已有正在进行的生成，请先取消或等它结束")
+            if isinstance(current, dict):
+                if current.get("status") == WRITER_PIPELINE_NEEDS_USER:
+                    raise WriterConflictError("这部作品还有待处理的生成，请先处理或结束它")
+                if current.get("status") in ("running", WRITER_PIPELINE_STOPPING):
+                    raise WriterPipelineError("这部作品已有正在进行的生成，请先取消或等它结束")
             setup_version_id = str(setup_version_id or "").strip() or str(
                 manifest.get("current_setup_version_id") or "")
             setup = None
@@ -371,6 +392,9 @@ class WriterPipelineManager:
                 "base_revision": int(manifest.get("revision") or 0),
                 "chapter_revision": int(chapter_revision) if chapter_revision is not None else None,
                 "error": "",
+                WRITER_PENDING_USER_KEY: None,
+                WRITER_DECISION_REVISION_KEY: 0,
+                WRITER_DECISION_HISTORY_KEY: [],
                 "created_at": int(time.time() * 1000),
                 "updated_at": int(time.time() * 1000),
             }
@@ -411,12 +435,25 @@ class WriterPipelineManager:
 
     # ---- 取消 / 重试 ----
 
-    def cancel_pipeline(self, book_id: str) -> dict[str, Any]:
+    def cancel_pipeline(self, book_id: str, *, identity: dict[str, Any] | None = None) -> dict[str, Any]:
         """同锁读取当前任务并阻止推进，锁外取消，任务终态才确认停止。"""
         with self.store._lock:
             pipeline = self.store.get_active_pipeline(book_id)
             if not isinstance(pipeline, dict):
                 raise WriterPipelineError("这部作品没有进行中的生成")
+            if identity is not None:
+                if pipeline.get("id") != identity.get("pipeline_id"):
+                    raise WriterConflictError("流水线已变化，请重新打开作品")
+                self._check_decision_identity(pipeline, identity)
+                if pipeline.get("status") != WRITER_PIPELINE_NEEDS_USER:
+                    raise WriterConflictError("待处理步骤已变化，请重新打开作品")
+            if pipeline.get("status") == WRITER_PIPELINE_NEEDS_USER:
+                def abandon(record: dict[str, Any]) -> None:
+                    self._clear_pending(record)
+                    record.update(status="cancelled", error="已结束生成，之前保存的内容保留", current_task_id="")
+                updated = self.store.update_pipeline(book_id, pipeline["id"], abandon,
+                                                     expected_attempt=pipeline["attempt"])
+                return updated or pipeline
             if str(pipeline.get("status") or "") != "running":
                 raise WriterPipelineError("当前生成已结束或正在停止，无需重复取消")
             task_id = str(pipeline.get("current_task_id") or "")
@@ -461,6 +498,7 @@ class WriterPipelineManager:
 
             def _retry(record: dict[str, Any]) -> None:
                 record["attempt"] = attempt
+                self._clear_pending(record)
                 record["status"] = "running"
                 record["error"] = ""
                 record["current_task_id"] = ""
@@ -532,7 +570,10 @@ class WriterPipelineManager:
                         and current_id in (source_task_id, previous.get("child_task_id"))):
                     return dict(pipeline)
                 raise WriterPipelineError("当前生成仍在进行，请等待结束或先停止")
-            if pipeline.get("status") not in {"failed", "interrupted", "cancelled"}:
+            pending = pipeline.get(WRITER_PENDING_USER_KEY) or {}
+            resumable_pending = (pipeline.get("status") == WRITER_PIPELINE_NEEDS_USER
+                                 and pending.get("resume_txt") is True)
+            if not resumable_pending and pipeline.get("status") not in {"failed", "interrupted", "cancelled"}:
                 raise WriterPipelineError("当前状态不能继续 TXT；版本冲突时请显式基于当前版本重新生成")
             step_index = int(pipeline.get("step_index") or 0)
             steps = pipeline.get("steps") or []
@@ -562,6 +603,7 @@ class WriterPipelineManager:
 
             def claim(record: dict[str, Any]) -> None:
                 record.update(status="running", error="")
+                self._clear_pending(record)
                 record[WRITER_RESULT_RESUME_KEY] = resume
 
             pipeline = self.store.update_pipeline(book_id, str(pipeline["id"]), claim,
@@ -612,7 +654,7 @@ class WriterPipelineManager:
         pipeline = manifest.get("active_pipeline")
         if not isinstance(pipeline, dict):
             return {"pipeline": None}
-        payload = dict(pipeline)
+        payload = self.store.public_pipeline(pipeline)
         task_id = str(payload.get("current_task_id") or "")
         if task_id:
             task = self._task(task_id)
@@ -755,18 +797,25 @@ class WriterPipelineManager:
             self._fail(book_id, pipeline, "当前任务与流水线不一致（可能来自旧的尝试），已停止推进")
             return
         if status != "done":
-            if step == "state":
-                # 章末状态提取是尽力而为的派生步：任务级失败只落 failed 状态记录，
-                # 正文已在上一步保存，链继续走（跨章连贯性修复计划 §三.B）。
-                # 唯独「用户取消」必须停链——取消后不得再提交下一步。
-                if status == "cancelled":
-                    self._fail(book_id, pipeline, "用户取消", override_status="cancelled")
+            if status == "failed" and self._artifact_task(task) and task.get(STUDIO_RESULT_ISSUE_KEY) == "incomplete":
+                reader = getattr(self.app.studio.jobs, "result_text", None)
+                if callable(reader):
+                    try:
+                        partial = reader(task_id, require_final=False)
+                    except (ValueError, OSError) as exc:
+                        self._fail(book_id, pipeline, f"TXT 结果不可用：{exc}")
+                        return
+                    issue = prompts.ContentIssue(
+                        "模型没有确认 TXT 写完，已保留可核对的片段" if partial else "模型没有写入可用内容",
+                        category="truncated" if partial else "empty", raw=partial,
+                        partial=partial if partial and self._decision_editor(step, snapshot) == "text" else None,
+                    )
+                    self._pause_for_user(book_id, pipeline, issue, resume_txt=bool(partial))
                     return
-                state_error = str(task.get("error") or "") or f"状态提取任务状态为 {status}"
-                self._finish_step(book_id, pipeline, task_id, output=None,
-                                  state_error=state_error)
+            if step == "state" and status != "cancelled":
+                # 线路错误仍是流水线失败，遇到状态提取失败不回滚已经写好的正文。
+                self._fail_state(book_id, pipeline, str(task.get("error") or "") or "章末状态提取未完成")
                 return
-            # 条件 1：非 done 一律停链；cancelled/failed/interrupted 各有真实状态。
             self._fail(
                 book_id, pipeline,
                 str(task.get("error") or "") or f"任务状态为 {status}，流水线停止",
@@ -788,28 +837,30 @@ class WriterPipelineManager:
                 result = str(task.get("result") or "")
         except (ValueError, OSError) as exc:
             if step == "state":
-                self._finish_step(book_id, pipeline, task_id, output=None,
-                                  state_error=f"状态 TXT 结果不可用：{exc}")
+                self._fail_state(book_id, pipeline, f"状态 TXT 结果不可用：{exc}")
             else:
                 self._fail(book_id, pipeline, f"TXT 结果不可用：{exc}")
             return
-        finish_reason = str(task.get("finish_reason") or "")
-        if step == "state":
-            try:
-                output = self._parse_step_output(
-                    step, result, pipeline=pipeline, finish_reason=finish_reason,
-                )
-            except prompts.PromptError as exc:
-                # 解析失败同样只落 failed 状态记录，不丢正文、不阻断链。
-                self._finish_step(book_id, pipeline, task_id, output=None,
-                                  state_error=str(exc))
-                return
-            self._finish_step(book_id, pipeline, task_id, output=output)
+        try:
+            output = self._parse_step_output(step, result, pipeline=pipeline,
+                                             finish_reason=str(task.get("finish_reason") or ""))
+        except prompts.ContentIssue as exc:
+            self._pause_for_user(book_id, pipeline, exc)
             return
-        output = self._parse_step_output(
-            step, result, pipeline=pipeline, finish_reason=finish_reason,
-        )
         self._finish_step(book_id, pipeline, task_id, output=output)
+
+    def _fail_state(self, book_id: str, pipeline: dict[str, Any], error: str) -> None:
+        with self.store._lock:
+            current = self._matching_pipeline(book_id, pipeline)
+            if current is None or current.get("status") != "running" or current.get("current_task_id") != pipeline.get("current_task_id"):
+                return
+            self._check_step_source(book_id, current, "state", check_state=True)
+            self.store.save_chapter_state(
+                book_id, int(current["request_snapshot"]["chapter_no"]), state=None, status="failed",
+                error=error, task_id=str(current.get("current_task_id") or ""),
+                source_version_id=str(current.get("state_source_version_id") or ""),
+            )
+            self._fail(book_id, current, f"正文已保存，章末状态提取失败：{error}")
 
     def _writer_input(self, task: dict[str, Any]) -> dict[str, Any]:
         input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
@@ -832,6 +883,236 @@ class WriterPipelineManager:
             return self.app.studio.jobs.task(task_id)
         except Exception:  # noqa: BLE001 - 任务存储异常按「查不到」处理
             return None
+
+    @staticmethod
+    def _decision_editor(step: str, snapshot: dict[str, Any]) -> str:
+        if snapshot.get(WRITER_OUTPUT_MODE_KEY) == "freeform":
+            return "text"
+        return {"genre": "genre", "title": "list", "blurb": "list", "segs": "list",
+                "chars": "characters", "split": "chapters", "outline": "chapters",
+                "state": "state"}.get(step, "text")
+
+    @staticmethod
+    def _skip_consequence(step: str) -> str:
+        return {
+            "genre": "保留已保存的题材；没有题材时，后续生成不带题材。",
+            "title": "不生成这批书名，已保存的书名不变。",
+            "blurb": "不生成这批简介，已保存的简介不变。",
+            "segs": "不采用段落要点，下一步直接生成整章正文。",
+            "draft": "本章不保存这次生成的正文，也不提取这次的章末状态。已有正文保留。",
+            "split": "跳过这批章号，已有章节保留；后续批次仍按原章号生成。",
+            "state": "正文已保存；这次不补章末状态，连贯性检查只使用已有的有效状态。",
+        }.get(step, "这一步的结果不会写入作品，之前保存的内容保留。")
+
+    def _check_step_source(self, book_id: str, record: dict[str, Any], step: str,
+                           *, check_state: bool = False) -> None:
+        manifest = self.store._load_manifest(book_id)
+        if record.get("base_revision") != manifest.get("revision"):
+            raise WriterConflictError("作品已被修改过（版本冲突），请基于当前版本重新生成")
+        snapshot = record.get("request_snapshot") or {}
+        chapter_no = int(snapshot.get("chapter_no") or 0)
+        if ((step in ("segs", "draft") and record.get("chapter_revision") is not None)
+                or (step == "state" and check_state)):
+            chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
+            if step == "state":
+                source = str(record.get("state_source_version_id") or "")
+                if not source or str(chapter.get("current_version_id") or "") != source:
+                    raise WriterConflictError("章末状态对应的正文已变化，请从当前正文重建状态")
+            elif int(chapter.get("revision") or 0) != record["chapter_revision"]:
+                raise WriterConflictError(f"第 {chapter_no} 章已被修改过（版本冲突），请基于当前版本重新生成")
+
+    def _pause_for_user(self, book_id: str, pipeline: dict[str, Any], issue: prompts.ContentIssue,
+                        *, resume_txt: bool = False) -> None:
+        index = pipeline["step_index"]
+        step = pipeline["steps"][index]
+        snapshot = pipeline["request_snapshot"]
+        partial = issue.partial
+        partial_truncated = issue.partial_truncated
+        if partial is not None and not isinstance(partial, str):
+            try:
+                if len(json.dumps(partial, ensure_ascii=False)) > DECISION_CONTENT_LIMIT:
+                    partial, partial_truncated = None, True
+            except (TypeError, ValueError, RecursionError):
+                partial, partial_truncated = None, True
+        accepted = issue.accepted
+        if accepted is not None and (
+            len(json.dumps(accepted, ensure_ascii=False)) > DECISION_CONTENT_LIMIT
+            or (step == "chars" and len(normalize_setup({"characters": accepted})["characters"]) != len(accepted))
+        ):
+            accepted = None
+        pending: WriterPendingUser = {
+            "step": step, "step_index": index, "attempt": pipeline["attempt"],
+            "issue": str(issue)[:500], "category": issue.category,
+            "raw": issue.raw, "raw_truncated": issue.raw_truncated,
+            "partial": partial, "partial_truncated": partial_truncated,
+            "missing": issue.missing, "counts": issue.counts,
+            "available_actions": ["retry", "supplement", *(["accept"] if accepted is not None else []), "skip"],
+            "skip_consequence": self._skip_consequence(step),
+            "editor": self._decision_editor(step, snapshot),
+            "body_saved": step == "state" and bool(pipeline.get("state_source_version_id")),
+            "chapter_no": int(snapshot.get("chapter_no") or 0),
+            "part_no": self._resolve_part(snapshot, index)[0] if step in ("outline_text", "outline_review", "split") else 0,
+            "resume_txt": resume_txt,
+        }
+        task_id = str(pipeline.get("current_task_id") or "")
+
+        def pause(record: dict[str, Any]) -> None:
+            if (record.get("status") != "running"
+                    or self._step_key(book_id, record) != self._step_key(book_id, pipeline)
+                    or str(record.get("current_task_id") or "") != task_id):
+                return
+            self._check_step_source(book_id, record, step, check_state=True)
+            record.update(status=WRITER_PIPELINE_NEEDS_USER, error=str(issue)[:500])
+            record[WRITER_PENDING_USER_KEY] = pending
+            record[WRITER_PENDING_ACCEPTED_KEY] = accepted
+            record[WRITER_DECISION_REVISION_KEY] = int(record.get(WRITER_DECISION_REVISION_KEY) or 0) + 1
+
+        self.store.update_pipeline(book_id, pipeline["id"], pause, expected_attempt=pipeline["attempt"])
+
+    @staticmethod
+    def _clear_pending(record: dict[str, Any]) -> None:
+        record[WRITER_PENDING_USER_KEY] = None
+        record.pop(WRITER_PENDING_ACCEPTED_KEY, None)
+
+    @staticmethod
+    def _check_decision_identity(record: dict[str, Any], body: dict[str, Any]) -> None:
+        if any(type(body.get(key)) is not int or body[key] != record.get(key)
+               for key in ("step_index", "attempt", WRITER_DECISION_REVISION_KEY)):
+            raise WriterConflictError("生成阶段或待处理内容已变化，请重新打开作品后再操作")
+
+    def decide_pipeline(self, book_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Commit the action, version writes and receipt together; submit outside the lock."""
+        from naiba.writer import drafts
+
+        action = body.get("action")
+        request_key = body.get(WRITER_DECISION_REQUEST_KEY)
+        if not isinstance(action, str) or action not in WRITER_DECISION_ACTIONS:
+            raise WriterStoreError("未知的阶段处理操作")
+        if not isinstance(request_key, str) or not DECISION_KEY_PATTERN.fullmatch(request_key):
+            raise WriterStoreError("request_key 必须为 8–80 位字母、数字、下划线或连字符")
+        reason = body.get("reason", "")
+        if (not isinstance(reason, str) or len(reason) > 300
+                or (action == "skip" and (body.get("confirmed") is not True or not reason.strip()))):
+            raise WriterStoreError("跳过前须明确确认，原因须为 1–300 字")
+        keys = ("action", "pipeline_id", "step", "step_index", "attempt", WRITER_DECISION_REVISION_KEY,
+                "content", "confirmed", "reason")
+        try:
+            encoded = json.dumps({key: body.get(key) for key in keys}, ensure_ascii=True, sort_keys=True,
+                                 allow_nan=False, separators=(",", ":"))
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise WriterStoreError("编辑内容格式不正确") from exc
+        if len(encoded) > 1_600_000:
+            raise WriterStoreError("编辑内容过大，请删减后再提交")
+        digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
+        cleanup = []
+        with self.store._lock:
+            pipeline = self.store.get_active_pipeline(book_id)
+            if not pipeline or pipeline.get("id") != body.get("pipeline_id"):
+                raise WriterConflictError("流水线已变化，请重新打开作品")
+            history = list(pipeline.get(WRITER_DECISION_HISTORY_KEY) or [])
+            for receipt in history:
+                if receipt.get(WRITER_DECISION_REQUEST_KEY) == request_key:
+                    if receipt.get(WRITER_DECISION_DIGEST_KEY) != digest:
+                        raise WriterConflictError("此请求标识已用于不同的处理操作")
+                    return {"pipeline": self.store.public_pipeline(pipeline), "decision": self.store.public_decision(receipt)}
+            pending = pipeline.get(WRITER_PENDING_USER_KEY)
+            if pipeline.get("status") != WRITER_PIPELINE_NEEDS_USER or not isinstance(pending, dict):
+                raise WriterConflictError("当前步骤已不在待处理状态，请重新打开作品")
+            self._check_decision_identity(pipeline, body)
+            step = pending["step"]
+            if body.get("step") != step:
+                raise WriterConflictError("当前步骤已变化，请重新打开作品")
+            if action not in pending["available_actions"]:
+                raise WriterStoreError("没有可直接接受的完整条目，请补充、重试或跳过")
+            try:
+                self._check_step_source(book_id, pipeline, step, check_state=True)
+            except WriterConflictError as exc:
+                def conflict(record: dict[str, Any]) -> None:
+                    record.update(status="conflict", error=str(exc))
+                self.store.update_pipeline(book_id, pipeline["id"], conflict, expected_attempt=pipeline["attempt"])
+                raise
+            output = None
+            if action == "supplement":
+                output = self._supplement_output(step, body.get("content"), pipeline)
+            elif action == "accept":
+                output = pipeline.get(WRITER_PENDING_ACCEPTED_KEY)
+                if output is None:
+                    raise WriterStoreError("没有可直接接受的部分结果")
+            if step == "chars" and isinstance(output, list):
+                if len(normalize_setup({"characters": output})["characters"]) != len(output):
+                    raise WriterStoreError("角色数量超过主角或配角上限，请调整角色分组或数量")
+            receipt = {"action": action, WRITER_DECISION_REQUEST_KEY: request_key, WRITER_DECISION_DIGEST_KEY: digest,
+                       "step": step, "step_index": pipeline["step_index"], "attempt": pipeline["attempt"],
+                       "at": int(time.time() * 1000), "reason": reason.strip() if action == "skip" else "",
+                       "counts": pending["counts"], "missing": pending["missing"],
+                       "consequence": pending["skip_consequence"] if action == "skip" else "",
+                       "chapter_no": pending["chapter_no"], "part_no": pending["part_no"]}
+
+            def apply(record: dict[str, Any]) -> None:
+                record[WRITER_DECISION_HISTORY_KEY] = (history + [receipt])[-DECISION_HISTORY_LIMIT:]
+                self._clear_pending(record)
+                record.update(status="running", error="", current_task_id="")
+                record.pop(WRITER_RESULT_RESUME_KEY, None)
+                if action == "retry":
+                    record["attempt"] += 1
+                    return
+                next_index = record["step_index"] + 1
+                if action == "skip":
+                    if step == "segs":
+                        record.setdefault("step_outputs", {})["segs"] = []
+                    elif step == "draft" and record["steps"][next_index:next_index + 1] == ["state"]:
+                        next_index += 1
+                else:
+                    write_id = f"writer-decision:{record['id']}:{pending['attempt']}:{pending['step_index']}"
+                    self._apply_step_output(book_id, record, step, output, write_id, kind="manual",
+                                            cleanup=cleanup)
+                self._advance_record(book_id, record, step, next_index)
+
+            with self.store.writeback_transaction(book_id):
+                updated = self.store.update_pipeline(book_id, pipeline["id"], apply,
+                                                     expected_attempt=pipeline["attempt"])
+            if updated is None:
+                raise WriterConflictError("流水线状态已变化，请重新打开作品")
+            if updated.get("status") == "running":
+                self._submissions[self._step_key(book_id, updated)] = False
+        drafts.cleanup(cleanup)
+        if updated.get("status") == "running":
+            try:
+                self._submit_step(book_id, updated)
+            except Exception:  # _submit_step records the error; the decision is already committed.
+                traceback.print_exc()
+        latest = self.store.get_active_pipeline(book_id)
+        if latest is not None and latest.get("id") == updated.get("id"):
+            updated = latest
+        return {"pipeline": self.store.public_pipeline(updated), "decision": self.store.public_decision(receipt)}
+
+    def _supplement_output(self, step: str, content: Any, pipeline: dict[str, Any]) -> Any:
+        snapshot = pipeline["request_snapshot"]
+        editor = self._decision_editor(step, snapshot)
+        if content is None or (editor == "text" and not isinstance(content, str)):
+            raise WriterStoreError("请填写当前阶段的内容")
+        if editor == "text":
+            raw = content
+        elif isinstance(content, str) and step in ("title", "blurb"):
+            raw = json.dumps([content], ensure_ascii=True)
+        else:
+            raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        if len(raw) > DECISION_CONTENT_LIMIT:
+            raise WriterStoreError("编辑内容过大，请删减后再提交")
+        if editor == "characters":
+            wanted = min(LEAD_MAX + SIDE_MAX,
+                         int(snapshot.get("char_count") or 4) + max(0, int(snapshot.get("side_count") or 0)))
+            return prompts.parse_characters(raw, wanted=wanted, require_count=False)
+        if editor == "chapters" and step == "outline":
+            return prompts.parse_outline(raw, wanted=int(snapshot.get("chapter_count") or 10), require_count=False)
+        if editor == "chapters" and step == "split":
+            start, amount = self._split_slice(snapshot, pipeline["step_index"])
+            return prompts.parse_split(raw, from_no=start, want_count=amount)
+        if step == "segs" and editor == "list":
+            return prompts.parse_segs(raw, min_count=1)
+        if step == "draft":
+            return raw if raw.strip() else prompts.parse_draft(raw)
+        return self._parse_step_output(step, raw, pipeline=pipeline, finish_reason="")
 
     def _fail(self, book_id: str, pipeline: dict[str, Any], error: str,
               *, override_status: str = "failed") -> None:
@@ -890,7 +1171,9 @@ class WriterPipelineManager:
                 "blurb_candidates": setup.get("blurb_candidates"),
                 "worldview": setup.get("worldview"), "characters": setup.get("characters"),
                 "style": setup.get("style"), "constraints": setup.get("constraints"),
-                "freeform_outputs": list(setup.get("freeform_outputs") or []),            }
+                "references": setup.get("references"),
+                "freeform_outputs": list(setup.get("freeform_outputs") or []),
+            }
         if "continuation_summary" in setup:
             merged["continuation_summary"] = copy.deepcopy(setup["continuation_summary"])
         return merged
@@ -898,31 +1181,33 @@ class WriterPipelineManager:
     def _parse_step_output(self, step: str, result: str, *, pipeline: dict[str, Any],
                            finish_reason: str) -> Any:
         snapshot = pipeline.get("request_snapshot") if isinstance(pipeline.get("request_snapshot"), dict) else {}
+        truncated = str(finish_reason or "").strip().lower() in {"length", "max_tokens", "max_output_tokens"}
         try:
             output = self._parse_step_output_inner(
                 step, result, snapshot, finish_reason=finish_reason,
                 step_index=int(pipeline.get("step_index") or 0),
             )
-        except prompts.PromptError as exc:
-            # 截断信号要透传：finish_reason=length 时，「解析失败」的真话是
-            # 「输出被切掉了」，与「模型格式不行」（重试也没用）要分开讲（第二次反馈）。
-            if step != "draft" and str(finish_reason or "").strip().lower() == "length":
-                raise prompts.PromptError(
-                    "输出在中途被截断（finish_reason=length），结果不完整所以解析失败；"
-                    "疑似线路抖动或撞输出上限，建议直接重试一次"
-                ) from exc
+        except prompts.ContentIssue as exc:
+            if truncated and step != "draft":
+                raise prompts.ContentIssue("输出在中途被截断，请补充或重试", category="truncated",
+                                          raw=result, partial=exc.partial, missing=exc.missing,
+                                          counts=exc.counts, accepted=exc.accepted) from exc
             raise
+        if truncated:
+            editor = self._decision_editor(step, snapshot)
+            raise prompts.ContentIssue("输出在中途被截断，请补充或重试", category="truncated",
+                                      raw=result, partial=output if editor == "text" else None)
         return output
 
     def _parse_step_output_inner(self, step: str, result: str, snapshot: dict[str, Any],
                                  *, finish_reason: str = "", step_index: int = 0) -> Any:
         output_mode = str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json")
         if step == "genre":
-            return prompts.parse_freeform(result) if output_mode == "freeform" else prompts.parse_genre(result)
+            return prompts.parse_freeform(result, limit=SETUP_TEXT_MAX_CHARS) if output_mode == "freeform" else prompts.parse_genre(result)
         if step == "title":
-            return prompts.parse_freeform(result) if output_mode == "freeform" else prompts.parse_title_candidates(result)
+            return prompts.parse_freeform(result, limit=SETUP_TEXT_MAX_CHARS) if output_mode == "freeform" else prompts.parse_title_candidates(result)
         if step == "blurb":
-            return prompts.parse_freeform(result) if output_mode == "freeform" else prompts.parse_blurb_candidates(result)
+            return prompts.parse_freeform(result, limit=SETUP_TEXT_MAX_CHARS) if output_mode == "freeform" else prompts.parse_blurb_candidates(result)
         if step == "world":
             return prompts.parse_world(result)
         if step == "chars":
@@ -945,23 +1230,23 @@ class WriterPipelineManager:
             from_no, want_count = self._split_slice(snapshot, step_index)
             if output_mode == "freeform":
                 return prompts.parse_freeform(result)
-            return prompts.parse_split(result, from_no=from_no, want_count=want_count)
+            return prompts.parse_split(result, from_no=from_no, want_count=want_count, require_count=True)
         if step == "segs":
             if output_mode == "freeform":
-                return prompts.parse_freeform(result)
+                return prompts.parse_freeform(result, limit=SETUP_TEXT_MAX_CHARS)
             return prompts.parse_segs(result)
         if step == "draft":
             return prompts.parse_draft(result, finish_reason=finish_reason)
         if step == "state":
             if output_mode == "freeform":
-                return prompts.parse_freeform(result)
+                return prompts.parse_freeform(result, limit=SETUP_TEXT_MAX_CHARS)
             return prompts.parse_chapter_state(result)
         raise WriterPipelineError(f"未知步骤：{step}")
 
     # ---- 写回与前进（条件 4/5，单次加锁内原子完成） ----
 
     def _finish_step(self, book_id: str, pipeline: dict[str, Any], task_id: str,
-                     *, output: Any, state_error: str = "") -> None:
+                     *, output: Any) -> None:
         """锁内完成：条件校验 → 写回本步成果 → 记录完成 → 前进/收尾。
 
         条件 4（流水线仍活动 + revision 一致）与条件 5（原子写回）必须在同一次
@@ -973,7 +1258,6 @@ class WriterPipelineManager:
         logical_id = self._logical_id(task) or task_id
         pipeline_id = str(pipeline.get("id") or "")
         attempt = int(pipeline.get("attempt") or 0)
-        snapshot = pipeline.get("request_snapshot") if isinstance(pipeline.get("request_snapshot"), dict) else {}
         steps = [str(s) for s in pipeline.get("steps") or []]
         step_index = int(pipeline.get("step_index") or 0)
         step = steps[step_index] if 0 <= step_index < len(steps) else ""
@@ -990,63 +1274,21 @@ class WriterPipelineManager:
                     or int(record.get("step_index") or 0) != step_index
                     or str(record.get("current_task_id") or "") != task_id):
                 return
-            if int(record.get("attempt") or 0) != attempt:
-                raise WriterPipelineError("流水线 attempt 已变化，旧尝试的结果不能写回")
-            manifest = self.store._load_manifest(book_id)
-            if int(record.get("base_revision") or 0) != int(manifest.get("revision") or 0):
-                raise WriterConflictError(
-                    "生成期间作品被修改过（版本冲突）；请重读作品后选择「基于当前版本重新生成」"
-                )
-            chapter_no = int(snapshot.get("chapter_no") or 0)
-            if step in ("segs", "draft") and record.get("chapter_revision") is not None:
-                chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
-                if int(chapter.get("revision") or 0) != int(record.get("chapter_revision") or 0):
-                    raise WriterConflictError(
-                        f"生成期间第 {chapter_no} 章被修改过（版本冲突）；"
-                        "请重读章节后选择「基于当前版本重新生成」"
-                    )
-            # ---- 条件 5：写回本步成果（每步成功才落盘；失败保留前序成果） ----
+            self._check_step_source(book_id, record, step)
             if output is not None:
-                if step in ("genre", "title", "blurb", "world", "chars", "outline",
-                            "outline_text", "outline_review", "split"):
-                    self._apply_setup_or_outline_step(book_id, record, step, output, logical_id)
-                elif step == "segs":
-                    outputs = dict(record.get("step_outputs") or {})
-                    if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform":
-                        outputs["segs"] = [str(output)]
-                    else:
-                        outputs["segs"] = [str(p) for p in output]
-                    record["step_outputs"] = outputs
-                elif step == "draft":
-                    self._apply_draft_step(book_id, record, output, logical_id)
-            if step == "state":
-                if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform" and output is not None:
-                    self._save_freeform_output(book_id, record, step, str(output), logical_id)
-                else:
-                    self._apply_state_step(book_id, record, output, state_error, logical_id)
-            # ---- 记录完成并前进 ----
+                self._apply_step_output(book_id, record, step, output, logical_id)
             record["completed_task_ids"] = completed
             generations = list(record.get(WRITER_COMPLETED_GENERATIONS_KEY) or [])
             if logical_id and logical_id not in generations:
                 generations.append(logical_id)
             record[WRITER_COMPLETED_GENERATIONS_KEY] = generations
-            record["current_task_id"] = ""
-            if next_index >= len(record.get("steps") or []):
-                record["status"] = "done"
-                record["step_index"] = len(record.get("steps") or [])
-            else:
-                record["step_index"] = next_index
-            # 刷新基准：本次写回推进了作品/章节 revision，下游步骤按新基准核对。
-            refreshed = self.store._load_manifest(book_id)
-            record["base_revision"] = int(refreshed.get("revision") or 0)
-            if step in ("segs", "draft") and record.get("chapter_revision") is not None:
-                chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
-                record["chapter_revision"] = int(chapter.get("revision") or 0)
+            self._advance_record(book_id, record, step, next_index)
             applied = True
 
         transaction = self.store.writeback_transaction(book_id) if self._artifact_task(task) else nullcontext()
-        with self.store._lock, transaction:
-            updated = self.store.update_pipeline(book_id, pipeline_id, _mutate, expected_attempt=attempt)
+        with self.store._lock:
+            with transaction:
+                updated = self.store.update_pipeline(book_id, pipeline_id, _mutate, expected_attempt=attempt)
             if updated is None or not applied:
                 return
             if str(updated.get("status") or "") == "running":
@@ -1054,17 +1296,53 @@ class WriterPipelineManager:
         if str(updated.get("status") or "") == "running":
             self._submit_step(book_id, updated)
 
+    def _advance_record(self, book_id: str, record: dict[str, Any], step: str, next_index: int) -> None:
+        record["current_task_id"] = ""
+        record["step_index"] = next_index
+        if next_index >= len(record["steps"]):
+            record["status"] = "done"
+        refreshed = self.store._load_manifest(book_id)
+        record["base_revision"] = int(refreshed.get("revision") or 0)
+        if step in ("segs", "draft") and record.get("chapter_revision") is not None:
+            chapter_no = int(record["request_snapshot"].get("chapter_no") or 0)
+            chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
+            record["chapter_revision"] = int(chapter.get("revision") or 0)
+
+    def _apply_step_output(self, book_id: str, record: dict[str, Any], step: str,
+                           output: Any, task_id: str, *, kind: str = "generated", cleanup=None) -> None:
+        snapshot = record["request_snapshot"]
+        freeform = snapshot.get(WRITER_OUTPUT_MODE_KEY) == "freeform"
+        if step == "segs":
+            record.setdefault("step_outputs", {})["segs"] = [str(output)] if freeform else list(output)
+        elif step == "draft":
+            self._apply_draft_step(book_id, record, output, task_id, kind=kind, cleanup=cleanup)
+        elif step == "state":
+            if freeform:
+                self._save_freeform_output(book_id, record, step, str(output), task_id, kind=kind)
+            else:
+                self.store.save_chapter_state(
+                    book_id, int(snapshot["chapter_no"]), state=output, task_id=task_id,
+                    source_version_id=str(record.get("state_source_version_id") or ""),
+                )
+        else:
+            self._apply_setup_or_outline_step(book_id, record, step, output, task_id, kind=kind)
+
     def _apply_setup_or_outline_step(self, book_id: str, record: dict[str, Any],
-                                     step: str, output: Any, task_id: str) -> None:
+                                     step: str, output: Any, task_id: str, *, kind: str) -> None:
         """设定六步的写回（锁内调用）：每步生成一份新设定版本；大纲步另落大纲版本并同步章节。"""
         snapshot = record.get("request_snapshot") if isinstance(record.get("request_snapshot"), dict) else {}
         if step == "outline":
+            if snapshot.get(WRITER_OUTPUT_MODE_KEY) == "freeform":
+                self._save_freeform_output(book_id, record, step, str(output), task_id, kind=kind)
+                return
             source = record.get("source_version_ids") if isinstance(record.get("source_version_ids"), dict) else {}
             self.store.save_outline(
-                book_id, chapters=output, kind="generated", task_id=task_id,
+                book_id, chapters=output, kind=kind, task_id=task_id,
                 source_setup_version_id=str(source.get("setup") or ""),
-                sync=True, allow_drop=bool(snapshot.get("allow_drop")),
+                sync=kind == "generated", allow_drop=kind == "generated" and bool(snapshot.get("allow_drop")),
             )
+            if kind == "manual":
+                self.store.append_chapters(book_id, output)
             return
         if step in ("outline_text", "outline_review"):
             # 只替换这一部，其它部原样保留（多部作品一部一部补）。
@@ -1104,13 +1382,13 @@ class WriterPipelineManager:
             for no in range(1, max(by_no) + 1):
                 filled.append(by_no.get(no) or {"no": no, "title": f"第 {no} 部", "text": ""})
             self.store.save_outline(
-                book_id, parts=filled, kind="generated", task_id=task_id,
+                book_id, parts=filled, kind=kind, task_id=task_id,
                 source_setup_version_id=str(source.get("setup") or ""),
             )
             return
         if step == "split":
             if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform":
-                self._save_freeform_output(book_id, record, step, str(output), task_id)
+                self._save_freeform_output(book_id, record, step, str(output), task_id, kind=kind)
                 return
             self.store.append_chapters(
                 book_id, output, part_no=int(snapshot.get("part_no") or 0),
@@ -1118,11 +1396,12 @@ class WriterPipelineManager:
             return
         merged = self._accumulated_setup(book_id, record)
         if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform":
-            self._save_freeform_output(book_id, record, step, str(output), task_id)
+            self._save_freeform_output(book_id, record, step, str(output), task_id, kind=kind)
             return
         if step == "genre":
             genre = dict(merged.get("genre") if isinstance(merged.get("genre"), dict) else {})
             merged["genre"] = {
+                **genre,
                 "channel": output.get("channel") or genre.get("channel") or "",
                 "cat": output.get("cat") or genre.get("cat") or "",
                 "sub_cat": output.get("sub_cat") or genre.get("sub_cat") or "",
@@ -1133,12 +1412,12 @@ class WriterPipelineManager:
         elif step == "title":
             candidates = [str(c) for c in output]
             merged["title_candidates"] = candidates
-            if candidates and not str(merged.get("title") or "").strip():
+            if candidates and (kind == "manual" or not str(merged.get("title") or "").strip()):
                 merged["title"] = candidates[0]
         elif step == "blurb":
             candidates = [str(c) for c in output]
             merged["blurb_candidates"] = candidates
-            if candidates and not str(merged.get("blurb") or "").strip():
+            if candidates and (kind == "manual" or not str(merged.get("blurb") or "").strip()):
                 merged["blurb"] = candidates[0]
         elif step == "world":
             merged["worldview"] = str(output)
@@ -1147,7 +1426,7 @@ class WriterPipelineManager:
         outputs = dict(record.get("step_outputs") or {})
         outputs["setup"] = merged
         record["step_outputs"] = outputs
-        self.store.save_setup(book_id, content=merged, kind="generated", task_id=task_id)
+        self.store.save_setup(book_id, content=merged, kind=kind, task_id=task_id)
 
     @staticmethod
     def _continuation_baseline(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1162,7 +1441,7 @@ class WriterPipelineManager:
         return baseline
 
     def _apply_draft_step(self, book_id: str, record: dict[str, Any],
-                          output: str, task_id: str) -> None:
+                          output: str, task_id: str, *, kind: str, cleanup=None) -> None:
         snapshot = record.get("request_snapshot") if isinstance(record.get("request_snapshot"), dict) else {}
         chapter_no = int(snapshot.get("chapter_no") or 0)
         source = record.get("source_version_ids") if isinstance(record.get("source_version_ids"), dict) else {}
@@ -1179,61 +1458,28 @@ class WriterPipelineManager:
             leading = len(head_breaks.replace("\r\n", "\n"))
             separator = "\n" * max(0, 2 - trailing - leading)
             content = base + separator + content
+        if kind == "manual":
+            from naiba.writer.drafts import save as save_manual_draft
+
+            save_manual_draft(self.store, book_id, chapter_no, content=content,
+                              expected_revision=record.get("chapter_revision"), cleanup_after_commit=cleanup)
+            return
         self.store.save_chapter_version(
-            book_id, chapter_no, content=content, kind="generated", task_id=task_id,
+            book_id, chapter_no, content=content, kind=kind, task_id=task_id,
             source_setup_version_id=str(source.get("setup") or ""),
             source_outline_version_id=str(source.get("outline") or ""),
             expected_revision=record.get("chapter_revision"),
         )
 
     def _save_freeform_output(self, book_id: str, record: dict[str, Any],
-                              step: str, text: str, task_id: str) -> None:
-        snapshot = record.get("request_snapshot") if isinstance(record.get("request_snapshot"), dict) else {}
+                              step: str, text: str, task_id: str, *, kind: str) -> None:
         setup = self._accumulated_setup(book_id, record)
         rows = list(setup.get("freeform_outputs") or [])
         rows.append({"step": step, "label": prompts.STEP_LABELS.get(step, step),
                      "text": text, "task_id": task_id, "updated_at": int(time.time() * 1000)})
         setup["freeform_outputs"] = rows[-30:]
-        self.store.save_setup(book_id, content=setup, kind="generated", task_id=task_id)
-
-    def _apply_state_step(self, book_id: str, record: dict[str, Any], output: Any,
-                          state_error: str, task_id: str) -> None:
-        """章末状态写回（锁内调用）：成功落 ready，失败落 failed，两者都不改正文。
-
-        来源版本固化为本步提交时读取的版本——写入与读取之间章节若被改动，
-        状态在读侧自动判为 stale，绝不会张冠李戴到新版本上。
-        幂等回放（output 与 state_error 都为空）不重复写。
-        """
-        if output is None and not state_error:
-            return
-        snapshot = record.get("request_snapshot") if isinstance(record.get("request_snapshot"), dict) else {}
-        chapter_no = int(snapshot.get("chapter_no") or 0)
-        errors = [str(e) for e in (record.get("state_errors") or [])]
-        try:
-            if output is not None:
-                self.store.save_chapter_state(
-                    book_id, chapter_no, state=output, status="ready", task_id=task_id,
-                    source_version_id=str(record.get("state_source_version_id") or ""),
-                )
-                return
-            self.store.save_chapter_state(
-                book_id, chapter_no, state=None, status="failed",
-                error=str(state_error or "")[:300], task_id=task_id,
-                source_version_id=str(record.get("state_source_version_id") or ""),
-            )
-            errors.append(f"第{chapter_no}章状态提取失败：{state_error}")
-        except (LookupError, WriterStoreError) as exc:
-            # 存储层失败同样不阻断链（正文早已保存）；状态按失败记录，可重建。
-            errors.append(f"第{chapter_no}章状态写入失败：{exc}")
-            try:
-                self.store.save_chapter_state(
-                    book_id, chapter_no, state=None, status="failed",
-                    error=f"状态写入失败：{exc}", task_id=task_id,
-                    source_version_id=str(record.get("state_source_version_id") or ""),
-                )
-            except (LookupError, WriterStoreError):
-                pass
-        record["state_errors"] = errors[-10:]
+        record.setdefault("step_outputs", {})["setup"] = setup
+        self.store.save_setup(book_id, content=setup, kind=kind, task_id=task_id)
 
     # ---- 任务提交 ----
 
@@ -1482,7 +1728,8 @@ class WriterPipelineManager:
             if mode == "continue":
                 baseline = self._continuation_baseline(snapshot)
                 draft_tail = baseline["content"][-prompts.CONTINUE_TAIL_CHARS:]
-            if kind == "chapter_segs" and step == "draft":
+            if (kind == "chapter_segs" and step == "draft"
+                    and (pipeline.get("step_outputs") or {}).get("segs") != []):
                 # 分段正文：复用 Studio chunked 多轮契约（实施计划 §6.3）。
                 points = [str(p) for p in (dict(pipeline.get("step_outputs") or {}).get("segs") or [])]
                 if not points:
@@ -1516,10 +1763,10 @@ class WriterPipelineManager:
                 built = prompts.build_draft_context(
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
                     extra_note=extra_note, previous_chapter=previous,
-                    chapter_states=chapter_states, output_mode_value=output_mode,
+                    chapter_states=chapter_states, output_mode_value=output_mode, step=step,
                 )
                 content = built["content"]
-                label = prompts.STEP_LABELS["draft"]
+                label = prompts.STEP_LABELS[step]
                 suffix = {"chapter_continue": "续写", "chapter_rewrite": "重写"}.get(kind, "")
                 if kind == "chapter_all":
                     suffix = f"（批量 {step_index + 1}/{len(steps)}）"

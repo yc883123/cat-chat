@@ -177,6 +177,21 @@ class PipelineArtifactConsumers(PipelineTestCase):
         self.app.studio.jobs.tasks[task["id"]] = task
         return task
 
+    def test_model_incomplete_txt_pauses_with_only_verified_draft(self):
+        self.prepared(done=False)[1]["result_issue"] = "incomplete"
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        self.assertEqual(record["pending_user"]["partial"], "TXT 文件中的真实世界设定")
+        self.assertTrue(record["pending_user"]["resume_txt"])
+        self.assertNotIn("accept", record["pending_user"]["available_actions"])
+        self.assertEqual(self.store.load_setup(self.book_id)["worldview"], "")
+        self.app.studio.jobs.prepare_resume = self.resume_child
+        resumed = self.manager.resume_pipeline(self.book_id)
+        self.assertEqual(resumed["attempt"], record["attempt"])
+        self.assertIsNone(resumed["pending_user"])
+        self.assertEqual(self.scheduled, ["resumed-execution"])
+
     def test_resume_keeps_attempt_and_logical_writeback_identity(self):
         old, task = self.prepared(done=False)
         self.tick()

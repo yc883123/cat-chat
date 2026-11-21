@@ -42,9 +42,11 @@ from typing import Any
 
 from naiba.core.fsutil import atomic_write_bytes, atomic_write_json
 from naiba.core.contracts import (
-    WRITER_PIPELINE_STOPPING, WriterChapterBaseline, WriterExportResult, WriterPreviousChapter,
+    WRITER_PIPELINE_NEEDS_USER, WRITER_PIPELINE_STOPPING,
+    WriterChapterBaseline, WriterExportResult, WriterPreviousChapter,
     WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
-    WRITER_OUTPUT_MODE_KEY,
+    WRITER_OUTPUT_MODE_KEY, WRITER_PENDING_USER_KEY, WRITER_PENDING_ACCEPTED_KEY,
+    WRITER_DECISION_HISTORY_KEY, WRITER_DECISION_DIGEST_KEY,
 )
 
 # 作品清单版本：首版为 1。
@@ -79,8 +81,9 @@ SIDE_MAX = 99
 CHAR_TEXT_MAX = 200
 CHAR_LONG_MAX = 1_000
 
-# stopping 已阻止推进，但仍等任务终态；其余五项为终态。
-PIPELINE_STATUSES = ("running", WRITER_PIPELINE_STOPPING, "done", "failed", "cancelled", "interrupted", "conflict")
+# Waiting for the user is durable but not runnable by the polling worker.
+PIPELINE_STATUSES = ("running", WRITER_PIPELINE_STOPPING, WRITER_PIPELINE_NEEDS_USER,
+                     "done", "failed", "cancelled", "interrupted", "conflict")
 
 # ---- 章末状态（跨章连贯性修复计划 §三.B） ----
 # 状态按「来源正文版本」关联：状态记录里固化 source_version_id + 内容指纹，
@@ -698,16 +701,18 @@ class WriterStore:
         return manifest
 
     def _save_manifest(self, book_dir: Path, manifest: dict[str, Any], *,
-                       save_system_prompt: bool = False) -> None:
-        # Some older content writers prepare their manifest before taking the
-        # lock. They must never overwrite an independently saved prompt.
+                       save_system_prompt: bool = False, save_output_mode: bool = False) -> None:
+        # Older content writers can carry an earlier manifest into the lock.
+        # Independent settings must survive those writes.
         with self._lock:
-            if not save_system_prompt and (book_dir / "book.json").exists():
+            if (book_dir / "book.json").exists():
                 current = self._read_json(book_dir / "book.json", what="作品清单")
-                for key, default in ((WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""),
-                                     (WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, 0),
-                                     (WRITER_OUTPUT_MODE_KEY, DEFAULT_OUTPUT_MODE)):
-                    manifest[key] = current.get(key, default)
+                if not save_system_prompt:
+                    for key, default in ((WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""),
+                                         (WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, 0)):
+                        manifest[key] = current.get(key, default)
+                if not save_output_mode:
+                    manifest[WRITER_OUTPUT_MODE_KEY] = current.get(WRITER_OUTPUT_MODE_KEY, DEFAULT_OUTPUT_MODE)
             manifest["updated_at"] = _now_ms()
             self._write_json(book_dir / "book.json", manifest)
 
@@ -746,7 +751,7 @@ class WriterStore:
             if normalize_output_mode(manifest.get(WRITER_OUTPUT_MODE_KEY)) == normalized:
                 return self._public_manifest(manifest)
             manifest[WRITER_OUTPUT_MODE_KEY] = normalized
-            self._bump_manifest(self._book_dir(book_id), manifest)
+            self._save_manifest(self._book_dir(book_id), manifest, save_output_mode=True)
             return self._public_manifest(manifest)
 
 
@@ -804,12 +809,29 @@ class WriterStore:
             "chapter_plan": normalize_chapter_plan(manifest),
             "setup_versions": published_setup if include_versions else [],
             "outline_versions": published_outline if include_versions else [],
-            "active_pipeline": dict(pipeline) if isinstance(pipeline, dict) else None,
+            "active_pipeline": WriterStore.public_pipeline(pipeline, include_pending=include_versions),
             "created_at": int(manifest.get("created_at") or 0),
             "updated_at": int(manifest.get("updated_at") or 0),
         }
         if isinstance(manifest.get("continuation"), dict):
             payload["continuation"] = json.loads(json.dumps(manifest["continuation"]))
+        return payload
+
+    @staticmethod
+    def public_decision(receipt: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in receipt.items() if key != WRITER_DECISION_DIGEST_KEY}
+
+    @classmethod
+    def public_pipeline(cls, pipeline: dict[str, Any] | None, *, include_pending: bool = True) -> dict[str, Any] | None:
+        if not isinstance(pipeline, dict):
+            return None
+        payload = {key: value for key, value in pipeline.items() if key != WRITER_PENDING_ACCEPTED_KEY}
+        if not include_pending:
+            payload.pop(WRITER_PENDING_USER_KEY, None)
+            payload.pop(WRITER_DECISION_HISTORY_KEY, None)
+        elif WRITER_DECISION_HISTORY_KEY in payload:
+            payload[WRITER_DECISION_HISTORY_KEY] = [cls.public_decision(row)
+                for row in payload[WRITER_DECISION_HISTORY_KEY] if isinstance(row, dict)]
         return payload
 
     # ---- 作品 CRUD ----
@@ -932,16 +954,16 @@ class WriterStore:
         }
 
     def rename_book(self, book_id: str, *, title: str, expected_revision: Any = None) -> dict[str, Any]:
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        book_dir = self._book_dir(book_id)
-        new_title = str(title or "").strip()
-        if not new_title:
-            raise WriterStoreError("书名不能为空")
-        if len(new_title) > TITLE_MAX:
-            raise WriterStoreError(f"书名不能超过 {TITLE_MAX} 字符")
-        manifest["title"] = new_title
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            book_dir = self._book_dir(book_id)
+            new_title = str(title or "").strip()
+            if not new_title:
+                raise WriterStoreError("书名不能为空")
+            if len(new_title) > TITLE_MAX:
+                raise WriterStoreError(f"书名不能超过 {TITLE_MAX} 字符")
+            manifest["title"] = new_title
             self._bump_manifest(book_dir, manifest)
         return self._public_manifest(manifest)
 
@@ -988,15 +1010,15 @@ class WriterStore:
                    task_id: str = "", expected_revision: Any = None,
                    base_setup: dict[str, Any] | None = None) -> dict[str, Any]:
         """写一份新设定版本并切换当前指针；原版本内容不改动。"""
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        book_dir = self._book_dir(book_id)
-        merged_base = base_setup if isinstance(base_setup, dict) else None
-        if isinstance(manifest.get("continuation"), dict):
-            merged_base = {**(merged_base or {}),
-                           "continuation_summary": manifest["continuation"].get("summary")}
-        normalized = normalize_setup(content, base=merged_base)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            book_dir = self._book_dir(book_id)
+            merged_base = base_setup if isinstance(base_setup, dict) else None
+            if isinstance(manifest.get("continuation"), dict):
+                merged_base = {**(merged_base or {}),
+                               "continuation_summary": manifest["continuation"].get("summary")}
+            normalized = normalize_setup(content, base=merged_base)
             if isinstance(manifest.get("continuation"), dict):
                 manifest["continuation"]["summary"] = normalized["continuation_summary"]
             vid = self._write_setup_locked(book_dir, manifest, normalized, kind=kind, task_id=task_id)
@@ -1069,14 +1091,14 @@ class WriterStore:
         """
         if (parts is None) == (chapters is None):
             raise WriterStoreError("大纲要么给 parts（分部文字），要么给 chapters（逐章），不能都给或都不给")
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        book_dir = self._book_dir(book_id)
-        parts_rows = normalize_outline_parts(parts) if parts is not None else None
-        chapter_rows = normalize_outline_chapters(chapters) if chapters is not None else []
-        if parts_rows is not None and sync:
-            raise WriterStoreError("分部大纲不同步章节；请用拆章接口产出章节目录")
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            book_dir = self._book_dir(book_id)
+            parts_rows = normalize_outline_parts(parts) if parts is not None else None
+            chapter_rows = normalize_outline_chapters(chapters) if chapters is not None else []
+            if parts_rows is not None and sync:
+                raise WriterStoreError("分部大纲不同步章节；请用拆章接口产出章节目录")
             if sync:
                 for no in manifest.get("chapter_ids") or []:
                     self._assert_chapter_editable(self._load_chapter_index(book_dir, int(no)))
@@ -1183,14 +1205,14 @@ class WriterStore:
     def sync_chapters(self, book_id: str, *, expected_revision: Any = None,
                       allow_drop: bool = False) -> dict[str, Any]:
         """用当前大纲重新同步章节索引（独立按钮入口，与生成时同步共用实现）。"""
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        outline = self.load_outline(book_id, manifest=manifest)
-        rows = normalize_outline_chapters(outline.get("chapters") or [])
-        if not rows:
-            raise WriterStoreError("当前作品还没有大纲版本，无法同步章节")
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            outline = self.load_outline(book_id, manifest=manifest)
+            rows = normalize_outline_chapters(outline.get("chapters") or [])
+            if not rows:
+                raise WriterStoreError("当前作品还没有大纲版本，无法同步章节")
+            book_dir = self._book_dir(book_id)
             ordered = self._sync_chapters_locked(book_dir, manifest, rows, allow_drop=allow_drop)
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest), "chapter_ids": ordered}
@@ -1203,24 +1225,24 @@ class WriterStore:
     def set_chapter_plan(self, book_id: str, *, chars: Any = None, ending: Any = None,
                          expected_revision: Any = None) -> dict[str, Any]:
         """写章节计划（章节页设定，正文页按它生成）。"""
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        plan = self.chapter_plan(manifest)
-        if chars is not None:
-            try:
-                value = int(chars)
-            except (TypeError, ValueError):
-                raise WriterStoreError("单章字数限制必须是整数") from None
-            if value not in CHAPTER_CHARS_CHOICES:
-                raise WriterStoreError(f"单章字数限制只能是 {list(CHAPTER_CHARS_CHOICES)} 之一（0 = 不限）")
-            plan["chars"] = value
-        if ending is not None:
-            value = str(ending or "").strip()
-            if value not in ENDING_CHOICES:
-                raise WriterStoreError(f"章节结尾策略只能是 {list(ENDING_CHOICES)} 之一")
-            plan["ending"] = value
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            plan = self.chapter_plan(manifest)
+            if chars is not None:
+                try:
+                    value = int(chars)
+                except (TypeError, ValueError):
+                    raise WriterStoreError("单章字数限制必须是整数") from None
+                if value not in CHAPTER_CHARS_CHOICES:
+                    raise WriterStoreError(f"单章字数限制只能是 {list(CHAPTER_CHARS_CHOICES)} 之一（0 = 不限）")
+                plan["chars"] = value
+            if ending is not None:
+                value = str(ending or "").strip()
+                if value not in ENDING_CHOICES:
+                    raise WriterStoreError(f"章节结尾策略只能是 {list(ENDING_CHOICES)} 之一")
+                plan["ending"] = value
+            book_dir = self._book_dir(book_id)
             manifest["chapter_plan"] = plan
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest), "chapter_plan": plan}
@@ -1236,10 +1258,10 @@ class WriterStore:
         """
         if not isinstance(rows, list) or not rows:
             raise WriterStoreError("拆章结果不能为空")
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            book_dir = self._book_dir(book_id)
             appended, skipped = self._append_chapters_locked(book_dir, manifest, rows, part_no=part_no)
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest), "appended": appended,
@@ -1287,11 +1309,14 @@ class WriterStore:
         与逐章删除不同：这里没有「至少留一章」的保护，因为覆盖重拆的前提就是
         把旧目录整个让位；调用方（前端弹窗）必须先让用户确认过。
         """
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
         book_dir = self._book_dir(book_id)
         removed = 0
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            pipeline = manifest.get("active_pipeline") or {}
+            if pipeline.get("status") in ("running", WRITER_PIPELINE_STOPPING, WRITER_PIPELINE_NEEDS_USER):
+                raise WriterConflictError("请先结束当前生成，再清空章节")
             nos = [int(n) for n in manifest.get("chapter_ids") or []]
             for no in nos:
                 self._assert_chapter_editable(self._load_chapter_index(book_dir, no))
@@ -1325,18 +1350,18 @@ class WriterStore:
         ids = list(dict.fromkeys(v for v in ids if v))
         if not ids:
             raise WriterStoreError("请先勾选要删除的版本")
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        book_dir = self._book_dir(book_id)
-        list_key = "setup_versions" if kind == "setup" else "outline_versions"
-        current_key = ("current_setup_version_id" if kind == "setup"
-                       else "current_outline_version_id")
-        versions = [row for row in (manifest.get(list_key) or []) if isinstance(row, dict)]
-        known = {str(row.get("id") or "") for row in versions}
-        unknown = [vid for vid in ids if vid not in known]
-        if unknown:
-            raise WriterStoreError(f"版本不存在：{unknown[0]}")
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            book_dir = self._book_dir(book_id)
+            list_key = "setup_versions" if kind == "setup" else "outline_versions"
+            current_key = ("current_setup_version_id" if kind == "setup"
+                           else "current_outline_version_id")
+            versions = [row for row in (manifest.get(list_key) or []) if isinstance(row, dict)]
+            known = {str(row.get("id") or "") for row in versions}
+            unknown = [vid for vid in ids if vid not in known]
+            if unknown:
+                raise WriterStoreError(f"版本不存在：{unknown[0]}")
             for vid in ids:
                 path = (self._setup_path(book_dir, vid) if kind == "setup"
                         else self._outline_path(book_dir, vid))
@@ -1360,11 +1385,11 @@ class WriterStore:
         ids = list(dict.fromkeys(v for v in ids if v))
         if not ids:
             raise WriterStoreError("请先勾选要删除的正文版本")
-        manifest = self._load_manifest(book_id)
-        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
-            raise LookupError("章节不存在")
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                raise LookupError("章节不存在")
+            book_dir = self._book_dir(book_id)
             index = self._load_chapter_index(book_dir, chapter_no)
             self._assert_chapter_editable(index)
             if expected_revision is not None and expected_revision != "":
@@ -1400,12 +1425,12 @@ class WriterStore:
                             beat: Any = None, hook: Any = None,
                             expected_revision: Any = None) -> dict[str, Any]:
         """改章节标题/简述/钩子（章节页「章节简述」逐行可改）。不动正文版本。"""
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        book_dir = self._book_dir(book_id)
-        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
-            raise LookupError("章节不存在")
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            book_dir = self._book_dir(book_id)
+            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                raise LookupError("章节不存在")
             index = self._load_chapter_index(book_dir, chapter_no)
             self._assert_chapter_editable(index)
             if title is not None:
@@ -1630,44 +1655,44 @@ class WriterStore:
 
     def select_setup_version(self, book_id: str, *, version_id: str,
                              expected_revision: Any = None) -> dict[str, Any]:
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        vid = str(version_id or "").strip()
-        known = [str(row.get("id") or "") for row in (manifest.get("setup_versions") or [])
-                 if isinstance(row, dict)]
-        if vid not in known:
-            raise WriterStoreError("设定版本不存在")
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            vid = str(version_id or "").strip()
+            known = [str(row.get("id") or "") for row in (manifest.get("setup_versions") or [])
+                     if isinstance(row, dict)]
+            if vid not in known:
+                raise WriterStoreError("设定版本不存在")
+            book_dir = self._book_dir(book_id)
             manifest["current_setup_version_id"] = vid
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest)}
 
     def select_outline_version(self, book_id: str, *, version_id: str,
                                expected_revision: Any = None) -> dict[str, Any]:
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
-        vid = str(version_id or "").strip()
-        known = [str(row.get("id") or "") for row in (manifest.get("outline_versions") or [])
-                 if isinstance(row, dict)]
-        if vid not in known:
-            raise WriterStoreError("大纲版本不存在")
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
+            vid = str(version_id or "").strip()
+            known = [str(row.get("id") or "") for row in (manifest.get("outline_versions") or [])
+                     if isinstance(row, dict)]
+            if vid not in known:
+                raise WriterStoreError("大纲版本不存在")
+            book_dir = self._book_dir(book_id)
             manifest["current_outline_version_id"] = vid
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest)}
 
     def delete_chapter(self, book_id: str, chapter_no: int) -> dict[str, Any]:
         """删章节（含全部正文版本）；至少保留一章。"""
-        manifest = self._load_manifest(book_id)
-        ids = [int(n) for n in manifest.get("chapter_ids") or []]
-        if chapter_no not in ids:
-            raise LookupError("章节不存在")
-        if len(ids) <= 1:
-            raise WriterStoreError("作品至少要保留一章；要整本删除请删作品")
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            ids = [int(n) for n in manifest.get("chapter_ids") or []]
+            if chapter_no not in ids:
+                raise LookupError("章节不存在")
+            if len(ids) <= 1:
+                raise WriterStoreError("作品至少要保留一章；要整本删除请删作品")
+            book_dir = self._book_dir(book_id)
             self._assert_chapter_editable(self._load_chapter_index(book_dir, chapter_no))
             shutil.rmtree(self._chapter_version_dir(book_dir, chapter_no), ignore_errors=True)
             try:
@@ -1910,9 +1935,9 @@ class WriterStore:
             return dict(current)
 
     def clear_pipeline(self, book_id: str, pipeline_id: str) -> bool:
-        manifest = self._load_manifest(book_id)
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            book_dir = self._book_dir(book_id)
             current = manifest.get("active_pipeline")
             if not isinstance(current, dict) or str(current.get("id") or "") != str(pipeline_id):
                 return False
@@ -2076,10 +2101,10 @@ class WriterStore:
         from naiba.writer.settings_import import parse_settings_folder
 
         parsed = parse_settings_folder(files)
-        manifest = self._load_manifest(book_id)
-        self._check_revision(manifest, expected_revision)
         book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            self._check_revision(manifest, expected_revision)
             setup_version_id = ""
             if parsed["has_setup"]:
                 setup_version_id = self._write_setup_locked(

@@ -1199,15 +1199,39 @@ export function setProviderModelOptions(models = [], current = '') {
 
 export function applyProviderModelCapabilities() {
   const model = $('#providerModel').value;
-  const capability = state.providerModelCapabilities[model];
-  if (!capability) return;
-  if (!$('#providerContextWindow').value && capability.context_window) {
-    $('#providerContextWindow').value = capability.context_window;
-  }
-  if (!$('#providerMaxOutputTokens').value && capability.max_output_tokens) {
-    $('#providerMaxOutputTokens').value = capability.max_output_tokens;
-  }
+  const capability = state.providerModelCapabilities[model] || {};
+  const render = (value, hintId, buttonId, label) => {
+    const hint = $(hintId);
+    const button = $(buttonId);
+    const number = Number(value);
+    const hasValue = Number.isFinite(number) && number > 0;
+    if (hint) {
+      hint.hidden = !hasValue;
+      hint.textContent = hasValue
+        ? `模型目录报告：${number.toLocaleString()}；仅供参考，尚未写入设置。`
+        : '';
+    }
+    if (button) {
+      button.hidden = !hasValue;
+      button.dataset.capabilityValue = hasValue ? String(number) : '';
+      button.dataset.capabilityField = label;
+    }
+  };
+  render(capability.context_window, '#providerContextCapability', '#applyProviderContextCapability', 'context_window');
+  render(capability.max_output_tokens, '#providerMaxOutputCapability', '#applyProviderMaxOutputCapability', 'max_output_tokens');
   updateProviderVisionHint();
+}
+
+export function applyProviderCapability(field) {
+  const model = $('#providerModel').value;
+  const capability = state.providerModelCapabilities[model] || {};
+  const selector = field === 'max_output_tokens' ? '#providerMaxOutputTokens' : '#providerContextWindow';
+  const value = Number(capability[field]);
+  if (!Number.isFinite(value) || value <= 0) return;
+  $(selector).value = String(value);
+  const input = $(selector);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  applyProviderModelCapabilities();
 }
 
 export function updateProviderVisionHint() {
@@ -1412,26 +1436,7 @@ export async function saveProvider(event) {
   }
   try {
     const values = providerFormValue();
-    if (values.model && (!values.context_window || !values.max_output_tokens)) {
-      // 这段预探测可能要几秒到十几秒（在线中转站），旧实现全程零反馈 ⇒
-      // 用户以为"点了没反应"就继续点。凡是慢请求前面都要有一句话。
-      $('#providerError').textContent = '正在获取模型上下文参数…';
-      try {
-        const result = await api('/api/providers/models', { method: 'POST', body: values });
-        const matched = (result.models || []).find((item) => String(item.id || '') === values.model);
-        if (matched?.context_window && !values.context_window) {
-          values.context_window = Number(matched.context_window);
-          if (isCurrent()) $('#providerContextWindow').value = values.context_window;
-        }
-        if (matched?.max_output_tokens && !values.max_output_tokens) {
-          values.max_output_tokens = Number(matched.max_output_tokens);
-          if (isCurrent()) $('#providerMaxOutputTokens').value = values.max_output_tokens;
-        }
-      } catch (_) {
-        // Capability metadata is optional; the provider may supply defaults.
-      }
-    }
-    if (!isCurrent()) return; // 预探测期间关闭/换卡，尚未提交的草稿就此取消。
+    if (!isCurrent()) return; // 表单在保存前被关闭或切换，尚未提交的草稿就此取消。
     if (copyId && !values.id) values.id = copyId;
     const saved = await api('/api/providers', { method: 'POST', body: values });
     // 先落"结果"，再刷新：`syncSavedProvider` 的第一步是把卡片并进本地 bootstrap

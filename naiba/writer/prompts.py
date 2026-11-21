@@ -5,8 +5,8 @@
 章节索引，不是导入原文。写法整理自启元原创模式（取证报告 §3），三条硬约束：
 
 1. **权威提示词只在服务端**：前端不拼接提示词，任务快照固化全部输入，重试不换料。
-2. **严格 JSON**：只接受纯 JSON 或单个代码围栏；字段类型、必填项、数量、章号
-   唯一连续逐项校验——不用宽松正则从解释文字里猜，不补空角色 / 空大纲。
+2. **严格结构**：只接受纯 JSON 或单个代码围栏；按白名单校验字段、类型与数量，
+   章号按目录顺序分配。不从解释文字里猜结构，不补空角色 / 空大纲。
 3. **上下文分槽**：世界观、角色、前文衔接各槽独立限长；不默认塞入全书正文。
    预检与正式提交共用同一组 build 函数，右栏看到的来源就是实际发送的来源。
 """
@@ -14,10 +14,14 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+from collections.abc import Iterable
 from typing import Any
 
-from naiba.writer.store import WriterStoreError
+from naiba.writer.store import (
+    CHAPTER_CONTENT_MAX_CHARS, CHAPTER_STATE_KEYS, WriterStoreError, normalize_chapter_state,
+)
 
 # ---- 步骤定义 ----
 
@@ -181,7 +185,32 @@ LARGE_INPUT_CONFIRM_TOKENS = 60000
 
 
 class PromptError(ValueError):
-    """提示词组装或结果解析错误（用户可读，API 边界转 4xx；流水线据此停链）。"""
+    """提示词组装或结果解析错误（用户可读，API 边界转 4xx）。"""
+
+
+# 原文按字符保留，至少能容下正文/分部大纲的 20 万字与代码围栏。
+CONTENT_ISSUE_RAW_MAX = 256_000
+
+
+class ContentIssue(PromptError):
+    """待处理结果：原文用于查看，partial 用于编辑，只有 accepted 可直接采用。"""
+
+    def __init__(self, message: str, *, category: str = "invalid_content",
+                 raw: str = "", partial: Any = None, accepted: Any = None,
+                 missing: list[str] | None = None, counts: dict[str, int] | None = None) -> None:
+        super().__init__(message or "模型结果需要处理")
+        self.category = category
+        self.raw = raw[:CONTENT_ISSUE_RAW_MAX]
+        self.raw_truncated = len(raw) > CONTENT_ISSUE_RAW_MAX
+        self.partial_truncated = isinstance(partial, str) and len(partial) > CONTENT_ISSUE_RAW_MAX
+        self.partial = partial[:CONTENT_ISSUE_RAW_MAX] if self.partial_truncated else partial
+        self.accepted = accepted
+        self.missing = missing or []
+        self.counts = counts or {}
+        self.available_actions = ["retry", "supplement"]
+        if accepted is not None:
+            self.available_actions.append("accept")
+        self.available_actions.append("skip")
 
 
 # ---- 设定内容 → 提示词槽位 ----
@@ -361,10 +390,11 @@ def output_mode(value: str) -> str:
 
 STEP_SYSTEM = {
     "genre": (
-        "根据创作提示词整理题材画像，输出 JSON：\n"
-        '{"channel":"male"或"female","cat":"大类","subCat":"子流派",'
+        "根据创作提示词整理题材画像。只输出一个 JSON 对象，例如：\n"
+        '{"channel":"male","cat":"大类","subCat":"子流派",'
         '"tone":"基调","hook":"核心卖点一句话","tags":["关键词"]}\n'
-        "只输出 JSON，不要解释。"
+        "cat（题材大类）必须是非空字符串，不要用 subCat（子流派）替代。"
+        "channel 如填写，只用 male 或 female。不要附加解释。"
     ),
     "title": (
         "根据创作提示词整理书名候选，输出 JSON 数组：[\"书名1\",\"书名2\",...]。"
@@ -401,7 +431,12 @@ STEP_SYSTEM = {
         "基于给定设定与段落要点直接输出正文，不解释写作思路，遵守作品系统提示词的文风。"
     ),
     "state": (
-        "通读给定章节正文，提取本章结束时的事实状态并输出 JSON。字段为 characters、relations、knowledge、events、open_threads、next_hooks；只记录正文明确写出的事实。"
+        "通读给定章节正文，提取本章结束时的事实状态。只输出一个 JSON 对象："
+        '{"characters":[{"name":"角色姓名","presence":"出场情况","location":"位置","condition":"状态"}],'
+        '"relations":[{"between":["角色甲","角色乙"],"change":"关系变化"}],'
+        '"knowledge":[{"name":"角色姓名","known":["已知事实"],"unknown":["未知事实"]}],'
+        '"events":["本章事件"],"open_threads":["未解线索"],"next_hooks":["下章钩子"]}。'
+        "没有可记录事实的字段给空数组。只记录正文明确写出的事实，不补造内容。"
     ),
 }
 
@@ -420,8 +455,11 @@ def stage_protocol(step: str, mode: str = "json") -> str:
         return (f"【本阶段内置要求｜只读】\n当前阶段：{STEP_LABELS.get(step, step)}。\n"
                 "请直接输出自然文本，不要输出 JSON；结果会保存为原文，题材、简介、分类、角色、章节等结构化字段不会自动填入。\n"
                 "写作方向、题材和文风以作品系统提示词为准。")
+    if step not in JSON_STEPS:
+        return (f"【本阶段内置要求｜只读】\n当前阶段：{STEP_LABELS.get(step, step)}。\n"
+                "请直接输出自然文本，不要套 JSON。写作方向、题材和文风以作品系统提示词为准。")
     return (f"【本阶段内置要求｜只读】\n当前阶段：{STEP_LABELS.get(step, step)}。\n"
-            "请严格按本阶段要求输出 JSON；程序会校验字段、类型、数量和必要结构。\n"
+            "请严格按本阶段要求只输出 JSON，不附加说明；程序会校验字段、类型、数量和必要结构。\n"
             "JSON 只是内部交接格式，写作方向、题材和文风以作品系统提示词为准。")
 
 
@@ -465,7 +503,7 @@ def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
     if output_mode(output_mode_value) == "freeform":
         parts.append("请自由输出本阶段内容；不要尝试替我填写结构化字段。")
     elif step == "genre":
-        parts.append("请输出题材画像（JSON）。")
+        parts.append(STEP_SYSTEM["genre"])
     elif step == "title":
         parts.append("请输出书名候选（JSON 数组）。")
     elif step == "blurb":
@@ -586,17 +624,8 @@ def build_outline_review_user(setup: dict[str, Any], *, part_no: int, part_title
 
 
 def parse_outline_text(text: str, *, limit: int = PART_TEXT_MAX) -> str:
-    """整篇大纲：只去围栏、不解析结构；空结果如实失败。"""
-    raw = str(text or "").strip()
-    if not raw:
-        raise PromptError("模型没有返回大纲内容")
-    fence = _FENCE_PATTERN.match(raw)
-    body = fence.group(1).strip() if fence else raw
-    if not body:
-        raise PromptError("模型返回的大纲为空")
-    if len(body) > limit:
-        raise PromptError(f"大纲超过 {limit} 字符上限；请拆成多部或精简后重试")
-    return body
+    """整篇大纲：只去围栏，不解析结构；空结果和超长结果交给用户处理。"""
+    return _parse_text(text, what="大纲", limit=limit, strip_fence=True)
 
 
 def build_split_user(setup: dict[str, Any], *, part_text: str, want_count: int,
@@ -639,29 +668,11 @@ def build_split_user(setup: dict[str, Any], *, part_text: str, want_count: int,
     return "\n\n".join(parts)
 
 
-def parse_split(text: str, *, from_no: int = 1, want_count: int = 1) -> list[dict[str, Any]]:
-    """拆章结果：允许少于 want_count（一批拆不完可以续），但一条都没有就失败。"""
-    payload = extract_json_payload(text)
-    rows_raw = payload.get("chapters") if isinstance(payload, dict) else payload
-    if not isinstance(rows_raw, list):
-        raise PromptError("拆章结果必须是含 chapters 数组的 JSON 对象")
-    rows: list[dict[str, Any]] = []
-    for item in rows_raw:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "").strip()
-        if not title:
-            continue
-        rows.append({
-            "title": title[:200],
-            "beat": str(item.get("beat") or "").strip()[:2000],
-            "hook": str(item.get("hook") or "").strip()[:500],
-        })
-    if not rows:
-        raise PromptError("拆章结果没有任何章节；请重试或换模型")
-    if len(rows) > want_count:
-        rows = rows[:want_count]
-    return [{"no": int(from_no) + index, **row} for index, row in enumerate(rows)]
+def parse_split(text: str, *, from_no: int = 1, want_count: int = 1,
+                require_count: bool = False) -> list[dict[str, Any]]:
+    """拆章：按 from_no 连续编号；默认允许干净但数量不足的批次。"""
+    return _parse_chapter_rows(text, wanted=want_count, from_no=from_no,
+                               what="拆章", require_count=require_count)
 
 
 # ---- 正文写作的上下文 ----
@@ -700,28 +711,64 @@ def build_state_user(*, chapter_no: int, content: str, names: list[str] | None =
     if clean_names:
         parts.append("【本作角色名单】（人名以这份名单为准；正文里新出现的人物如实记录）\n"
                      + "、".join(clean_names[:60]))
-    parts.append("请输出本章结束时的状态 JSON。")
+    if output_mode(output_mode_value) == "freeform":
+        parts.append("请直接用自然文本写出本章结束时的状态，只记录正文明确写出的事实。")
+    else:
+        parts.append(STEP_SYSTEM["state"])
     return "\n\n".join(parts)
 
 
 def parse_chapter_state(text: str) -> dict[str, Any]:
-    """章末状态提取结果：严格 JSON 对象；至少要有一条事实，全空按失败处理。
-
-    结构收敛与限长在落盘前由 `store.normalize_chapter_state` 统一做，
-    这里只负责「拿不拿得到一份像样的 JSON」。
-    """
-    payload = extract_json_payload(text)
+    """至少要有一条落盘后仍有效的事实；正常结果保留原来的对象形状。"""
+    raw = str(text or "")
+    missing_fact = ["至少补一条章末事实"]
+    payload = _extract_step_json(raw, what="章末状态", missing=missing_fact,
+                                 empty_partial={"events": []}, target=1)
     if not isinstance(payload, dict):
-        raise PromptError("章末状态必须是 JSON 对象")
-    has_content = False
-    for key in ("characters", "relations", "knowledge", "events", "open_threads", "next_hooks"):
-        value = payload.get(key)
-        if isinstance(value, list) and value:
-            has_content = True
-            break
-    if not has_content:
-        raise PromptError("章末状态没有任何事实（全为空）；按提取失败处理，可重试补建")
+        raise ContentIssue("章末状态必须是 JSON 对象", raw=raw, category="wrong_shape",
+                           partial=payload, missing=missing_fact, counts={"target": 1})
+
+    # 存储层为旧数据允许 str() 转换；这里先剔除错误类型，不能把对象当成事实。
+    facts: dict[str, list[Any]] = {}
+    malformed = False
+    for key in CHAPTER_STATE_KEYS:
+        if key not in payload:
+            continue
+        entries = payload[key]
+        if not isinstance(entries, list):
+            malformed = True
+            continue
+        facts[key] = [item for item in entries if _valid_state_entry(key, item)]
+        malformed |= len(facts[key]) != len(entries)
+    try:
+        normalized = normalize_chapter_state(facts)
+    except WriterStoreError as exc:
+        raise ContentIssue("章末状态没有任何可用事实，请补充、重试或跳过",
+                           raw=raw, category="empty", partial=payload, missing=missing_fact,
+                           counts={"actual": 0, "target": 1}) from exc
+    if malformed:
+        raise ContentIssue("章末状态有格式不正确的事实，请编辑后继续",
+                           raw=raw, category="incomplete", partial=payload, accepted=normalized,
+                           missing=["修正章末事实的字段类型"],
+                           counts={"actual": sum(map(len, normalized.values())), "target": 1})
     return payload
+
+
+def _valid_state_entry(key: str, item: Any) -> bool:
+    if key in ("events", "open_threads", "next_hooks"):
+        return isinstance(item, str)
+    if not isinstance(item, dict):
+        return False
+    text_fields, array_fields = {
+        "characters": (("name", "presence", "location", "condition"), ()),
+        "relations": (("change",), ("between",)),
+        "knowledge": (("name",), ("known", "unknown")),
+    }[key]
+    return _text_fields_valid(item, text_fields) and all(
+        field not in item or (isinstance(item[field], list)
+                              and all(isinstance(value, str) for value in item[field]))
+        for field in array_fields
+    )
 
 
 def chapter_states_text(rows: list[dict[str, Any]], *,
@@ -790,10 +837,10 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
                         draft_tail: str = "", extra_note: str = "",
                         previous_chapter: dict[str, Any] | None = None,
                         chapter_states: list[dict[str, Any]] | None = None,
-                        output_mode_value: str = "json") -> dict[str, Any]:
-    """组装正文用户消息与槽位清单（预检与正式提交、右栏来源展示共用）。
+                        output_mode_value: str = "json", step: str = "draft") -> dict[str, Any]:
+    """组装正文或段落要点的用户消息与槽位清单（预检与正式提交共用）。
 
-    `mode`：whole 整章 / segment 分段 / continue 续写。
+    `step`：draft 写正文 / segs 先列要点。`mode`：whole 整章 / segment 分段 / continue 续写。
     `chapter_states`：前序章末状态（`store.chapter_context_states` 的输出，
     只含有效记录）；原文摘录仍保留作措辞衔接，长程事实由状态承担。
     返回 `{content, slots}`；slots 描述每个槽是否被带入及省略原因。
@@ -825,7 +872,7 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
         if not chars_text:
             chars_text = "（角色未定）"
 
-    parts: list[str] = [stage_protocol("draft", output_mode_value), f"【创作提示词】\n{idea_text(setup)}"]
+    parts: list[str] = [stage_protocol(step, output_mode_value), f"【创作提示词】\n{idea_text(setup)}"]
     slots.append({"key": "idea", "label": "创作提示词", "included": True,
                   "chars": len(parts[0])})
     summary = setup.get("continuation_summary")
@@ -917,7 +964,12 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
         parts.append(style_block.rstrip())
         slots.append({"key": "style", "label": "风格与约束", "included": True,
                       "chars": len(style_block)})
-    if mode == "whole":
+    if step == "segs":
+        if output_mode(output_mode_value) == "freeform":
+            parts.append("请按剧情顺序列出本章段落要点，每条一句；不要写正文或输出 JSON。")
+        else:
+            parts.append(STEP_SYSTEM["segs"] + '每项用字符串，例如：["第一段要点", "第二段要点"]。不要写正文。')
+    elif mode == "whole":
         parts.append(f"请写出第 {chapter.get('no')} 章完整正文（2000—4000字）。")
     elif mode == "continue":
         parts.append(f"请从当前稿结尾处继续写第 {chapter.get('no')} 章正文，紧接上文、不重复已写内容。")
@@ -966,191 +1018,284 @@ def budget_report(*, content: str, slots: list[dict[str, Any]],
     }
 
 
-# ---- 严格 JSON 解析 ----
+# ---- 严格 JSON 与文本解析 ----
 
 _FENCE_PATTERN = re.compile(
     r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n?```\s*$", re.DOTALL,
 )
 
 
-def extract_json_payload(text: str) -> Any:
-    """取出模型输出里的 JSON：纯 JSON 或单个代码围栏；其余一律报错。
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("JSON 键重复")
+        obj[key] = value
+    return obj
 
-    不用宽松正则从解释文字中猜 JSON（实施计划 §6.1）。
-    """
-    raw = str(text or "").strip()
-    if not raw:
-        raise PromptError("模型没有返回内容")
-    candidate = raw
-    fence = _FENCE_PATTERN.match(raw)
+
+def _finite_json_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("JSON 数值不是有限值")
+    return number
+
+
+def _ensure_json_unicode(value: Any) -> None:
+    """避免转义的孤立代理字符通过解析后才在 UTF-8 落盘时出错。"""
+    if isinstance(value, str):
+        value.encode("utf-8")
+    elif isinstance(value, list):
+        for item in value:
+            _ensure_json_unicode(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            key.encode("utf-8")
+            _ensure_json_unicode(item)
+
+
+def extract_json_payload(text: str) -> Any:
+    """只接受纯 JSON 或一个代码围栏，不从解释文字或多个围栏中猜。"""
+    raw = str(text or "")
+    candidate = raw.strip()
+    fence = _FENCE_PATTERN.match(candidate)
     if fence:
         candidate = fence.group(1).strip()
+    if not candidate:
+        raise ContentIssue("模型没有返回内容", raw=raw, category="empty")
     try:
-        return json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise PromptError(
-            "模型输出不是合法 JSON（只接受纯 JSON 或单个代码围栏）；可重试或换模型"
-        ) from exc
+        payload = json.loads(candidate, object_pairs_hook=_unique_json_object,
+                             parse_float=_finite_json_number, parse_constant=_finite_json_number)
+        _ensure_json_unicode(payload)
+        return payload
+    except (ValueError, RecursionError) as exc:
+        raise ContentIssue("模型输出不是合法 JSON（只接受纯 JSON 或单个代码围栏）；请编辑或重试",
+                           raw=raw, category="unrecognized_format") from exc
+
+
+def _extract_step_json(raw: str, *, what: str, missing: list[str],
+                       empty_partial: Any, target: int) -> Any:
+    """补上阶段信息；只有确认空输出才给可编辑的空模板和实际数量 0。"""
+    try:
+        return extract_json_payload(raw)
+    except ContentIssue as exc:
+        if exc.category == "empty":
+            raise ContentIssue(f"模型没有返回{what}", raw=raw, category="empty",
+                               partial=empty_partial, missing=missing,
+                               counts={"actual": 0, "target": target}) from exc
+        raise ContentIssue(f"{what}不是合法 JSON；请编辑为有效 JSON 或重试", raw=raw,
+                           category=exc.category, missing=missing, counts={"target": target}) from exc
+
+
+def _parse_text(text: str, *, what: str, limit: int, strip_fence: bool = False,
+                truncated: bool = False) -> str:
+    raw = str(text or "")
+    body = raw.strip()
+    if strip_fence and (fence := _FENCE_PATTERN.match(body)):
+        body = fence.group(1).strip()
+    if not body:
+        raise ContentIssue(f"{what}结果为空", raw=raw, category="empty", partial="",
+                           missing=[f"填写{what}"], counts={"actual": 0})
+    if len(body) > limit:
+        detail = "已被截断，且超过" if truncated else "超过"
+        missing = [f"删减到 {limit} 字符以内"]
+        if truncated:
+            missing.append("补完正文结尾")
+        raise ContentIssue(f"{what}{detail} {limit} 字符上限，请编辑后继续",
+                           raw=raw, category="too_long", partial=body, missing=missing,
+                           counts={"actual": len(body), "target": limit})
+    if truncated:
+        raise ContentIssue("正文因达到输出长度上限被截断；请编辑残稿、续写或重试",
+                           raw=raw, category="truncated", partial=body,
+                           missing=["补完正文结尾"], counts={"chars": len(body)})
+    return body
 
 
 def parse_freeform(text: str, *, limit: int = PART_TEXT_MAX) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        raise PromptError("模型没有返回内容")
-    if len(raw) > limit:
-        raise PromptError(f"自由文本超过 {limit} 字符上限")
-    return raw
+    return _parse_text(text, what="自由文本", limit=limit)
+
+
+def _json_text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _text_fields_valid(obj: dict[str, Any], fields: Iterable[str]) -> bool:
+    return all(field not in obj or isinstance(obj[field], str) for field in fields)
 
 
 def parse_genre(text: str) -> dict[str, Any]:
-    payload = extract_json_payload(text)
+    raw = str(text or "")
+    payload = _extract_step_json(raw, what="题材结果", missing=["cat"],
+                                 empty_partial={"cat": ""}, target=1)
     if not isinstance(payload, dict):
-        raise PromptError("题材结果必须是 JSON 对象")
-    cat = str(payload.get("cat") or "").strip()
+        raise ContentIssue("题材结果必须是 JSON 对象", raw=raw, category="wrong_shape",
+                           partial=payload, missing=["cat"], counts={"target": 1})
+    # 第一个明确的大类字段优先；格式错误不会用后面的别名掩盖。
+    cat_value = next((payload[key] for key in ("cat", "category", "大类") if key in payload), "")
+    cat = _json_text(cat_value)
     if not cat:
-        raise PromptError("题材结果缺少 cat（大类）字段")
-    channel = str(payload.get("channel") or "").strip().lower()
-    if channel not in ("male", "female"):
-        channel = ""
-    tags_raw = payload.get("tags")
-    tags: list[str] = []
-    if isinstance(tags_raw, list):
-        for item in tags_raw:
-            value = str(item or "").strip()
-            if value and value not in tags:
-                tags.append(value)
-            if len(tags) >= 5:
-                break
+        raise ContentIssue("题材缺少有效的大类：请填写 cat（大类）",
+                           raw=raw, category="missing_field", partial={"cat": "", **payload},
+                           missing=["cat"], counts={"actual": 0, "target": 1})
+    sub_key = "subCat" if "subCat" in payload else "sub_cat"
+    invalid = [field for field in ("channel", sub_key, "tone", "hook")
+               if not _text_fields_valid(payload, (field,))]
+    tags_raw = payload.get("tags", [])
+    if not isinstance(tags_raw, list) or not all(isinstance(item, str) for item in tags_raw):
+        invalid.append("tags")
+    if invalid:
+        raise ContentIssue("题材有格式不正确的字段，请编辑后继续", raw=raw,
+                           category="wrong_shape", partial=payload,
+                           missing=[f"修正 {field} 的类型" for field in invalid])
+    channel = _json_text(payload.get("channel")).lower()
+    tags = list(dict.fromkeys(value for item in tags_raw if (value := item.strip())))[:5]
     return {
-        "channel": channel,
+        "channel": channel if channel in ("male", "female") else "",
         "cat": cat[:40],
-        "sub_cat": str(payload.get("subCat") or "").strip()[:40],
-        "tone": str(payload.get("tone") or "").strip()[:40],
-        "hook": str(payload.get("hook") or "").strip()[:200],
+        "sub_cat": _json_text(payload.get(sub_key))[:40],
+        "tone": _json_text(payload.get("tone"))[:40],
+        "hook": _json_text(payload.get("hook"))[:200],
         "tags": tags,
     }
 
 
-def _parse_str_list(text: str, *, min_count: int, max_count: int, what: str) -> list[str]:
-    payload = extract_json_payload(text)
-    if not isinstance(payload, list):
-        raise PromptError(f"{what}必须是 JSON 数组")
-    rows: list[str] = []
-    for item in payload:
-        value = str(item or "").strip()
-        if value:
-            rows.append(value)
-    if len(rows) < min_count:
-        raise PromptError(f"{what}只有 {len(rows)} 条（至少需要 {min_count} 条）；如实失败，不补空条目")
-    return rows[:max_count]
+def _payload_list(raw: str, *, keys: tuple[str, ...], what: str, target: int) -> list[Any]:
+    """只认白名单包装；前面的键明确存在时，不回退到后面的键。"""
+    missing = [f"填写 {keys[0]} 数组"]
+    payload = _extract_step_json(raw, what=what, missing=missing, empty_partial=[], target=target)
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        key = next((key for key in keys if key in payload), None)
+        if key is not None and isinstance(payload[key], list):
+            return payload[key]
+    raise ContentIssue(f"{what}必须是 JSON 数组或使用 {' / '.join(keys)} 包装的数组",
+                       raw=raw, category="wrong_shape", partial=payload, missing=missing,
+                       counts={"target": target})
+
+
+def _finish_rows(raw: str, partial: list[Any], rows: list[Any], *, target: int,
+                 min_count: int, max_count: int, what: str, unit: str, row_label: str,
+                 invalid_rows: int, missing_field: tuple[str, str, int] | None = None) -> list[Any]:
+    actual = len(rows)
+    accepted = rows[:max_count]
+    missing: list[str] = []
+    counts = {"actual": actual, "target": target}
+    if actual < min_count:
+        missing.append(f"还缺 {min_count - actual} {unit}{row_label}")
+    if missing_field is not None:
+        key, label, count = missing_field
+        if count:
+            missing.append(f"{count} {unit}缺少{label}")
+            counts[f"missing_{key}"] = count
+    if invalid_rows:
+        missing.append(f"{invalid_rows} {unit}格式不正确，请修正或删除")
+        counts["invalid_rows"] = invalid_rows
+    if missing:
+        category = ("empty" if not partial else "insufficient" if actual < min_count else "incomplete")
+        reason = "只有" if actual < min_count else "有"
+        raise ContentIssue(f"{what}{reason} {actual} {unit}有效内容；{'、'.join(missing)}",
+                           raw=raw, category=category, partial=partial,
+                           accepted=accepted or None, missing=missing, counts=counts)
+    return accepted
+
+
+def _parse_str_list(text: str, *, min_count: int, max_count: int, max_chars: int, what: str,
+                    wrapper_keys: tuple[str, ...]) -> list[str]:
+    raw = str(text or "")
+    partial = _payload_list(raw, keys=wrapper_keys, what=what, target=min_count)
+    rows = [value[:max_chars] for item in partial if (value := _json_text(item))]
+    return _finish_rows(raw, partial, rows, target=min_count, min_count=min_count,
+                        max_count=max_count, what=what, unit="条", row_label="内容",
+                        invalid_rows=len(partial) - len(rows))
 
 
 def parse_title_candidates(text: str) -> list[str]:
-    return [row[:120] for row in _parse_str_list(text, min_count=1, max_count=10, what="书名候选")]
+    return _parse_str_list(text, min_count=1, max_count=10, max_chars=120,
+                           what="书名候选", wrapper_keys=("titles", "candidates"))
 
 
 def parse_blurb_candidates(text: str) -> list[str]:
-    return [row[:2000] for row in _parse_str_list(text, min_count=1, max_count=6, what="简介候选")]
+    return _parse_str_list(text, min_count=1, max_count=6, max_chars=2000,
+                           what="简介候选", wrapper_keys=("blurbs", "descriptions", "candidates"))
 
 
 def parse_world(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        raise PromptError("世界观结果为空")
-    fence = _FENCE_PATTERN.match(raw)
-    if fence:
-        raw = fence.group(1).strip()
-    if len(raw) > 30000:
-        raw = raw[:30000]
-    return raw
+    return _parse_text(text, what="世界观", limit=30000, strip_fence=True)
 
 
-def parse_characters(text: str, *, wanted: int) -> list[dict[str, str]]:
-    payload = extract_json_payload(text)
-    if isinstance(payload, dict) and isinstance(payload.get("characters"), list):
-        payload = payload["characters"]
-    if not isinstance(payload, list):
-        raise PromptError("角色结果必须是 JSON 数组")
+_CHARACTER_FIELDS = {
+    "role": 40, "identity": 200, "goal": 200, "traits": 200, "speech": 200,
+    "arc": 200, "background": 1000, "relations": 1000,
+}
+_CHAPTER_FIELDS = {"beat": 2000, "hook": 500}
+
+
+def _parse_named_rows(partial: list[Any], *, required: str, required_max: int,
+                      fields: dict[str, int], allow_names: bool = False
+                      ) -> tuple[list[dict[str, str]], int, int]:
+    """保留编辑用原始行不动，单独生成可用行和真实缺口。"""
     rows: list[dict[str, str]] = []
-    for item in payload:
-        if isinstance(item, str):
-            item = {"name": item}
+    missing_required = invalid_rows = 0
+    for item in partial:
+        if allow_names and isinstance(item, str):
+            item = {required: item}
         if not isinstance(item, dict):
+            invalid_rows += 1
             continue
-        name = str(item.get("name") or "").strip()
-        if not name:
+        value = item.get(required)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_required += 1
             continue
-        rows.append({
-            "name": name[:60],
-            "role": str(item.get("role") or "").strip()[:40],
-            "identity": str(item.get("identity") or "").strip()[:200],
-            "goal": str(item.get("goal") or "").strip()[:200],
-            "traits": str(item.get("traits") or "").strip()[:200],
-            "speech": str(item.get("speech") or "").strip()[:200],
-            "arc": str(item.get("arc") or "").strip()[:200],
-            "background": str(item.get("background") or "").strip()[:1000],
-            # 关系字段：生成要求输出，解析必须保留（跨章连贯性修复计划 §三.A）；
-            # 长度限制与 store 归一化（CHAR_LONG_MAX）一致。
-            "relations": str(item.get("relations") or "").strip()[:1000],
-        })
-    if len(rows) < wanted:
-        raise PromptError(
-            f"角色结果只有 {len(rows)} 个（要求 {wanted} 个）；如实失败，不补空角色"
-        )
-    return rows[:wanted]
+        if not isinstance(value, str) or not _text_fields_valid(item, fields):
+            invalid_rows += 1
+            continue
+        rows.append({required: value.strip()[:required_max], **{
+            key: _json_text(item.get(key))[:limit] for key, limit in fields.items()
+        }})
+    return rows, missing_required, invalid_rows
 
 
-def parse_outline(text: str, *, wanted: int) -> list[dict[str, Any]]:
-    payload = extract_json_payload(text)
-    if not isinstance(payload, dict) or not isinstance(payload.get("chapters"), list):
-        raise PromptError("大纲结果必须是含 chapters 数组的 JSON 对象")
-    rows: list[dict[str, Any]] = []
-    for item in payload["chapters"]:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "").strip()
-        if not title:
-            continue
-        rows.append({
-            "no": item.get("no", len(rows) + 1),
-            "title": title[:200],
-            "beat": str(item.get("beat") or "").strip()[:2000],
-            "hook": str(item.get("hook") or "").strip()[:500],
-        })
-    if len(rows) < wanted:
-        raise PromptError(
-            f"大纲只有 {len(rows)} 章（要求 {wanted} 章）；如实失败，不补空章节"
-        )
-    nos: list[Any] = [row["no"] for row in rows[:wanted]]
-    cleaned: list[dict[str, Any]] = []
-    for index, row in enumerate(rows[:wanted], start=1):
-        no_raw = row["no"]
-        if isinstance(no_raw, bool) or not isinstance(no_raw, int) or no_raw < 1:
-            no_raw = index
-        cleaned.append({**row, "no": no_raw})
-    seen: set[int] = set()
-    normalized: list[dict[str, Any]] = []
-    for index, row in enumerate(cleaned, start=1):
-        no = row["no"] if row["no"] not in seen else index
-        seen.add(no)
-        normalized.append({**row, "no": no})
-    if [row["no"] for row in normalized] != list(range(1, len(normalized) + 1)):
-        # 章号缺失 / 重复：按顺序重排，但要求条目数本身已够（前面已校验）。
-        normalized = [{**row, "no": pos} for pos, row in enumerate(normalized, start=1)]
-    return normalized
+def parse_characters(text: str, *, wanted: int, require_count: bool = True) -> list[dict[str, str]]:
+    """返回最多 wanted 张角色卡；人工编辑可放宽数量，但不能提交无效行。"""
+    raw = str(text or "")
+    partial = _payload_list(raw, keys=("characters", "角色"), what="角色结果", target=wanted)
+    rows, missing_name, invalid_rows = _parse_named_rows(
+        partial, required="name", required_max=60, fields=_CHARACTER_FIELDS, allow_names=True,
+    )
+    return _finish_rows(raw, partial, rows, target=wanted, min_count=wanted if require_count else 1,
+                        max_count=wanted, what="角色结果", unit="个", row_label="有名字的角色",
+                        invalid_rows=invalid_rows, missing_field=("name", "姓名（name）", missing_name))
 
 
-def parse_segs(text: str) -> list[str]:
-    rows = _parse_str_list(text, min_count=SEGS_MIN, max_count=SEGS_MAX, what="段落要点")
-    return [row[:SEG_POINT_CHARS] for row in rows]
+def _parse_chapter_rows(text: str, *, wanted: int, from_no: int, what: str,
+                        require_count: bool) -> list[dict[str, Any]]:
+    raw = str(text or "")
+    partial = _payload_list(raw, keys=("chapters", "outline"), what=what, target=wanted)
+    rows, missing_title, invalid_rows = _parse_named_rows(
+        partial, required="title", required_max=200, fields=_CHAPTER_FIELDS,
+    )
+    # 章号是按任务起点分配的目录位置；不让异常/重复的模型章号改动已有目录。
+    numbered = [{"no": int(from_no) + index, **row} for index, row in enumerate(rows)]
+    return _finish_rows(raw, partial, numbered, target=wanted,
+                        min_count=wanted if require_count else 1, max_count=wanted,
+                        what=what, unit="章", row_label="有标题的内容", invalid_rows=invalid_rows,
+                        missing_field=("title", "标题（title）", missing_title))
+
+
+def parse_outline(text: str, *, wanted: int, require_count: bool = True) -> list[dict[str, Any]]:
+    """旧版逐章大纲：默认要求数量达标，章号从 1 连续编号。"""
+    return _parse_chapter_rows(text, wanted=wanted, from_no=1,
+                               what="章节大纲", require_count=require_count)
+
+
+def parse_segs(text: str, *, min_count: int = SEGS_MIN) -> list[str]:
+    if not 1 <= min_count <= SEGS_MAX:
+        raise PromptError(f"段落要点的最少数量必须在 1–{SEGS_MAX} 之间")
+    return _parse_str_list(text, min_count=min_count, max_count=SEGS_MAX, max_chars=SEG_POINT_CHARS,
+                           what="段落要点", wrapper_keys=("segments", "points"))
 
 
 def parse_draft(text: str, *, finish_reason: str = "") -> str:
-    body = str(text or "").strip()
-    if not body:
-        raise PromptError("正文结果为空")
-    if finish_reason == "length":
-        raise PromptError(
-            "正文因达到输出长度上限被截断（finish_reason=length）；请续写或重试，不把残稿当完成稿"
-        )
-    return body
+    truncated = str(finish_reason or "").strip().lower() in ("length", "max_tokens", "max_output_tokens")
+    return _parse_text(text, what="正文", limit=CHAPTER_CONTENT_MAX_CHARS, truncated=truncated)

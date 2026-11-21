@@ -25,7 +25,7 @@ from naiba.core.contracts import (
     STUDIO_THREAD_ID_KEY, STUDIO_PARENT_TASK_ID_KEY, STUDIO_TRACE_MESSAGES_KEY,
     STUDIO_SKILL_SNAPSHOT_KEY,
     STUDIO_OUTPUT_CONTRACT_VERSION_KEY, STUDIO_OUTPUT_CONTRACT_VERSION,
-    STUDIO_RESULT_ARTIFACT_KEY, STUDIO_LOGICAL_GENERATION_ID_KEY,
+    STUDIO_RESULT_ARTIFACT_KEY, STUDIO_LOGICAL_GENERATION_ID_KEY, STUDIO_RESULT_ISSUE_KEY,
     STUDIO_RESUMED_FROM_KEY, STUDIO_RESUMED_INTO_KEY,
 )
 from naiba.core.fsutil import atomic_write_json
@@ -225,7 +225,7 @@ class StudioStore:
                 return None
             for key in ("status", "detail", "result", "result_partial", "reasoning", "error",
                         "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at",
-                        STUDIO_TRACE_MESSAGES_KEY):
+                        STUDIO_TRACE_MESSAGES_KEY, STUDIO_RESULT_ISSUE_KEY):
                 if key in fields:
                     current[key] = fields[key]
             for key in (STUDIO_RESULT_ARTIFACT_KEY, STUDIO_LOGICAL_GENERATION_ID_KEY,

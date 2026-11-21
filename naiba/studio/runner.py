@@ -19,8 +19,10 @@ from typing import Any
 
 from naiba.core.contracts import (STUDIO_PROMPT_SOURCE_KEY, STUDIO_TRACE_MESSAGES_KEY,
                                   STUDIO_HISTORY_MESSAGES_KEY, STUDIO_SYSTEM_PROMPT_KEY,
-                                  STUDIO_OUTPUT_CONTRACT_VERSION_KEY, STUDIO_RESULT_ARTIFACT_KEY)
+                                  STUDIO_OUTPUT_CONTRACT_VERSION_KEY, STUDIO_RESULT_ARTIFACT_KEY,
+                                  STUDIO_RESULT_ISSUE_KEY)
 from naiba.core.exceptions import TaskCancelled
+from naiba.studio.artifacts import ResultContentIncomplete
 from naiba.studio.conversation import model_history
 from naiba.studio.skill_adapter import ContentSkillAdapter, check_context
 from naiba.llm.profiles import resolve_profile_with_override
@@ -300,6 +302,7 @@ class StudioRunner:
                     result_partial=self.store.partial_from_events(task_id),
                     error=str(exc), trace_messages=trace_sink,
                     usage_override=dict(usage_sink),
+                    result_issue="incomplete" if isinstance(exc, ResultContentIncomplete) else "",
                 )
         finally:
             # 让本任务还在途的回调（status_provider / 迭代器）立即抛 TaskCancelled，
@@ -493,7 +496,7 @@ class StudioRunner:
         self, task_id: str, status: str, terminal_payload: dict[str, Any], *,
         result: str = "", result_partial: str = "", detail: str = "", error: str = "",
         usage_override: dict[str, Any] | None = None,
-        trace_messages: list[dict[str, Any]] | None = None,
+        trace_messages: list[dict[str, Any]] | None = None, result_issue: str = "",
     ) -> None:
         current_task = self.store.get_task(task_id)
         if current_task and current_task.get(STUDIO_OUTPUT_CONTRACT_VERSION_KEY):
@@ -546,5 +549,6 @@ class StudioRunner:
             performance=performance,
             finish_reason=finish_reason,
             finished_at=now_ms(),
-            **{STUDIO_TRACE_MESSAGES_KEY: trace_messages or []},
+            **{STUDIO_TRACE_MESSAGES_KEY: trace_messages or [],
+               STUDIO_RESULT_ISSUE_KEY: result_issue},
         )

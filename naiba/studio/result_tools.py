@@ -8,7 +8,7 @@ from typing import Any
 from naiba.core.contracts import STUDIO_RESULT_ARTIFACT_KEY, STUDIO_TRACE_MESSAGES_KEY
 from naiba.core.exceptions import TaskCancelled
 from naiba.skills.agent import SkillAgent
-from naiba.studio.artifacts import ResultArtifactError
+from naiba.studio.artifacts import ResultContentIncomplete, ResultStorageError
 from naiba.tools.registry import ToolRegistry, ToolSpec
 
 RESULT_TOOLS = ("write_result_txt", "complete_result_txt")
@@ -53,6 +53,7 @@ class TxtToolContext:
         self.finish_reason = ""
         self.view_prefix = 0
         self.acknowledged_calls: set[str] = set()
+        self.storage_error: ResultStorageError | None = None
 
     def _check(self) -> None:
         if self.cancel is not None and self.cancel.is_set():
@@ -103,11 +104,16 @@ class TxtToolContext:
                 self.store.update_task(self.task["id"], **{STUDIO_RESULT_ARTIFACT_KEY: summary})
                 return True, json.dumps(summary, ensure_ascii=False)
             return False, "此任务没有该结果工具"
-        except (ResultArtifactError, TypeError, ValueError) as exc:
+        except (ResultStorageError, OSError) as exc:
+            self.storage_error = ResultStorageError(str(exc))
+            return False, str(exc)
+        except (TypeError, ValueError) as exc:
             return False, str(exc)
 
     def completed_text(self) -> str | None:
         self._check()
+        if self.storage_error is not None:
+            raise self.storage_error
         manifest = self.store.artifacts.manifest(self.task)
         block = manifest["blocks"][self.block_no - 1]
         if not block.get("final"):
@@ -321,7 +327,7 @@ def run_result_agent(app: Any, context: TxtToolContext, profile: dict[str, Any],
             if result is not None:
                 return result
             if run_context.get("partial") or correction == MAX_CORRECTIONS:
-                raise ResultArtifactError("模型未完成TXT写入确认协议，已保留确认片段，可继续未完成内容")
+                raise ResultContentIncomplete("模型未完成TXT写入确认协议，已保留确认片段，可继续未完成内容")
             current_history = [*history, {"role": "user", "content":
                 "上次只返回了普通答复，尚未完成TXT结果协议。请按最新回执写入剩余正文并调用完成工具；不要只回复完成。"}]
     finally:

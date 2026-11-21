@@ -30,6 +30,14 @@ class ResultArtifactError(ValueError):
     """A declared artifact is incomplete, corrupt or belongs to another task."""
 
 
+class ResultStorageError(ResultArtifactError):
+    """A failure writing an artifact, rather than incomplete model content."""
+
+
+class ResultContentIncomplete(ResultArtifactError):
+    """The model stopped without confirming its output; no storage error was detected."""
+
+
 def has_result_contract(task: dict[str, Any]) -> bool:
     raw = task.get("input")
     data = raw if isinstance(raw, dict) else {}
@@ -85,7 +93,7 @@ class ResultArtifacts:
                 os.fsync(handle.fileno())
             os.replace(temp, path)
         except OSError as exc:
-            raise ResultArtifactError("TXT持久写入失败，已确认片段仍保留") from exc
+            raise ResultStorageError("TXT持久写入失败，已确认片段仍保留") from exc
         finally:
             temp.unlink(missing_ok=True)
 

@@ -11,11 +11,16 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 import urllib.error
 from unittest import mock
 
-from naiba.llm.runtime import ERROR_DUMP_FILENAME, EmptyModelStreamError, ModelRuntime
+from naiba import net as net_io
+from naiba.llm.runtime import (
+    BEFORE_REQUEST_SEND_OPTION, NETWORK_SEND_COUNT_KEY, OBSERVE_NETWORK_SENDS_OPTION,
+    ERROR_DUMP_FILENAME, EmptyModelStreamError, ModelRuntime, RequestSendRejected,
+)
 
 PROFILE = {
     "kind": "online",
@@ -130,6 +135,128 @@ class FakeStreamResponse:
 
     def __exit__(self, *args: object) -> bool:
         return False
+
+
+class NetworkSendObservationTests(unittest.TestCase):
+    """Intercept NetIO, not _urlopen_cancelable: exercise the actual dispatch hook."""
+
+    def setUp(self):
+        self.runtime = ModelRuntime()
+        self.options = {"stream": False, "max_tokens": 64, OBSERVE_NETWORK_SENDS_OPTION: True}
+        self.payload = {"choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}]}
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="naiba-send-test-"))
+        self.enterContext(mock.patch.dict(os.environ, {"NAIBA_ERROR_DUMP_DIR": tmp}))
+        self.sleep = self.enterContext(mock.patch("naiba.llm.runtime.time.sleep"))
+
+    def complete(self, **overrides):
+        return self.runtime.complete(PROFILE_GPT, MESSAGES, {**self.options, **overrides})
+
+    def test_counts_each_dispatch_including_failed_transport(self):
+        with mock.patch.object(net_io, "open", side_effect=[
+            urllib.error.URLError("synthetic disconnect"), http_error(503), FakeResponse(self.payload),
+        ]) as opened:
+            self.assertEqual(self.complete(), "pong")
+        self.assertEqual(opened.call_count, 3)
+        self.assertEqual(self.runtime.last_diagnostics[NETWORK_SEND_COUNT_KEY], 3)
+
+    def test_terminal_http_failure_still_counts_dispatch(self):
+        with mock.patch.object(net_io, "open", side_effect=http_error(400, "bad request")) as opened:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
+                self.complete()
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(self.runtime.last_diagnostics[NETWORK_SEND_COUNT_KEY], 1)
+
+    def test_rejection_never_dispatches_or_retries(self):
+        for cancel in (None, threading.Event()):
+            for refusal in (False, OSError("synthetic gate failure")):
+                with self.subTest(worker=cancel is not None, refusal=type(refusal).__name__):
+                    gate = mock.Mock(side_effect=refusal) if isinstance(refusal, Exception) else mock.Mock(return_value=False)
+                    events = []
+                    with mock.patch.object(net_io, "open") as opened:
+                        with self.assertRaises(RequestSendRejected):
+                            self.runtime.complete(PROFILE_GPT, MESSAGES, {
+                                **self.options, BEFORE_REQUEST_SEND_OPTION: gate, "cancel_event": cancel,
+                            }, events.append)
+                    opened.assert_not_called()
+                    gate.assert_called_once_with()
+                    self.assertEqual(self.runtime.last_diagnostics[NETWORK_SEND_COUNT_KEY], 0)
+                    self.assertFalse(any("重试" in e.get("message", "") for e in events))
+        self.sleep.assert_not_called()
+
+    def test_retry_rechecks_gate_and_preserves_already_sent_count(self):
+        gate = mock.Mock(side_effect=[None, False])
+        with mock.patch.object(net_io, "open", side_effect=http_error(503)) as opened:
+            with self.assertRaises(RequestSendRejected):
+                self.complete(**{BEFORE_REQUEST_SEND_OPTION: gate})
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(gate.call_count, 2)
+        self.assertEqual(self.runtime.last_diagnostics[NETWORK_SEND_COUNT_KEY], 1)
+        self.assertEqual(self.sleep.call_count, 1)
+
+    def test_worker_dispatch_publishes_count_to_calling_thread(self):
+        gate = mock.Mock(return_value=None)
+        with mock.patch.object(net_io, "open", return_value=FakeResponse(self.payload)) as opened:
+            self.assertEqual(self.complete(cancel_event=threading.Event(),
+                                           **{BEFORE_REQUEST_SEND_OPTION: gate}), "pong")
+        opened.assert_called_once()
+        gate.assert_called_once_with()
+        self.assertEqual(self.runtime.last_diagnostics[NETWORK_SEND_COUNT_KEY], 1)
+
+    def test_observation_does_not_change_normal_request_bytes(self):
+        with mock.patch.object(net_io, "open", side_effect=lambda *a, **kw: FakeResponse(self.payload)) as opened:
+            self.complete()
+            observed_request = opened.call_args.args[0]
+            self.assertEqual(self.runtime.last_diagnostics[NETWORK_SEND_COUNT_KEY], 1)
+            self.runtime.complete(PROFILE_GPT, MESSAGES, {"stream": False, "max_tokens": 64})
+            normal_request = opened.call_args.args[0]
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(observed_request.data, normal_request.data)
+        self.assertEqual(observed_request.header_items(), normal_request.header_items())
+        self.assertNotIn(NETWORK_SEND_COUNT_KEY, self.runtime.last_diagnostics)
+        wire = json.loads(normal_request.data)
+        for key in (BEFORE_REQUEST_SEND_OPTION, OBSERVE_NETWORK_SENDS_OPTION, NETWORK_SEND_COUNT_KEY):
+            self.assertNotIn(key, wire)
+
+    def test_pre_dispatch_failure_clears_stale_count_without_faking_zero(self):
+        self.runtime.last_diagnostics = {NETWORK_SEND_COUNT_KEY: 77, "existing": "retained"}
+        with mock.patch.object(net_io, "open") as opened:
+            with self.assertRaises(ValueError):
+                self.runtime.complete({**PROFILE_GPT, "kind": "invalid"}, MESSAGES, self.options)
+        opened.assert_not_called()
+        self.assertEqual(self.runtime.last_diagnostics, {"existing": "retained"})
+
+    def test_cancelled_before_worker_dispatch_does_not_call_gate(self):
+        cancel = threading.Event()
+        cancel.set()
+        gate = mock.Mock(return_value=True)
+        with mock.patch.object(net_io, "open") as opened:
+            with self.assertRaisesRegex(RuntimeError, "任务已取消"):
+                self.complete(cancel_event=cancel, **{BEFORE_REQUEST_SEND_OPTION: gate})
+        opened.assert_not_called()
+        gate.assert_not_called()
+        self.assertNotIn(NETWORK_SEND_COUNT_KEY, self.runtime.last_diagnostics)
+
+    def test_ollama_inline_retry_is_observed_and_gated(self):
+        profile = {"kind": "local", "model": "fixture", "request_format": "ollama",
+                   "base_url": "http://127.0.0.1:1", "reasoning_effort": "high"}
+        first = [json.dumps({"message": {"thinking": "thinking"}, "done": True}).encode()]
+        second = [json.dumps({"message": {"content": "pong"}, "done": True}).encode()]
+        for allow_retry in (True, False):
+            with self.subTest(allow_retry=allow_retry):
+                gate = mock.Mock(side_effect=[True, allow_retry])
+                with mock.patch.object(net_io, "open", side_effect=[
+                    FakeStreamResponse(first), FakeStreamResponse(second),
+                ]) as opened:
+                    options = {"stream": True, BEFORE_REQUEST_SEND_OPTION: gate}
+                    if allow_retry:
+                        self.assertEqual(self.runtime.complete(profile, MESSAGES, options), "pong")
+                    else:
+                        with self.assertRaises(RequestSendRejected):
+                            self.runtime.complete(profile, MESSAGES, options)
+                expected = 2 if allow_retry else 1
+                self.assertEqual(opened.call_count, expected)
+                self.assertEqual(gate.call_count, 2)
+                self.assertEqual(self.runtime.last_diagnostics[NETWORK_SEND_COUNT_KEY], expected)
 
 
 class OnlineRetryTests(unittest.TestCase):

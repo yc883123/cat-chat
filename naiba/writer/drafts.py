@@ -10,7 +10,7 @@ from naiba.writer.writeback import digest, durable_write, json_bytes
 
 
 def save(store: Any, book_id: str, chapter_no: int, *, content: Any,
-         expected_revision: Any = None) -> dict[str, Any]:
+         expected_revision: Any = None, cleanup_after_commit: list[Path] | None = None) -> dict[str, Any]:
     from naiba.writer.store import CHAPTER_CONTENT_MAX_CHARS, WriterConflictError, WriterStoreError
     with store._lock:
         manifest = store._load_manifest(book_id)
@@ -62,11 +62,18 @@ def save(store: Any, book_id: str, chapter_no: int, *, content: Any,
             raise WriterStoreError("草稿或正文写入失败，编辑副本保留，请稍后重试") from exc
         # The immutable chapter version now owns the full text and provenance.
         # Successful transient copies need not accumulate; failed snapshots stay.
-        try:
-            path.unlink(missing_ok=True)
-            meta.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if cleanup_after_commit is None:
+            cleanup((path, meta))
+        else:
+            cleanup_after_commit.extend((path, meta))
         result[WRITER_MANUAL_DRAFT_KEY] = {"id": draft_id, "chars": record["chars"],
                                           "sha256": record["sha256"], "status": "committed"}
         return result
+
+
+def cleanup(paths) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

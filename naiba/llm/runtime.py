@@ -110,6 +110,17 @@ _AGENT_BUFFER_LIMIT = 1024
 # 取值语义见 `ProtocolMixins._online_finish_reason`（"length" = 撞输出上限，"" = 供应商没给）。
 _FINISH_REASON = threading.local()
 
+# Opt-in server-side controls, never serialized into a provider payload.
+# Counts are NetIO dispatches (including transport failures), not upstream
+# receipts, billing requests, or strategy attempts. Absence means unobserved.
+NETWORK_SEND_COUNT_KEY = "network_send_count"
+OBSERVE_NETWORK_SENDS_OPTION = "observe_network_sends"
+BEFORE_REQUEST_SEND_OPTION = "before_request_send"
+
+
+class RequestSendRejected(RuntimeError):
+    """The server-side send gate refused to dispatch a model request."""
+
 
 def _record_finish_reason(value: Any) -> None:
     _FINISH_REASON.value = str(value or "")
@@ -753,6 +764,12 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         options: dict[str, Any],
         status: StatusCallback | None = None,
     ) -> str:
+        # Clear only the new side channel before validation or waiting for the
+        # local lock can fail. Keep existing diagnostics/usage behavior intact.
+        previous_diagnostics = self.last_diagnostics
+        if NETWORK_SEND_COUNT_KEY in previous_diagnostics:
+            del previous_diagnostics[NETWORK_SEND_COUNT_KEY]
+            self.last_diagnostics = previous_diagnostics
         # 按 profile.kind 路由，禁止在线/本地跨模式 fallback。
         kind = str(profile.get("kind") or "").strip().lower()
         request_format = str(profile.get("request_format") or "openai_chat").strip().lower()
@@ -890,6 +907,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         timeout: float,
         cancel_event: threading.Event | None = None,
         opener: urllib.request.OpenerDirector | None = None,
+        *,
+        on_send: Callable[[], None] | None = None,
     ):
         """Run the network request in a daemon worker so a cancelled vision call returns promptly.
 
@@ -901,8 +920,13 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             open_function = opener.open
         else:
             open_function = lambda req, **kw: net_io.open(req, **kw)
-        if cancel_event is None:
+        def dispatch():
+            if on_send is not None:
+                on_send()
             return open_function(request, timeout=timeout)
+
+        if cancel_event is None:
+            return dispatch()
         if cancel_event.is_set():
             raise RuntimeError("任务已取消")
         done = threading.Event()
@@ -911,7 +935,9 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
 
         def worker() -> None:
             try:
-                response = open_function(request, timeout=timeout)
+                if on_send is not None and (abandoned.is_set() or cancel_event.is_set()):
+                    raise RuntimeError("任务已取消")
+                response = dispatch()
                 if abandoned.is_set():
                     # Main thread already gave up (user cancelled). Close the
                     # fresh connection right away so sockets are not leaked over
@@ -1689,6 +1715,34 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 "（原始图片仍保留在会话记录中）"
                             ),
                         })
+        before_request_send = options.get(BEFORE_REQUEST_SEND_OPTION)
+        observe_sends = (options.get(OBSERVE_NETWORK_SENDS_OPTION) is True
+                         or before_request_send is not None)
+
+        def observe_send() -> None:
+            # Count at dispatch, including failed transports. NetIO never
+            # auto-retries inference POSTs; this is not an upstream receipt.
+            if before_request_send is not None:
+                try:
+                    allowed = before_request_send()
+                except Exception:
+                    allowed = False
+                if allowed is False:
+                    if diagnostics is not None:
+                        diagnostics.setdefault(NETWORK_SEND_COUNT_KEY, 0)
+                    raise RequestSendRejected("已阻止发送模型请求")
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("任务已取消")
+            if diagnostics is not None:
+                diagnostics[NETWORK_SEND_COUNT_KEY] = diagnostics.get(NETWORK_SEND_COUNT_KEY, 0) + 1
+
+        def open_request(target: urllib.request.Request):
+            if observe_sends:
+                return ModelRuntime._urlopen_cancelable(
+                    target, request_timeout, cancel_event, on_send=observe_send,
+                )
+            return ModelRuntime._urlopen_cancelable(target, request_timeout, cancel_event)
+
         for attempt in range(attempts):
             request_started = time.perf_counter()
             # 每次尝试重置进度袋：总时长超时后要靠它区分「全程只有推理」与「正文已出来」。
@@ -1698,7 +1752,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             if raw_content is not None:
                 raw_content.reset()
             try:
-                with ModelRuntime._urlopen_cancelable(request, request_timeout, cancel_event) as response:
+                with open_request(request) as response:
                     if stream_enabled and response_format == "ollama":
                         try:
                             streamed = ModelRuntime._read_ollama_stream(
@@ -1734,9 +1788,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 )
                                 if raw_content is not None:
                                     raw_content.reset()
-                                with ModelRuntime._urlopen_cancelable(
-                                    retry_request, request_timeout, cancel_event
-                                ) as retry_response:
+                                with open_request(retry_request) as retry_response:
                                     streamed = ModelRuntime._read_ollama_stream(
                                         ModelRuntime._iter_stream_lines(
                                             retry_response, cancel_event, first_byte_timeout, stream_total_timeout

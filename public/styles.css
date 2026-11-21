@@ -6246,6 +6246,32 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .writer-pill.wait { border-color: rgba(232, 147, 12, .35); background: var(--warning-soft); color: var(--warning); }
 .writer-pill.bad { border-color: rgba(220, 74, 70, .35); background: var(--danger-soft); color: var(--danger); }
 .writer-pipeline-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.writer-pipeline-pending {
+  display: grid; gap: 9px; min-width: 0; padding: 10px;
+  border: 1px solid rgba(232, 147, 12, .4); border-radius: var(--r-sm);
+  background: var(--warning-soft); overflow-wrap: anywhere;
+}
+.writer-pipeline-pending[hidden], .writer-pipeline-pending [hidden], #writerPipelineHistory[hidden] { display: none; }
+.writer-pipeline-pending fieldset {
+  min-width: 0; margin: 0; padding: 8px; border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+}
+.writer-pipeline-pending :is(legend, summary) { font-size: 12px; font-weight: 600; }
+.writer-pipeline-pending summary { cursor: pointer; }
+.writer-pipeline-pending :is(input:not([type="checkbox"]), select, textarea) { width: 100%; min-width: 0; box-sizing: border-box; }
+.writer-pipeline-pending textarea { resize: vertical; font: inherit; line-height: 1.55; }
+.writer-pipeline-fields, .writer-pipeline-rows, .writer-pipeline-skip { display: grid; gap: 8px; }
+.writer-pipeline-fields > button { justify-self: start; }
+.writer-pipeline-rows fieldset { display: grid; gap: 6px; }
+.writer-pipeline-rows fieldset > button { justify-self: start; }
+.writer-pipeline-skip { padding: 8px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); }
+.writer-pipeline-confirm { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.writer-pipeline-decision-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.writer-pipeline-decision-actions .control-button { flex: 1 1 105px; white-space: normal; }
+#writerPipelineDecisionSupplement { margin-top: 8px; }
+#writerPipelineMissingList, .writer-pipeline-history { margin: 4px 0 0; padding-inline-start: 20px; font-size: 12px; }
+.writer-pipeline-history li { margin-bottom: 5px; overflow-wrap: anywhere; }
+.writer-pipeline-history small { display: block; color: var(--muted); }
+#studioPageWriter .writer-needs-decision { color: var(--warning); background: var(--warning-soft); }
 .writer-stream {
   margin: 0; padding: 8px 9px; max-height: 180px; overflow-y: auto;
   border: 1px dashed var(--violet-line); border-radius: var(--r-sm);
@@ -7521,6 +7547,8 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="medium"] :is(.novel-columns, .writer-columns) { grid-template-columns: 220px minmax(0, 1fr); }
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="medium"] :is(.novel-preview, .writer-notes) { position: absolute; z-index: 4; inset: 0 0 0 auto; width: min(380px, 70%); box-sizing: border-box; border-left: 1px solid var(--line-strong); box-shadow: var(--shadow-3); }
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="medium"] :is(.wb-book-aside, .wb-book-aside-close) { display: inline-flex; }
+#studioPageWriter[data-wb-size="narrow"] #writerAsideBtn.writer-needs-decision,
+#studioPageWriter[data-wb-size="narrow"] #writerAsideClose { display: inline-flex; }
 :is(#studioPageNovel, #studioPageWriter):not([data-wb-size="wide"]) :is(.novel-page-head, .writer-page-head) { flex-wrap: wrap; padding: 8px 12px; }
 :is(#studioPageNovel, #studioPageWriter):not([data-wb-size="wide"]) :is(.novel-stagebar, .writer-stagebar) { order: 4; flex: 1 0 100%; }
 :is(#studioPageNovel, #studioPageWriter):not([data-wb-size="wide"]) :is(.novel-stage, .writer-stage) { flex: 1 0 auto; }

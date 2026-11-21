@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.6.1-beta
-  RELEASE_TAG: v4.6.1-beta
+  RELEASE_VERSION: 4.7.0-beta
+  RELEASE_TAG: v4.7.0-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.6.1-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.7.0-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.6.1-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.7.0-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.6.1 Beta release
+      - name: Publish 4.7.0 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.6.1 Beta
+          name: Cat Chat 4.7.0 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,10 +193,12 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.6.1 Beta：当前能力改中文清单，工具集入口与单独授权折叠
-            当前能力：去掉「首轮已固化」状态行和分类标题，工具名改成中文简写（读文件、读小说、看视频、提交造梦机生成等）；新增「能做 / 不能做」两段，不能做按全量工具目录减本会话能力算；还没发消息的会话按当前 Agent 配置默认显示，不再只给空态。
-            编辑工具集：先弹「工具改动什么时候生效」提示，确认后直接落在当前 Agent 的「工具集」页签；提示写明已发消息的会话在首条消息时已固定，想马上用新工具要分支对话并选「更换 Agent」。
-            造梦机手机窄屏：分档条改为独占页头整行，320 宽四档也全部露出，不再靠横向滚动看「结果」；状态栏位置不变，761px 以上布局不动。
-            工具集单独授权：移入工具列表的滚动区，并改成默认收起的折叠行，样式与下方工具分组一致；修掉 8 张卡把工具列表挤成 0 高、滚不到其他工具的问题，折叠行右侧实时显示已选数量。
-            验证：全量单测 5127 项通过（1 项按环境跳过）；前端语法、ESM/TDZ、发版守门与桌面/375px 浏览器冒烟通过。
-            Cat Chat 4.6.1 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            Cat Chat 4.7.0 Beta：织书台人工接管、结构化兼容与摘要稳定性修复
+            织书台结果兼容：支持题材、书名、简介、角色、章节和段落的明确字段别名与白名单包装；不猜测未知字段，不把子类当作大类。作品系统提示词作为唯一 system 级创作规则，阶段要求放在本轮输入，运行中禁止切换输出模式。
+            织书台人工接管：空结果、缺字段、数量不足、格式不识别和截断结果进入持久的「待你处理」。可重试当前步骤、编辑补充、接受可用部分或填写原因跳过；操作前显示缺口与后果，保留前序成果，刷新或重启后可继续处理。
+            正文与状态：未完成正文不自动发布为完整版本；人工补完后保存为人工版本，再提取章末状态。跳过正文不会生成该稿状态，状态失败或跳过不删除已保存正文。决策接口校验步骤、尝试、修订号和请求键，重复提交不重复写正文或启动下一步。
+            新建诊断与结果分类：区分「作品创建失败」和「已创建但打开失败」，后者保留作品编号；区分模型未完成 TXT 确认与持久写入故障，不把磁盘错误当成可直接接受的正文。
+            模型设置：上下文与输出上限按当前表单保存，清空不被目录建议自动回填；目录建议单独显示，只有主动采用才填入。1–1,048,576 是本地输入校验范围，不代表供应商真实能力。
+            自动整理：隐藏摘要返回工具调用时不执行，最多换一次纯文本指令恢复，失败保留原历史；摘要尝试和真实网络派发分开记录，包含网络重试且不混入普通聊天用量。
+            验证与边界：本地单元回归、前端静态检查及织书台桌面/375px 人工接管专项已验证，使用隔离数据和假模型。未做真实供应商付费探针；本版不包含 GOAL 试验功能。
+            Cat Chat 4.7.0 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

@@ -20,6 +20,7 @@
   "test_core_fsutil",
   "test_file_action_bridge",
   "test_folder_index",
+  "test_long_run_compaction_pressure",
   "test_gslh_presets",
   "test_moss_presets",
   "test_creative_presets",

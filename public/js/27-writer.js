@@ -10,7 +10,7 @@
 // - 从 01-core / 07-models-agents / 22-studio 取公共能力，22 不反向 import 本文件，无循环依赖。
 // ============================================================
 
-import { $, api, applyModelSkinFor, localFileUrl, onProvidersChanged, randomUuid, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, copyText, localFileUrl, onProvidersChanged, randomUuid, state, toast } from "./01-core.js";
 import { loadModelCatalog } from "./07-models-agents.js";
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
@@ -609,7 +609,10 @@ function renderSide() {
   for (const side of document.querySelectorAll("[data-writer-side]")) {
     side.hidden = side.dataset.writerSide !== stage;
   }
-  if (stage === "setup") renderSetupVersions();
+  if (stage === "setup") {
+    renderSetupVersions();
+    renderFreeformOutputs();
+  }
   if (stage === "outline") renderSetupSummary();
   if (stage === "chapter") renderChapterOutlineSummary();
 }
@@ -633,6 +636,75 @@ function renderSetupVersions() {
     item.append(title, meta);
     return item;
   }));
+}
+
+// ---- 自由文本输出（非 JSON 模式的原文存档）：查看 / 复制 / 填入表单 ----
+
+// 只有世界观、书名、简介三个文本字段给「填入表单」；题材大类和角色卡是
+// 结构化表单，从散文里自动映射等于替用户猜，只留复制。
+const WRITER_FREEFORM_ADOPT = {
+  world: ["writerWorldview", "世界观"],
+  title: ["writerTitle", "书名"],
+  blurb: ["writerBlurb", "简介"],
+};
+
+function renderFreeformOutputs() {
+  const list = $("#writerFreeformList");
+  const group = $("#writerFreeformGroup");
+  if (!list || !group) return;
+  const rows = Array.isArray(writer.setup?.freeform_outputs) ? writer.setup.freeform_outputs : [];
+  group.hidden = !writer.bookId || !rows.length;
+  list.replaceChildren(...rows.slice().reverse().map(freeformRow));
+}
+
+function freeformRow(row) {
+  const text = String(row?.text || "");
+  const node = document.createElement("details");
+  node.className = "writer-freeform-row";
+  const summary = document.createElement("summary");
+  const label = document.createElement("b");
+  label.textContent = String(row?.label || row?.step || "原文");
+  const meta = document.createElement("small");
+  meta.textContent = `${fmtTime(row?.updated_at)} · ${fmtChars(text.length)} 字`;
+  const actions = document.createElement("span");
+  actions.className = "writer-freeform-actions";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "control-button tiny";
+  copy.textContent = "复制";
+  copy.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await copyText(text);
+    toast("已复制原文");
+  });
+  actions.append(copy);
+  const adopt = WRITER_FREEFORM_ADOPT[String(row?.step || "")];
+  if (adopt) {
+    const fill = document.createElement("button");
+    fill.type = "button";
+    fill.className = "control-button tiny";
+    fill.textContent = `填入${adopt[1]}表单`;
+    fill.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const input = $(`#${adopt[0]}`);
+      if (!input) return;
+      if (input.value.trim() && input.value.trim() !== text.trim()
+        && !window.confirm(`${adopt[1]}表单已有内容，替换吗？`)) return;
+      input.value = text;
+      writer.setupDirty = true;
+      scheduleDraftSave();
+      toast(`${adopt[1]}已填入表单，保存后生效`);
+    });
+    actions.append(fill);
+  }
+  summary.append(label, meta, actions);
+  const body = document.createElement("div");
+  body.className = "writer-freeform-text";
+  body.textContent = text;
+  node.append(summary, body);
+  return node;
 }
 
 function summaryLine(label, value) {
@@ -1609,7 +1681,7 @@ function renderPlan() {
   modeTitle.textContent = "输出模式";
   const modeText = document.createElement("p");
   modeText.textContent = writer.outputMode === "freeform"
-    ? "自由文本：本阶段结果保存为原文，不自动填入结构化字段。"
+    ? "自由文本：本阶段结果保存为原文，不自动填入结构化字段；设定页底部可查看与复制，拆章会停下来等你确认成章节。"
     : "结构化 JSON：本阶段结果按内置字段严格校验。";
   modeCard.append(modeTitle, modeText);
   blocks.unshift(modeCard);
@@ -1619,7 +1691,7 @@ function renderPlan() {
   protocolTitle.textContent = "阶段要求（内置，只读）";
   const protocolText = document.createElement("p");
   protocolText.textContent = writer.outputMode === "freeform"
-    ? "模型可自由输出自然文本，题材、简介、分类、角色和章节不会自动整理。"
+    ? "模型可自由输出自然文本，题材、简介、分类和角色不会自动整理；拆章结果需确认登记后才进章节目录。"
     : "当前阶段的字段、类型和数量由程序内置，结果会严格校验。";
   protocolCard.append(protocolTitle, protocolText);
   blocks.push(kv);

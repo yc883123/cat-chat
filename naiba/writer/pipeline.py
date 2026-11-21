@@ -887,7 +887,8 @@ class WriterPipelineManager:
     @staticmethod
     def _decision_editor(step: str, snapshot: dict[str, Any]) -> str:
         if snapshot.get(WRITER_OUTPUT_MODE_KEY) == "freeform":
-            return "text"
+            # 自由文本拆章同样走章节行编辑器：原文要经用户确认成章节才进目录。
+            return "chapters" if step == "split" else "text"
         return {"genre": "genre", "title": "list", "blurb": "list", "segs": "list",
                 "chars": "characters", "split": "chapters", "outline": "chapters",
                 "state": "state"}.get(step, "text")
@@ -1057,13 +1058,22 @@ class WriterPipelineManager:
                     record["attempt"] += 1
                     return
                 next_index = record["step_index"] + 1
+                write_id = f"writer-decision:{record['id']}:{pending['attempt']}:{pending['step_index']}"
+                if (step == "split" and action in ("supplement", "skip")
+                        and str((record.get("request_snapshot") or {}).get(WRITER_OUTPUT_MODE_KEY)
+                                or "json") == "freeform"
+                        and str(pending.get("raw") or "").strip()):
+                    # 自由文本拆章的原文先归档进「自由文本输出」，登记/跳过都不丢原文；
+                    # 重试不归档（旧稿随重试作废）。此处先行 bump 设定版本，
+                    # base_revision 由末尾 _advance_record 统一刷新。
+                    self._save_freeform_output(book_id, record, step, str(pending["raw"]).strip(),
+                                               write_id, kind="generated")
                 if action == "skip":
                     if step == "segs":
                         record.setdefault("step_outputs", {})["segs"] = []
                     elif step == "draft" and record["steps"][next_index:next_index + 1] == ["state"]:
                         next_index += 1
                 else:
-                    write_id = f"writer-decision:{record['id']}:{pending['attempt']}:{pending['step_index']}"
                     self._apply_step_output(book_id, record, step, output, write_id, kind="manual",
                                             cleanup=cleanup)
                 self._advance_record(book_id, record, step, next_index)
@@ -1194,9 +1204,8 @@ class WriterPipelineManager:
                                           counts=exc.counts, accepted=exc.accepted) from exc
             raise
         if truncated:
-            editor = self._decision_editor(step, snapshot)
             raise prompts.ContentIssue("输出在中途被截断，请补充或重试", category="truncated",
-                                      raw=result, partial=output if editor == "text" else None)
+                                      raw=result, partial=output)
         return output
 
     def _parse_step_output_inner(self, step: str, result: str, snapshot: dict[str, Any],
@@ -1229,7 +1238,8 @@ class WriterPipelineManager:
             # 每步只拆自己那一批：from_no/want_count 按步切，不是快照里的总任务。
             from_no, want_count = self._split_slice(snapshot, step_index)
             if output_mode == "freeform":
-                return prompts.parse_freeform(result)
+                # 自由文本不直接收尾：原文转待处理，确认成章节行后才落目录。
+                raise prompts.confirm_freeform_split(result, from_no=from_no, want_count=want_count)
             return prompts.parse_split(result, from_no=from_no, want_count=want_count, require_count=True)
         if step == "segs":
             if output_mode == "freeform":
@@ -1387,7 +1397,10 @@ class WriterPipelineManager:
             )
             return
         if step == "split":
-            if str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform":
+            if (str(snapshot.get(WRITER_OUTPUT_MODE_KEY) or "json") == "freeform"
+                    and not isinstance(output, list)):
+                # 自由文本原始文字只存档（防御路径：确认链路上生成结果会先转待处理）；
+                # 用户确认后的章节行（list）仍要落目录。
                 self._save_freeform_output(book_id, record, step, str(output), task_id, kind=kind)
                 return
             self.store.append_chapters(

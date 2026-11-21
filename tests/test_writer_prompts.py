@@ -279,6 +279,88 @@ class ContentIssueTests(unittest.TestCase):
         self.assertEqual(empty.category, "empty")
         self.assertIsNone(empty.accepted)
 
+    def test_split_invalid_json_is_rescued_not_discarded(self):
+        """拆章非法 JSON：语法修得好的直接过；修不好的打捞进编辑器，不整批丢弃。"""
+        chapters = [{"title": f"第{i}章", "beat": f"梗概{i}", "hook": f"钩{i}"} for i in range(1, 11)]
+        # 表格外带解释文字的完整拆章：语法修复后走原校验，直接成功。
+        raw = ("好的，以下是拆章结果：\n```json\n"
+               + json.dumps({"chapters": chapters}, ensure_ascii=False)
+               + "\n```\n以上就是全部章节。")
+        rows = prompts.parse_split(raw, from_no=1, want_count=10, require_count=True)
+        self.assertEqual([row["title"] for row in rows], [f"第{i}章" for i in range(1, 11)])
+        self.assertEqual([row["no"] for row in rows], list(range(1, 11)))
+
+        # 输出在最后一章后被截断并带尾逗号：收口抢救出 7 章，按不足处理（可接受）。
+        broken = json.dumps({"chapters": chapters[:7]}, ensure_ascii=False)[:-1] + ", "
+        issue = self.issue_for(prompts.parse_split, broken, from_no=1, want_count=10, require_count=True)
+        self.assertEqual([row["title"] for row in issue.accepted], [f"第{i}章" for i in range(1, 8)])
+        self.assertEqual(issue.counts, {"actual": 7, "target": 10})
+        self.assertIn("还缺 3 章有标题的内容", issue.missing)
+
+        # 截断停在最后一个章的字符串中间：回到上一个完整章收口，抢救出前 7 章。
+        torn = json.dumps({"chapters": chapters[:8]}, ensure_ascii=False)
+        torn = torn[:torn.rindex("钩8")] + "钩"
+        issue = self.issue_for(prompts.parse_split, torn, from_no=1, want_count=10, require_count=True)
+        self.assertEqual(issue.counts, {"actual": 7, "target": 10})
+
+        # 字符串值里夹裸换行：转义修复后直接成功。
+        rawline = '{"chapters":[{"title":"第1章","beat":"第一行\n第二行"}]}'
+        rows = prompts.parse_split(rawline, from_no=1, want_count=1, require_count=True)
+        self.assertEqual(rows[0]["beat"], "第一行\n第二行")
+
+        # 彻底修不好但每行是完整的章对象（模型没写数组括号）：打捞进编辑器，
+        # 不给「接受」——坏 JSON 里捞出的内容必须经用户检查后补充提交。
+        raw = "\n".join(json.dumps(row, ensure_ascii=False) for row in chapters[:10])
+        issue = self.issue_for(prompts.parse_split, raw, from_no=1, want_count=10, require_count=True)
+        self.assertEqual(issue.category, "unrecognized_format")
+        self.assertEqual([row["title"] for row in issue.partial], [f"第{i}章" for i in range(1, 11)])
+        self.assertEqual(issue.counts, {"actual": 10, "target": 10})
+        self.assertIsNone(issue.accepted)
+        self.assertNotIn("accept", issue.available_actions)
+        self.assertIn("已从原文找回 10 章", str(issue))
+
+        # 连打捞都捞不到：维持原报错，不猜。
+        issue = self.issue_for(prompts.parse_split, "这不是 JSON，就是一段话。",
+                               from_no=1, want_count=10, require_count=True)
+        self.assertEqual(issue.category, "unrecognized_format")
+        self.assertIsNone(issue.partial)
+        # 逐章大纲走同一套抢救；严格合法 JSON 的行为不变。
+        issue = self.issue_for(prompts.parse_outline, raw, wanted=10)
+        self.assertEqual([row["title"] for row in issue.partial], [f"第{i}章" for i in range(1, 11)])
+        self.assertEqual(prompts.parse_split(
+            json.dumps({"chapters": chapters}), from_no=1, want_count=10, require_count=True),
+            [{"no": i, **row} for i, row in enumerate(chapters, 1)])
+
+    def test_freeform_split_confirm_prefills_only_heading_lines(self):
+        """自由文本拆章：按「第N章」行预填候选，其余写法不猜；候选不给直接接受。"""
+        # 阿拉伯/中文数字、行内带标题：预填标题行；简述与钩子一律留空。
+        raw = ("本批章节安排如下：\n"
+               "第1章 出海\n这一章写主角出海。\n"
+               "第二章 旧船票\n"
+               "第 3 章 不算（「第」和「3」之间有空格，不是严格行首格式）\n"
+               "第三章\n"
+               "普通叙述行不猜。")
+        candidates = prompts.prefill_split_candidates(raw)
+        self.assertEqual([row["title"] for row in candidates], ["出海", "旧船票", "第三章"])
+        self.assertTrue(all(row["beat"] == "" and row["hook"] == "" for row in candidates))
+
+        # 确认 issue：候选行进 partial（编辑器预填），没有 accept，数量给出实际/目标。
+        issue = prompts.confirm_freeform_split(raw, from_no=1, want_count=10)
+        self.assertEqual(issue.category, "freeform_confirm")
+        self.assertEqual(issue.partial, candidates)
+        self.assertEqual(issue.counts, {"actual": 3, "target": 10})
+        self.assertIsNone(issue.accepted)
+        self.assertNotIn("accept", issue.available_actions)
+        self.assertEqual(issue.available_actions, ["retry", "supplement", "skip"])
+        # 原文完整保留供用户对照。
+        self.assertIn("普通叙述行不猜。", issue.raw)
+
+        # 识别不到任何行：partial 为 None，原文仍在，交用户手动整理。
+        issue = prompts.confirm_freeform_split("就是一段话，没有分章行。", from_no=1, want_count=5)
+        self.assertEqual(issue.category, "freeform_confirm")
+        self.assertIsNone(issue.partial)
+        self.assertEqual(issue.counts, {"actual": 0, "target": 5})
+
     def test_segments_one_point_is_editable_and_can_be_accepted(self):
         point = "甲" * (prompts.SEG_POINT_CHARS + 2)
         raw = json.dumps({"segments": [point]})

@@ -30,6 +30,21 @@ from naiba.writer.store import WriterStore
 
 
 class Fixture:
+    # 第一本作品带一份自由文本输出存档（非 JSON 模式产物），供出口区块验收；
+    # 第二本不带，验收空态隐藏。
+    FREEFORM_SEED = [
+        {'step': 'world', 'label': '世界观', 'text': '旧港常年起雾，码头尽头的灯塔二十年前就熄了。',
+         'task_id': 't-world', 'updated_at': 1763600000000},
+        {'step': 'title', 'label': '书名', 'text': '雾港来信',
+         'task_id': 't-title', 'updated_at': 1763600001000},
+        {'step': 'blurb', 'label': '简介', 'text': '一封从雾里寄来的信，把修船工拽回二十年前的沉船之夜。',
+         'task_id': 't-blurb', 'updated_at': 1763600002000},
+        {'step': 'genre', 'label': '题材', 'text': '偏悬疑氛围的都市怪谈，重情绪轻设定。',
+         'task_id': 't-genre', 'updated_at': 1763600003000},
+        {'step': 'split', 'label': '拆章', 'text': '第1章 敲门\n雾夜里有人敲响了船屋的门。\n第2章 灯塔\n她决定去灯塔看个究竟。',
+         'task_id': 't-split', 'updated_at': 1763600004000},
+    ]
+
     def __init__(self, root, *, outline_only=False, decisions=False):
         self.service = object.__new__(WriterService)
         self.service.store = WriterStore(root)
@@ -50,8 +65,11 @@ class Fixture:
         self.receipts = {}
         self.pipeline_sequence = 0
         self.last_book = None
-        for title in ('离线正文验收', '第二本隔离作品'):
-            book = self.service.store.create_book(title=title, setup={'title': title, 'idea': '雨夜，港口传来敲门声。'})
+        for index, title in enumerate(('离线正文验收', '第二本隔离作品')):
+            setup = {'title': title, 'idea': '雨夜，港口传来敲门声。'}
+            if index == 0:
+                setup['freeform_outputs'] = copy.deepcopy(self.FREEFORM_SEED)
+            book = self.service.store.create_book(title=title, setup=setup)
             bid = book['id']
             self.book_ids.append(bid)
             self.seed_chapters(bid, outline_only=outline_only)
@@ -156,6 +174,7 @@ STUB = r'''
 export const $ = (selector) => document.querySelector(selector);
 export const state = {bootstrap:{model_profiles:[{model_key:'offline:fixture',name:'离线替身（不执行）',model:'offline-model'}],default_model_key:'offline:fixture'}};
 export function toast(text) { document.querySelector('#fixtureMessage').textContent = text; }
+export async function copyText(text) { document.querySelector('#fixtureMessage').dataset.copied = text; }
 export function onProvidersChanged() {}
 export function randomUuid() { return crypto.randomUUID(); }
 export async function loadModelCatalog() { return ['offline-model']; }

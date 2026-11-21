@@ -425,6 +425,7 @@ verify/claude-cache-diagnostic/*
 !verify/_serve_writer_draft_ui.py
 !verify/writer_draft_offline_test.cjs
 !verify/writer_decision_smoke.cjs
+!verify/writer_freeform_smoke.cjs
 !verify/body_draft_offline_test.cjs
 !verify/body_draft_workbench_test.cjs
 !verify/body_draft_smoke.cjs

@@ -68,6 +68,7 @@ KEEP = {
     "mcp_connectors_smoke.cjs",
     # 织书台（原创写作）前端冒烟：第五页接入、三阶段、模板/导入导出、手机三档（隔离实例）
     "writer_ui_smoke.cjs", "_serve_writer_draft_ui.py", "writer_draft_offline_test.cjs", "writer_decision_smoke.cjs",
+    "writer_freeform_smoke.cjs",
     "writer_novel_import_smoke.cjs", "novel_writer_mobile_smoke.cjs",
     "body_draft_offline_test.cjs", "body_draft_workbench_test.cjs", "body_draft_smoke.cjs",
     "conversation_race_offline_test.cjs", "conversation_navigation_inflight_test.cjs",

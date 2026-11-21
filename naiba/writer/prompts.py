@@ -661,7 +661,8 @@ def build_split_user(setup: dict[str, Any], *, part_text: str, want_count: int,
     if extra_note.strip():
         parts.append(f"【补充要求】\n{extra_note.strip()[:300]}")
     if output_mode(output_mode_value) == "freeform":
-        parts.append("请直接自由写出本批章节安排，不要 JSON；这些文字不会自动生成章节目录。")
+        parts.append("请直接自由写出本批章节安排，不要 JSON；每章单独起行、以「第N章 标题」开头，"
+                     "生成后需要确认登记才会进章节目录。")
     else:
         parts.append('请输出 JSON：{"chapters":[{"no":%d,"title":"第%d章 …","beat":"…","hook":"…"}]}'
                      % (int(from_no), int(from_no)))
@@ -673,6 +674,49 @@ def parse_split(text: str, *, from_no: int = 1, want_count: int = 1,
     """拆章：按 from_no 连续编号；默认允许干净但数量不足的批次。"""
     return _parse_chapter_rows(text, wanted=want_count, from_no=from_no,
                                what="拆章", require_count=require_count)
+
+
+# 自由文本拆章的候选预填只认「第N章」开头的行：其余写法不猜，留给用户手补。
+_SPLIT_HEADING_RE = re.compile(r"^第[0-9零一二三四五六七八九十百千两]+章")
+SPLIT_FREEFORM_PREFILL_MAX = 60
+
+
+def prefill_split_candidates(text: str) -> list[dict[str, str]]:
+    """从自由文本里按「第N章」行预填候选章节：标题取行内文字，简述/钩子一律留空。
+
+    候选只是编辑器预填，落库必须经用户确认；不识别任何行时返回空表。
+    """
+    rows: list[dict[str, str]] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        match = _SPLIT_HEADING_RE.match(stripped)
+        if not match:
+            continue
+        # 整行只有「第三章」时标题兜底用整行，避免好行被丢掉。
+        title = stripped[match.end():].strip() or stripped
+        rows.append({"title": title[:200], "beat": "", "hook": ""})
+        if len(rows) >= SPLIT_FREEFORM_PREFILL_MAX:
+            break
+    return rows
+
+
+def confirm_freeform_split(text: str, *, from_no: int, want_count: int) -> ContentIssue:
+    """自由文本拆章不直接收尾：原文转待处理，等用户整理成章节行并登记。
+
+    与拆章抢救同一原则：预填的候选行没有「接受」动作，必须走「补充并继续」确认。
+    """
+    raw = str(text or "")
+    candidates = prefill_split_candidates(raw)
+    target = max(1, int(want_count or 1))
+    if candidates:
+        message = f"已按「第N章」行预填 {len(candidates)} 章候选；请核对标题、补齐缺的章后再登记"
+        missing = [f"已预填 {len(candidates)} 章，本批目标 {target} 章；缺的章手动补上"]
+    else:
+        message = "自由文本拆章结果待确认：请按原文整理出章节标题并登记，或跳过本批"
+        missing = ["没有识别到「第N章」开头的行；请对照原文手动整理章节"]
+    return ContentIssue(message, category="freeform_confirm", raw=raw,
+                        partial=candidates or None, missing=missing,
+                        counts={"actual": len(candidates), "target": target})
 
 
 # ---- 正文写作的上下文 ----
@@ -1073,6 +1117,151 @@ def extract_json_payload(text: str) -> Any:
                            raw=raw, category="unrecognized_format") from exc
 
 
+# ---- 非法 JSON 的有界抢救（拆章/逐章大纲）：只修语法，不猜内容 ----
+#
+# 拆章是全流水线单次输出最大的 JSON（一批 20 章、每章带长梗概），最容易因
+# 输出被截断、尾逗号、字符串里夹裸换行或表格外带解释文字而「整批作废」。
+# 这里的修复只处理能唯一确定的语法问题：修好走原有校验，修不好才交人工。
+
+_FENCE_ANY_PATTERN = re.compile(r"```[a-zA-Z0-9_-]*[ \t]*\r?\n(.*?)(?:```|\Z)", re.DOTALL)
+_JSON_CLOSER = {"{": "}", "[": "]"}
+_JSON_CONTROL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
+_SALVAGE_ROW_MAX = 60
+
+
+def _load_strict_json(text: str) -> Any:
+    """与 extract_json_payload 同一套钩子的 json.loads；失败抛 ValueError。"""
+    payload = json.loads(text, object_pairs_hook=_unique_json_object,
+                         parse_float=_finite_json_number, parse_constant=_finite_json_number)
+    _ensure_json_unicode(payload)
+    return payload
+
+
+def _json_candidates(raw: str) -> list[str]:
+    """严格候选失败后的抢救候选：全文修复、围栏内容（含写到一半没闭合的围栏）、
+    去掉前缀解释文字的括号区；按顺序尝试，不从多处来源里挑。"""
+    candidates: list[str] = []
+    stripped = raw.strip()
+    if stripped:
+        candidates.append(stripped)
+    for match in _FENCE_ANY_PATTERN.finditer(raw):
+        body = match.group(1).strip()
+        if body:
+            candidates.append(body)
+    if stripped:
+        for opener in ("{", "["):
+            index = stripped.find(opener)
+            if index > 0:
+                candidates.append(stripped[index:])
+    return candidates
+
+
+def _repair_json_text(text: str) -> str | None:
+    """单遍扫描修复：字符串内裸控制符转义、闭括号前尾逗号去除、截断收口补齐括号。
+
+    顶层结构完整就按完整返回；停在半截就回到最后一个闭合处收口。括号错配
+    这类没法唯一确定的损坏返回 None，不硬猜。
+    """
+    out: list[str] = []
+    stack: list[str] = []
+    checkpoints: list[tuple[int, list[str]]] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            elif char < " ":
+                escape = _JSON_CONTROL_ESCAPES.get(char)
+                out.append(escape if escape is not None else f"\\u{ord(char):04x}")
+                continue
+            out.append(char)
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or _JSON_CLOSER[stack[-1]] != char:
+                return None
+            while out and out[-1] in " \t\r\n":
+                out.pop()
+            if out and out[-1] == ",":
+                out.pop()
+            stack.pop()
+            out.append(char)
+            if not stack:
+                return "".join(out)  # 顶层结构闭合即止，不收后面的解释文字
+            checkpoints.append((len(out), list(stack)))
+            continue
+        out.append(char)
+    if not in_string and not stack:
+        return "".join(out)
+    if not checkpoints:
+        return None
+    cut, open_stack = checkpoints[-1]
+    return "".join(out[:cut]) + "".join(_JSON_CLOSER[bracket] for bracket in reversed(open_stack))
+
+
+def _rescued_json_payload(raw: str) -> Any | None:
+    """严格解析失败后的抢救入口：逐候选先直接读、再修复读；全失败返回 None。"""
+    for candidate in _json_candidates(raw):
+        for text in (candidate, _repair_json_text(candidate)):
+            if not text:
+                continue
+            try:
+                return _load_strict_json(text)
+            except (ValueError, RecursionError):
+                continue
+    return None
+
+
+def _salvage_chapter_rows(raw: str) -> list[dict[str, Any]]:
+    """整段修不好时，按括号配平打捞完整的章对象；只保留带标题/梗概/钩子的行。"""
+    rows: list[dict[str, Any]] = []
+    starts: list[int] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(raw):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            starts.append(index)
+        elif char == "}" and starts:
+            start = starts.pop()
+            piece = raw[start:index + 1]
+            try:
+                payload = _load_strict_json(piece)
+            except (ValueError, RecursionError):
+                repaired = _repair_json_text(piece)
+                if repaired is None:
+                    continue
+                try:
+                    payload = _load_strict_json(repaired)
+                except (ValueError, RecursionError):
+                    continue
+            if isinstance(payload, dict) and any(
+                isinstance(payload.get(key), str) and payload[key].strip()
+                for key in ("title", "beat", "hook")
+            ):
+                rows.append(payload)
+                if len(rows) >= _SALVAGE_ROW_MAX:
+                    break
+    return rows
+
+
 def _extract_step_json(raw: str, *, what: str, missing: list[str],
                        empty_partial: Any, target: int) -> Any:
     """补上阶段信息；只有确认空输出才给可编辑的空模板和实际数量 0。"""
@@ -1159,10 +1348,22 @@ def parse_genre(text: str) -> dict[str, Any]:
     }
 
 
-def _payload_list(raw: str, *, keys: tuple[str, ...], what: str, target: int) -> list[Any]:
-    """只认白名单包装；前面的键明确存在时，不回退到后面的键。"""
+def _payload_list(raw: str, *, keys: tuple[str, ...], what: str, target: int,
+                  rescue: bool = False) -> list[Any]:
+    """只认白名单包装；前面的键明确存在时，不回退到后面的键。
+
+    rescue=True 时严格解析失败先做有界语法抢救（只修格式不猜内容），
+    抢救成功的结果走同一套白名单解包与校验。
+    """
     missing = [f"填写 {keys[0]} 数组"]
-    payload = _extract_step_json(raw, what=what, missing=missing, empty_partial=[], target=target)
+    try:
+        payload = _extract_step_json(raw, what=what, missing=missing, empty_partial=[], target=target)
+    except ContentIssue as exc:
+        if not rescue or exc.category != "unrecognized_format":
+            raise
+        payload = _rescued_json_payload(raw)
+        if payload is None:
+            raise
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
@@ -1271,7 +1472,27 @@ def parse_characters(text: str, *, wanted: int, require_count: bool = True) -> l
 def _parse_chapter_rows(text: str, *, wanted: int, from_no: int, what: str,
                         require_count: bool) -> list[dict[str, Any]]:
     raw = str(text or "")
-    partial = _payload_list(raw, keys=("chapters", "outline"), what=what, target=wanted)
+    try:
+        partial = _payload_list(raw, keys=("chapters", "outline"), what=what, target=wanted,
+                                rescue=True)
+    except ContentIssue as exc:
+        # unrecognized=语法全坏；wrong_shape 且没有任何包装键=模型可能按行连发
+        # 了章对象（修复扫描只会带回第一个）。两种都值得按括号配平打捞一次；
+        # 包装键存在但形状不对的维持原样，交给编辑器展示。
+        if exc.category == "unrecognized_format" or (
+            exc.category == "wrong_shape" and isinstance(exc.partial, dict)
+            and not any(key in exc.partial for key in ("chapters", "outline"))
+        ):
+            salvaged = _salvage_chapter_rows(raw)
+            if salvaged:
+                raise ContentIssue(
+                    f"{what}不是合法 JSON；已从原文找回 {len(salvaged)} 章放入下方编辑器，请检查补齐后再继续",
+                    raw=raw, category="unrecognized_format", partial=salvaged,
+                    missing=["检查找回的章，缺标题的补上标题",
+                             *( [f"还缺 {wanted - len(salvaged)} 章有效内容"]
+                                if len(salvaged) < wanted else [] )],
+                    counts={"actual": len(salvaged), "target": wanted}) from exc
+        raise
     rows, missing_title, invalid_rows = _parse_named_rows(
         partial, required="title", required_max=200, fields=_CHAPTER_FIELDS,
     )

@@ -1035,6 +1035,174 @@ class ChapterAllPipelineTests(PipelineTestCase):
         self.assertEqual(self.app.studio.jobs.tasks[fourth_id]["input"]["writer"]["step"], "draft")
 
 
+class SplitChainTests(PipelineTestCase):
+    """拆章链：非法 JSON 不再整批丢弃——抢救出的章进待处理编辑器（2026-11-21）。"""
+
+    def _prepare_outline(self):
+        self.store.save_setup(self.book_id, content={"idea": "一句话创意"}, kind="manual")
+        # 分部大纲只给拆章喂文字，不落章节索引——章节目录应由拆章本身产出。
+        self.store.save_outline(
+            self.book_id,
+            parts=[{"no": 1, "title": "第一部", "text": "第一部大纲：主角出海寻船。"}],
+            kind="manual")
+
+    def _new_rows(self, count):
+        return [{"title": f"新章{i}", "beat": f"梗概{i}", "hook": f"钩{i}"}
+                for i in range(1, count + 1)]
+
+    def test_invalid_json_salvages_rows_into_pending_and_supplement_continues(self):
+        self._prepare_outline()
+        self.start(kind="split", from_no=1, want_count=3)
+        record = self.current_pipeline()
+        self.assertEqual(record["steps"], ["split"])
+        # 模型没写数组括号、按行连发了章对象：打捞进编辑器，不给「接受」。
+        raw = "\n".join(json.dumps(row, ensure_ascii=False) for row in self._new_rows(3))
+        self.app.studio.jobs.finish(record["current_task_id"], raw)
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        pending = record["pending_user"]
+        self.assertEqual(pending["editor"], "chapters")
+        self.assertEqual(pending["category"], "unrecognized_format")
+        self.assertEqual([row["title"] for row in pending["partial"]], ["新章1", "新章2", "新章3"])
+        self.assertNotIn("accept", pending["available_actions"])
+        # 用户在编辑器里检查后补充提交（不带 no，按批次起点重排），原链收尾。
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(
+            record, "supplement", content={"chapters": pending["partial"]}))
+        self.assertEqual(decided["pipeline"]["status"], "done")
+        manifest = self.store._load_manifest(self.book_id)
+        self.assertEqual([int(no) for no in manifest["chapter_ids"]], [1, 2, 3])
+        self.assertEqual([self.store.get_chapter(self.book_id, no)["title"] for no in (1, 2, 3)],
+                         ["新章1", "新章2", "新章3"])
+
+    def test_truncated_split_keeps_parsed_rows_in_pending(self):
+        self._prepare_outline()
+        self.start(kind="split", from_no=1, want_count=3)
+        task_id = self.current_pipeline()["current_task_id"]
+        # 输出被截断（finish_reason=length）但 JSON 完整：三章保留进编辑器待确认。
+        self.app.studio.jobs.finish(task_id, json.dumps({"chapters": self._new_rows(3)}, ensure_ascii=False),
+                                    finish_reason="length")
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        self.assertEqual(record["pending_user"]["category"], "truncated")
+        self.assertEqual([row["title"] for row in record["pending_user"]["partial"]],
+                         ["新章1", "新章2", "新章3"])
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(
+            record, "supplement", content={"chapters": record["pending_user"]["partial"]}))
+        self.assertEqual(decided["pipeline"]["status"], "done")
+
+
+    def _prepare_freeform(self):
+        """自由文本模式 + 分部大纲：拆章在 freeform 下不再直接落目录。"""
+        self.store.save_output_mode(self.book_id, mode="freeform",
+                                    expected_revision=int(self.book["revision"]))
+        self._prepare_outline()
+
+    def test_freeform_split_pauses_for_confirmation_and_supplement_lands_chapters(self):
+        self._prepare_freeform()
+        self.start(kind="split", from_no=1, want_count=3)
+        record = self.current_pipeline()
+        # 模型按「第N章 标题」分章自由输出（自由文本，不是 JSON）。
+        raw = "本批章节如下：\n第1章 出海\n主角出海寻船。\n第二章 旧船票\n捡到一张多人的合影。\n第3章 船上的陌生人"
+        self.app.studio.jobs.finish(record["current_task_id"], raw)
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        pending = record["pending_user"]
+        self.assertEqual(pending["category"], "freeform_confirm")
+        self.assertEqual(pending["editor"], "chapters")
+        self.assertEqual([row["title"] for row in pending["partial"]], ["出海", "旧船票", "船上的陌生人"])
+        self.assertNotIn("accept", pending["available_actions"])
+        # 用户确认登记：按批次起点重排章号并落目录，原链收尾。
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(
+            record, "supplement", content={"chapters": pending["partial"]}))
+        self.assertEqual(decided["pipeline"]["status"], "done")
+        manifest = self.store._load_manifest(self.book_id)
+        self.assertEqual([int(no) for no in manifest["chapter_ids"]], [1, 2, 3])
+        self.assertEqual([self.store.get_chapter(self.book_id, no)["title"] for no in (1, 2, 3)],
+                         ["出海", "旧船票", "船上的陌生人"])
+        # 原文同时归档进「自由文本输出」，登记后原文不丢。
+        archived = self.store.get_book(self.book_id)["setup"]["freeform_outputs"]
+        self.assertEqual([row["step"] for row in archived], ["split"])
+        self.assertIn("第3章 船上的陌生人", archived[0]["text"])
+
+    def test_freeform_split_without_headings_starts_empty_editor_and_skip_keeps_raw(self):
+        self._prepare_freeform()
+        self.start(kind="split", from_no=1, want_count=3)
+        record = self.current_pipeline()
+        self.app.studio.jobs.finish(record["current_task_id"], "一段没有分章行的自由文字。")
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        pending = record["pending_user"]
+        self.assertEqual(pending["editor"], "chapters")
+        self.assertIsNone(pending["partial"])
+        self.assertEqual(pending["counts"], {"actual": 0, "target": 3})
+        # 跳过：本批章号缺失，原文仍归档。
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(
+            record, "skip", confirmed=True, reason="先不拆章"))
+        self.assertEqual(decided["pipeline"]["status"], "done")
+        self.assertEqual(self.store._load_manifest(self.book_id)["chapter_ids"], [])
+        archived = self.store.get_book(self.book_id)["setup"]["freeform_outputs"]
+        self.assertEqual([row["text"] for row in archived], ["一段没有分章行的自由文字。"])
+
+    def test_freeform_split_batches_pause_each_and_prev_chapters_carry_over(self):
+        self._prepare_freeform()
+        self.start(kind="split", from_no=1, want_count=25)
+        record = self.current_pipeline()
+        self.assertEqual(len(record["steps"]), 2)
+        # 第一批（第 1–20 章）：停下等确认。
+        raw = "\n".join(f"第{i}章 章{i}" for i in range(1, 21))
+        self.app.studio.jobs.finish(record["current_task_id"], raw)
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        self.assertEqual(len(record["pending_user"]["partial"]), 20)
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(
+            record, "supplement", content={"chapters": record["pending_user"]["partial"]},
+            key="writer-decision-batch1"))
+        self.assertEqual(decided["pipeline"]["status"], "running")
+        self.assertEqual(decided["pipeline"]["step_index"], 1)
+        # 第二批任务带着已拆前文衔接；同样停下等确认。
+        record = self.current_pipeline()
+        task = self.last_task()
+        self.assertIn("从第 21 章开始", task["input"]["content"])
+        self.assertIn("第20章 章20", task["input"]["content"])
+        raw = "\n".join(f"第{i}章 续章{i}" for i in range(21, 26))
+        self.app.studio.jobs.finish(task["id"], raw)
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(
+            record, "supplement", content={"chapters": record["pending_user"]["partial"]},
+            key="writer-decision-batch2"))
+        self.assertEqual(decided["pipeline"]["status"], "done")
+        manifest = self.store._load_manifest(self.book_id)
+        self.assertEqual([int(no) for no in manifest["chapter_ids"]], list(range(1, 26)))
+
+    def test_freeform_split_retry_discards_old_draft_and_repauses(self):
+        self._prepare_freeform()
+        self.start(kind="split", from_no=1, want_count=2)
+        record = self.current_pipeline()
+        self.app.studio.jobs.finish(record["current_task_id"], "第1章 初稿")
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        # 重试：旧稿随重试作废（不归档），attempt+1 重新生成本批。
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(record, "retry"))
+        self.assertEqual(decided["pipeline"]["status"], "running")
+        self.assertEqual(decided["pipeline"]["attempt"], 2)
+        self.assertEqual(self.store.get_book(self.book_id)["setup"].get("freeform_outputs"), [])
+        self.assertEqual(self.store._load_manifest(self.book_id)["chapter_ids"], [])
+        task = self.last_task()
+        self.app.studio.jobs.finish(task["id"], "第1章 重写\n第2章 重写二")
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        self.assertEqual([row["title"] for row in record["pending_user"]["partial"]], ["重写", "重写二"])
+
+
 class ContinuationRegressionTests(PipelineTestCase):
     def setUp(self):
         super().setUp()

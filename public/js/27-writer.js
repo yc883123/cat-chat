@@ -2233,10 +2233,14 @@ function renderPipeline() {
   }
   const error = $("#writerPipelineError");
   if (error) {
-    const showError = pipeline.error && !active && !waiting;
+    let raw = String(pipeline.error || "");
+    if (pipeline.status === "stopping" && raw.startsWith("停止尚未确认；已阻止后续步骤")) {
+      // 徽标已经写「停止尚未确认」，这里只补冒号后的真实原因（取消请求失败等），没有就藏。
+      raw = raw.slice("停止尚未确认；已阻止后续步骤".length).replace(/^：/, "").trim();
+    }
+    const showError = (raw && !active && !waiting) || (raw && pipeline.status === "stopping");
     error.hidden = !showError;
     if (showError) {
-      const raw = String(pipeline.error || "");
       error.textContent = raw.includes("已有正文")
         ? `${raw}　要删这些章节（含正文），勾选「允许删除已被移出大纲的章节」后重试；不想删就把它们写回大纲。`
         : raw;

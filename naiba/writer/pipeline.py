@@ -101,6 +101,17 @@ SETUP_STEP_KINDS = tuple(prompts.SETUP_STEPS)
 TERMINAL_STATUSES = {"done", "failed", "cancelled", "interrupted", "conflict"}
 
 TICK_SECONDS = 0.5
+# 停止确认上限（毫秒）：取消进入 stopping 后，超过此时长任务仍未终态，就自动把
+# 流水线收尾为 cancelled，解除作品占用。「取消」绝不能把作品永久锁死（stopping
+# 状态下前端取消/重试/重新生成全部禁用）：任务自身的取消链路（事件置位 → 断流 →
+# 终态）实测亚秒级，60 秒足以覆盖一切合法慢路径；超时只可能来自环境级卡死
+# （存储读失败、进程内死锁等），此时后台任务继续跑到它自己的超时为止，其产物
+# 不会再写回本作品（写回只发生在 status=running 的推进里）。
+WRITER_STOP_CONFIRM_BOUND_MS = 60_000
+# 同一步的瞬时失败自动重试上限：模型这一趟什么都没写出来（空结果）时先自动重打，
+# 用完预算才把「重新生成 / 跳过」的决定交还给用户。口径与贴签匠监督「重打 2 次」
+# 一致；再多的失败基本不是抖动而是模型/线路持续不工作，自动重试只会烧钱。
+WRITER_STEP_AUTO_RETRIES = 2
 DECISION_HISTORY_LIMIT = 128
 DECISION_CONTENT_LIMIT = 384_000
 DECISION_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,80}")
@@ -464,6 +475,8 @@ class WriterPipelineManager:
                     raise WriterPipelineError("当前生成已结束，无需取消")
                 record["status"] = WRITER_PIPELINE_STOPPING if task_id or submitting else "cancelled"
                 record["error"] = "停止尚未确认；已阻止后续步骤" if task_id or submitting else "用户取消"
+                # 兜底计时起点：tick 按它判断 stopping 是否超过了确认上限。
+                record["stop_requested_at"] = int(time.time() * 1000)
 
             updated = self.store.update_pipeline(book_id, str(pipeline["id"]), _cancel,
                                                  expected_attempt=int(pipeline.get("attempt") or 0))
@@ -502,6 +515,7 @@ class WriterPipelineManager:
                 record["status"] = "running"
                 record["error"] = ""
                 record["current_task_id"] = ""
+                record["step_auto_retries"] = 0
                 if rebase:
                     record["base_revision"] = int(manifest.get("revision") or 0)
                     snapshot = dict(record.get("request_snapshot") or {})
@@ -705,6 +719,7 @@ class WriterPipelineManager:
                 if terminal and self._step_key(book_id, record) not in self._submissions:
                     record["status"] = "cancelled"
                     record["error"] = "用户取消；当前任务已结束"
+                    record["stop_requested_at"] = 0
                 else:
                     record["error"] = "停止尚未确认；已阻止后续步骤" + (f"：{error}" if error else "")
 
@@ -728,6 +743,34 @@ class WriterPipelineManager:
         if task_id:
             self._request_stop(book_id, current, task_id)
 
+    def _settle_overdue_stop(self, book_id: str, task_id: str) -> None:
+        """停止确认有界：stopping 超过上限仍未收尾时强制落 cancelled，解除作品占用。
+
+        常规收尾在 `_request_stop`（任务终态即确认）；本方法只接它接不住的两类残留：
+        任务被环境级卡死迟迟不终态，或任务已终态但收尾被迟到的提交句柄挡住。
+        老版本遗留的无计时 stopping 记录按 updated_at 兜底计时，升级后也能自愈。
+        """
+        with self.store._lock:
+            current = self.store.get_active_pipeline(book_id)
+            if not isinstance(current, dict) or current.get("status") != WRITER_PIPELINE_STOPPING:
+                return
+            if str(current.get("current_task_id") or "") != task_id:
+                return
+            requested_at = int(current.get("stop_requested_at") or current.get("updated_at") or 0)
+            attempt = int(current.get("attempt") or 0)
+            pipeline_id = str(current.get("id") or "")
+        if not requested_at or int(time.time() * 1000) - requested_at < WRITER_STOP_CONFIRM_BOUND_MS:
+            return
+
+        def _force(record: dict[str, Any]) -> None:
+            if record.get("status") != WRITER_PIPELINE_STOPPING:
+                return
+            record["status"] = "cancelled"
+            record["error"] = "取消等待超时，已自动结束本次生成；已落盘的未完成 TXT 保留，可重新生成本章"
+            record["stop_requested_at"] = 0
+
+        self.store.update_pipeline(book_id, pipeline_id, _force, expected_attempt=attempt)
+
     def tick(self) -> None:
         """扫全部活动流水线：任务终态则推进；一次 tick 处理完当前所有可推进项。"""
         with self.store._lock:
@@ -747,6 +790,7 @@ class WriterPipelineManager:
                     task_id = str(pipeline.get("current_task_id") or "")
                     if task_id:
                         self._request_stop(book_id, pipeline, task_id)
+                        self._settle_overdue_stop(book_id, task_id)
                     continue
                 if pipeline.get("status") != "running":
                     continue
@@ -799,26 +843,40 @@ class WriterPipelineManager:
         if status != "done":
             if status == "failed" and self._artifact_task(task) and task.get(STUDIO_RESULT_ISSUE_KEY) == "incomplete":
                 reader = getattr(self.app.studio.jobs, "result_text", None)
+                partial = ""
                 if callable(reader):
                     try:
                         partial = reader(task_id, require_final=False)
                     except (ValueError, OSError) as exc:
                         self._fail(book_id, pipeline, f"TXT 结果不可用：{exc}")
                         return
+                if partial:
                     issue = prompts.ContentIssue(
-                        "模型没有确认 TXT 写完，已保留可核对的片段" if partial else "模型没有写入可用内容",
-                        category="truncated" if partial else "empty", raw=partial,
-                        partial=partial if partial and self._decision_editor(step, snapshot) == "text" else None,
+                        "模型没有确认 TXT 写完，已保留可核对的片段",
+                        category="truncated", raw=partial,
+                        partial=partial if self._decision_editor(step, snapshot) == "text" else None,
                     )
-                    self._pause_for_user(book_id, pipeline, issue, resume_txt=bool(partial))
+                    self._pause_for_user(book_id, pipeline, issue, resume_txt=True)
                     return
+                # 没有可续写片段 = 模型这一趟什么都没确认落盘。先自动重试（瞬时抖动
+                # 不该把用户一次次拽回来手动跳过），用完预算才暂停交给用户处理。
+                if self._auto_retry_step(book_id, pipeline):
+                    return
+                issue = prompts.ContentIssue(
+                    "模型没有写入可用内容" + self._retry_suffix(pipeline),
+                    category="empty", raw="",
+                )
+                self._pause_for_user(book_id, pipeline, issue)
+                return
+            suffix = self._retry_suffix(pipeline) if status == "failed" else ""
             if step == "state" and status != "cancelled":
                 # 线路错误仍是流水线失败，遇到状态提取失败不回滚已经写好的正文。
-                self._fail_state(book_id, pipeline, str(task.get("error") or "") or "章末状态提取未完成")
+                self._fail_state(book_id, pipeline,
+                                 (str(task.get("error") or "") or "章末状态提取未完成") + suffix)
                 return
             self._fail(
                 book_id, pipeline,
-                str(task.get("error") or "") or f"任务状态为 {status}，流水线停止",
+                (str(task.get("error") or "") or f"任务状态为 {status}，流水线停止") + suffix,
                 override_status="cancelled" if status == "cancelled" else "failed",
             )
             return
@@ -861,6 +919,39 @@ class WriterPipelineManager:
                 source_version_id=str(current.get("state_source_version_id") or ""),
             )
             self._fail(book_id, current, f"正文已保存，章末状态提取失败：{error}")
+
+    @staticmethod
+    def _retry_suffix(pipeline: dict[str, Any]) -> str:
+        used = int(pipeline.get("step_auto_retries") or 0)
+        return f"（已自动重试 {used} 次仍未成功）" if used > 0 else ""
+
+    def _auto_retry_step(self, book_id: str, pipeline: dict[str, Any]) -> bool:
+        """空结果自动重试：attempt+1 重提当前步（冻结输入不动），预算记在流水线上。
+
+        与用户手动重试同构（attempt+1 使旧任务的迟到写回失效），但不算用户的
+        重试次数；步推进或用户决策时预算清零。
+        """
+        used = int(pipeline.get("step_auto_retries") or 0)
+        if used >= WRITER_STEP_AUTO_RETRIES:
+            return False
+        attempt = int(pipeline.get("attempt") or 0) + 1
+
+        def retry(record: dict[str, Any]) -> None:
+            if (record.get("status") != "running"
+                    or self._step_key(book_id, record) != self._step_key(book_id, pipeline)):
+                return
+            record["attempt"] = attempt
+            record["current_task_id"] = ""
+            record["error"] = ""
+            record["step_auto_retries"] = used + 1
+
+        updated = self.store.update_pipeline(book_id, str(pipeline.get("id") or ""), retry,
+                                             expected_attempt=int(pipeline.get("attempt") or 0))
+        if updated is None:
+            return False
+        self._submissions[self._step_key(book_id, updated)] = False
+        self._submit_step(book_id, updated)
+        return True
 
     def _writer_input(self, task: dict[str, Any]) -> dict[str, Any]:
         input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
@@ -1052,7 +1143,7 @@ class WriterPipelineManager:
             def apply(record: dict[str, Any]) -> None:
                 record[WRITER_DECISION_HISTORY_KEY] = (history + [receipt])[-DECISION_HISTORY_LIMIT:]
                 self._clear_pending(record)
-                record.update(status="running", error="", current_task_id="")
+                record.update(status="running", error="", current_task_id="", step_auto_retries=0)
                 record.pop(WRITER_RESULT_RESUME_KEY, None)
                 if action == "retry":
                     record["attempt"] += 1
@@ -1309,6 +1400,7 @@ class WriterPipelineManager:
     def _advance_record(self, book_id: str, record: dict[str, Any], step: str, next_index: int) -> None:
         record["current_task_id"] = ""
         record["step_index"] = next_index
+        record["step_auto_retries"] = 0
         if next_index >= len(record["steps"]):
             record["status"] = "done"
         refreshed = self.store._load_manifest(book_id)

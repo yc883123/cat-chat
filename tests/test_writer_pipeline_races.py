@@ -1,6 +1,7 @@
 """Deterministic Writer submission/cancellation/polling interleavings."""
 
 import threading
+import time
 from unittest import mock
 
 from tests.test_writer_pipeline import PipelineTestCase
@@ -429,3 +430,67 @@ class WriterPipelineRaceTests(PipelineTestCase):
             self.assertEqual(self.current_pipeline()["status"], "done")
             self.assertEqual(len(errors), 1)
             self.assertIn("已结束", str(errors[0]))
+
+    # ---- 停止确认有界（2026-11-22 远端反馈：取消后作品被 stopping 永久锁死）----
+
+    def test_stop_timeout_force_settles_and_unlocks_book(self):
+        """任务被环境级卡死迟迟不终态：超过上限后强制收尾，作品可以重新生成。"""
+        self.start()
+        task_id = self.last_task()["id"]
+        with mock.patch.object(self.app.studio.jobs, "cancel", side_effect=lambda _tid: True):
+            # cancel 请求被「吞掉」：任务永远停在 running（模拟存储读失败/死锁）。
+            stopped = self.manager.cancel_pipeline(self.book_id)
+            self.assertEqual(stopped["status"], "stopping")
+            self.tick()
+            self.assertEqual(self.current_pipeline()["status"], "stopping")
+            with mock.patch("naiba.writer.pipeline.WRITER_STOP_CONFIRM_BOUND_MS", 0):
+                self.tick()
+            record = self.current_pipeline()
+            self.assertEqual(record["status"], "cancelled")
+            self.assertIn("取消等待超时", record["error"])
+            self.assertEqual(record["current_task_id"], task_id)
+        # 解除占用：重试本步与重新开始都放行。
+        retried = self.manager.retry_pipeline(self.book_id)
+        self.assertEqual(retried["status"], "running")
+        self.assertEqual(retried["attempt"], 2)
+
+    def test_stop_overdue_settles_even_when_task_already_terminal_but_blocked(self):
+        """任务已终态但收尾被迟到的提交句柄挡住：超时后同样强制收尾。"""
+        self.start()
+        key = self.manager._step_key(self.book_id, self.current_pipeline())
+        self.manager._submissions[key] = True  # 提交句柄先于取消落位（取消撞上在途提交）
+        self.manager.cancel_pipeline(self.book_id)
+        self.assertEqual(self.current_pipeline()["status"], "stopping")
+        self.app.studio.jobs.finish(self.last_task()["id"], "", status="cancelled")
+        self.tick()  # 常规收尾被句柄挡住，停在 stopping
+        self.assertEqual(self.current_pipeline()["status"], "stopping")
+        with mock.patch("naiba.writer.pipeline.WRITER_STOP_CONFIRM_BOUND_MS", 0):
+            self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "cancelled")
+        self.assertEqual(self.manager._submissions.get(key), True)  # 句柄本体不越权清除
+
+    def test_fresh_stop_is_not_force_settled_early(self):
+        """刚发起的取消在 60 秒上限内不动：常规收尾（任务终态即确认）不受影响。"""
+        self.start()
+        self.manager.cancel_pipeline(self.book_id)
+        self.app.studio.jobs.finish(self.last_task()["id"], "", status="cancelled")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "cancelled")
+        self.assertEqual(self.current_pipeline()["error"], "用户取消；当前任务已结束")
+
+    def test_legacy_stopping_record_self_heals_via_updated_at(self):
+        """老版本遗留的 stopping 记录（无计时字段）：按 updated_at 兜底计时自愈。"""
+        self.start()
+        stale = int(time.time() * 1000) - 2 * 60_000
+        with mock.patch.object(self.app.studio.jobs, "cancel", side_effect=lambda _tid: True):
+            self.manager.cancel_pipeline(self.book_id)
+            self.assertEqual(self.current_pipeline()["status"], "stopping")
+            record = self.current_pipeline()
+            self.store.update_pipeline(
+                self.book_id, record["id"],
+                lambda row: row.update(stop_requested_at=0, updated_at=stale),
+                expected_attempt=record["attempt"])
+            self.tick()  # 任务持续不终态：按 updated_at 判定已超时，强制收尾
+            self.assertEqual(self.current_pipeline()["status"], "cancelled")
+            self.assertIn("取消等待超时", self.current_pipeline()["error"])

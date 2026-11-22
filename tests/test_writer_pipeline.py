@@ -47,6 +47,12 @@ class _Jobs:
     def task(self, task_id):
         return self.tasks.get(task_id)
 
+    def result_text(self, task_id, require_final=True):
+        task = self.tasks[task_id]
+        if require_final:
+            return str(task.get("result") or "")
+        return str(task.get("result_partial") or "")
+
     def cancel(self, task_id):
         self.cancelled.append(task_id)
         task = self.tasks.get(task_id)
@@ -594,6 +600,84 @@ class ChapterPipelineTests(PipelineTestCase):
         self.assertEqual(record["status"], "needs_user")
         self.assertIn("截断", record["error"])
         self.assertEqual(self.store.get_chapter(self.book_id, 1)["content"], "")
+
+    # ---- 空结果自动重试（2026-11-22 远端反馈：章末状态时不时拿不到内容，
+    # 待处理卡一次接一次，用户只能反复手动跳过）----
+
+    def _reach_state_step(self, chapter_no=1):
+        self._prepare_outline()
+        self.start(kind="chapter", chapter_no=chapter_no)
+        draft_id = self.current_pipeline()["current_task_id"]
+        self.app.studio.jobs.finish(draft_id, f"第{chapter_no}章的完整正文。")
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["steps"][record["step_index"]], "state")
+        return record
+
+    def _fail_state_incomplete(self, record, partial=""):
+        """把当前 state 任务置成真实 runner 的空/截断失败形态（failed + 产物契约 + incomplete）。"""
+        task = self.app.studio.jobs.tasks[record["current_task_id"]]
+        task["status"] = "failed"
+        task["output_contract_version"] = 2
+        task["result_issue"] = "incomplete"
+        task["result_partial"] = partial
+
+    def _fail_state_empty(self, record):
+        self._fail_state_incomplete(record)
+
+    def test_state_empty_result_auto_retries_before_pausing(self):
+        record = self._reach_state_step(chapter_no=1)
+        for round_no in (1, 2):
+            self._fail_state_empty(record)
+            self.tick()
+            record = self.current_pipeline()
+            self.assertEqual(record["status"], "running", f"第 {round_no} 次空结果应自动重试")
+            self.assertEqual(record["step_auto_retries"], round_no)
+            self.assertEqual(record["attempt"], round_no + 1)
+            new_state = self.app.studio.jobs.tasks[record["current_task_id"]]
+            self.assertEqual(new_state["input"]["writer"]["step"], "state")
+        self._fail_state_empty(record)
+        self.tick()
+        record = self.current_pipeline()
+        # 预算用完才交还用户，且卡片如实说明已经自动重试过。
+        self.assertEqual(record["status"], "needs_user")
+        self.assertEqual(record["pending_user"]["category"], "empty")
+        self.assertIn("已自动重试 2 次", record["pending_user"]["issue"])
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(
+            record, "skip", confirmed=True, reason="不想要状态"))
+        self.assertEqual(decided["pipeline"]["status"], "done")
+        self.assertEqual(decided["pipeline"].get("step_auto_retries"), 0)
+
+    def test_state_partial_result_pauses_for_resume_without_retry(self):
+        record = self._reach_state_step(chapter_no=1)
+        self._fail_state_incomplete(record, partial='{"events": ["只写到一半"]')
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        self.assertEqual(record["pending_user"]["category"], "truncated")
+        self.assertEqual(record["pending_user"]["resume_txt"], True)
+        self.assertEqual(record.get("step_auto_retries") or 0, 0)
+
+    def test_state_retry_budget_resets_on_user_decision_retry(self):
+        record = self._reach_state_step(chapter_no=1)
+        for _ in range(2):
+            self._fail_state_empty(record)
+            self.tick()
+            record = self.current_pipeline()
+        self.assertEqual(record["step_auto_retries"], 2)
+        self._fail_state_empty(record)
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "needs_user")
+        # 用户点「重新生成本步」清零预算：新一轮空结果仍先自动重打两次。
+        decided = self.manager.decide_pipeline(self.book_id, decision_body(record, "retry"))
+        self.assertEqual(decided["pipeline"]["status"], "running")
+        self.assertEqual(decided["pipeline"].get("step_auto_retries"), 0)
+        self._fail_state_empty(decided["pipeline"])
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "running")
+        self.assertEqual(record["step_auto_retries"], 1)
 
     def test_skip_segs_runs_whole_chapter_without_chunking(self):
         self._prepare_outline()

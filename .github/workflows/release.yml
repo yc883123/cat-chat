@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.7.4-beta
-  RELEASE_TAG: v4.7.4-beta
+  RELEASE_VERSION: 4.7.5-beta
+  RELEASE_TAG: v4.7.5-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.7.4-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.7.5-beta-windows-x64
   # 旧名包：只为兼容留存文档 / 教程 / 口口相传的旧下载链接，内容与 `PACKAGE_NAME` 等价；
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.7.4-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.7.5-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.7.4 Beta release
+      - name: Publish 4.7.5 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.7.4 Beta
+          name: Cat Chat 4.7.5 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,10 +193,10 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.7.4 Beta
+            Cat Chat 4.7.5 Beta
 
-            - 自动整理上下文时，首轮和第二轮会持续显示等待时长。重连或切回会话后会恢复提醒，整理结束后自动收起。GOAL 开始整理时也会提醒。
-            - 织书台取消或重试时会核对任务，生成来源有变化时先确认再重试。生成期间锁定设定、大纲和正文的版本切换。拆书匠和织书台的作品操作统一到右上角「⋯」。
-            - KVMem 启停时，切换供应商再切回来也能看到原操作的进度，迟到的状态回包不会覆盖它。设置页仅查询已保存并启用 KVMem 的本地供应商。
+            - 删除会话时通过索引查找可清理的记录。新建会话直接使用已保存的默认模型，模型列表在后台加载。
+            - 自动视觉检测在会话有图时才运行。探测未确认时，后续带图还可以重试。升级后，曾被判为纯文本的旧会话会重新检测。
+            - 编辑历史消息并重发时，等待截断仍可打字，重复发送会被拦住。等待期间写下的新草稿和编辑内容都会保留。
 
-            Cat Chat 4.7.4 Beta Windows build
+            Cat Chat 4.7.5 Beta Windows build

@@ -1167,7 +1167,7 @@ class CompactionConfigWiringTests(unittest.TestCase):
         self.assertIn("action === 'compacted' || action === 'failed'", chat_js)
         self.assertIn("contextUsageRing", chat_js)
         self.assertIn("compaction-running", chat_js)
-        self.assertIn("document.querySelectorAll('.compaction-running')", stream_js)
+        self.assertIn("clearCompactionIndicator()", stream_js)
         self.assertIn("#contextUsageRing.compaction-running", css)
 
 

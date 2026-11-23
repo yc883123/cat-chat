@@ -7,7 +7,7 @@ import { markdown } from "./02-markdown.js";
 import { fileUrl } from "./03-media.js";
 import { conversationOpenGeneration, isConversationOpenCurrent, renderRunTasks, renderSidebar, syncCurrentConversation } from "./08-conversations.js";
 import { RUN_RECONNECT_COOLDOWN, clearElapsedStatus, resumeRun, setConnectionState, stopRunWatchdog } from "./11-run-stream.js";
-import { cancelCurrentRun, closePermissionModeMenu, setBusy } from "./12-chat-input.js";
+import { cancelCurrentRun, clearCompactionIndicator, closePermissionModeMenu, setBusy } from "./12-chat-input.js";
 export const activeTaskStatuses = new Set(['queued', 'running', 'waiting', 'stopping', 'cancelling']);
 
 // 后台作业类型的中文名。面板按它标注每行、并按"触发它的那次回答"分组后写进组标题
@@ -130,6 +130,7 @@ export async function maybeRecoverRunFromPoll() {
       state.checkRunEligible = false;
       setConnectionState('connected');
       if (state.chatRunId) {
+        clearCompactionIndicator();
         state.chatRunId = '';
         state.runConversationId = '';
         state.runSequence = 0;

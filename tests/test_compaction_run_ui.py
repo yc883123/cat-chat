@@ -216,27 +216,39 @@ class CompactionRingUITests(unittest.TestCase):
     def test_compaction_updates_ring_preserves_cost_and_real_usage_replaces_estimate(self):
         script = r"""
 const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
-const nodes=new Map(),toasts=[],activities=[];
+const nodes=new Map(),toasts=[],activities=[],timers=new Set();
 function node(){const classes=new Set();return {textContent:'',title:'',style:{setProperty(k,v){this[k]=v;}},
  classList:{add:v=>classes.add(v),remove:(...v)=>v.forEach(x=>classes.delete(x)),
  toggle(v,on){if(on)classes.add(v);else classes.delete(v);},contains:v=>classes.has(v)}};}
 const $=s=>{if(!nodes.has(s))nodes.set(s,node());return nodes.get(s);};
 const state={conversationId:'c1',chatBusy:true,contextUsage:null,bootstrap:{model_profiles:[]}};
 const context=vm.createContext({state,$,toast:s=>toasts.push(s),selectedProvider:()=>({}),
- maybeWarnContextUsage(){},updateContextComposerLock(){}});
+ maybeWarnContextUsage(){},updateContextComposerLock(){},
+ window:{setInterval(update){timers.add(update);return update;},clearInterval(update){timers.delete(update);}}});
 const media=fs.readFileSync('public/js/03-media.js','utf8');
 const ring=media.slice(media.indexOf('export function setContextUsage('),media.indexOf('// 上下文提醒阈值'))
  .replace(/^export /gm,'');
 const chat=fs.readFileSync('public/js/12-chat-input.js','utf8');
 const handlers=chat.slice(chat.indexOf('function clearCompactionIndicator('),chat.indexOf('function handleContextFullEvent('));
-vm.runInContext(ring+'\n'+handlers,context);
+const stream=fs.readFileSync('public/js/11-run-stream.js','utf8');
+const timing=stream.slice(stream.indexOf('export function showElapsedStatus('),stream.indexOf('export function settleReconnectStatus('))
+ .replace(/^export /gm,'');
+vm.runInContext(ring+'\n'+timing+'\n'+handlers,context);
 const old={input_tokens:6000,output_tokens:100,total_tokens:6100,context_tokens:9500,context_limit:10000,
  context_limit_source:'configured',model_key:'online:fixture',cost:{total:1.5}};
 context.setContextUsage(old);
 assert.equal(state.contextPercent,95);
 const eventContext={row:node(),setActivity(value){activities.push(value);}};
+context.showElapsedStatus('正在思考');
+const previousTimer=state.elapsedTimer;
 context.handleCompactionEvent({action:'started'},eventContext);
+assert.equal(timers.has(previousTimer),false,'开始整理时取消上一条状态计时');
+assert.equal(timers.size,1);
+for(const update of timers) update();
+assert.match($('#runtimeStatus').textContent,/^正在整理上下文/);
 context.handleCompactionEvent({action:'failed',message:'failure'},eventContext);
+assert.equal(timers.size,0,'整理失败后停止计时');
+assert.equal($('#runtimeStatus').textContent,'正在处理');
 assert.equal(state.contextUsage,old,'失败不能假装降低上下文');
 assert.equal(state.contextPercent,95);
 context.handleCompactionEvent({action:'compacted',limit:10000,

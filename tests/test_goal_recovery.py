@@ -17,11 +17,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 from naiba.app import NaibaChatApp
 from naiba.core.contracts import GOAL_DEFAULT_LIMITS
+from naiba.core.exceptions import TaskCancelled
 from naiba.jobs import JobRegistry, JobSpec
 from naiba.run import goals as goal_runtime
 from naiba.run import goal_checks as goal_checks_module
@@ -85,6 +86,11 @@ class GoalRecoveryTests(unittest.TestCase):
         def produce(body):
             if any(str(m.get("content") or "").startswith(compaction.SUMMARIZE_INSTRUCTION)
                    for m in body["messages"]):
+                current_run = self.app.goals.store.get(goal["id"])["run_id"]
+                notifications = [event for event in self.app.storage.list_run_events(current_run)
+                                 if event["type"] == "compaction"]
+                self.assertEqual(notifications[-1]["action"], "started",
+                                 "GOAL must publish its reminder before the hidden request")
                 hidden.append(body)
                 return self.text(GOOD_SUMMARY)
             formal.append(body)
@@ -125,6 +131,57 @@ class GoalRecoveryTests(unittest.TestCase):
             actions = db.execute("SELECT COUNT(*) FROM chat_goal_actions WHERE goal_id=?", (goal["id"],)).fetchone()[0]
         self.assertEqual(actions, 1, "recovery repeated the completed write")
         self.assertEqual(sum(m["role"] == "user" for m in self.app.storage.get_conversation(self.cid)["messages"]), 1)
+
+    def test_goal_compaction_reminder_settles_success_failure_and_no_savings(self):
+        self.app.config.data["auto_compaction"] = {"mode": "auto", "threshold_percent": 30}
+        messages = [{"role": "system", "content": "GOAL rules"}, {"role": "user", "content": "完成目标"}]
+        for number in range(3):
+            messages.extend([
+                {"role": "assistant", "tool_calls": [{"id": str(number), "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": str(number), "content": "资料内容。" * 500},
+            ])
+        outcomes = {
+            "success": {"summary": GOOD_SUMMARY, "attempts": [{"reason": "accepted"}]},
+            "failure": {"summary": "", "reason": "bad_summary", "attempts": [{"reason": "bad_summary"}]},
+            "no_savings": {"summary": "冗长摘要。" * 1000, "attempts": [{"reason": "accepted"}]},
+            "cancelled": {},
+        }
+        for name, result in outcomes.items():
+            with self.subTest(outcome=name):
+                cycle = goal_runtime.GoalCycle(self.app.goals, {"checkpoint": {}, "conversation_id": self.cid},
+                    {"model_key": "online:goal-fixture", "model_name": "goal-fixture"})
+                events = []
+                cycle.event = events.append
+                cycle.save = Mock()
+
+                def summarize(*args, **kwargs):
+                    kwargs["on_started"]()
+                    kwargs["on_started"]()
+                    self.assertEqual([event["action"] for event in events], ["started"],
+                                     "bounded retries must share one start reminder")
+                    if name == "cancelled":
+                        raise TaskCancelled("任务已取消")
+                    return result
+
+                with patch("naiba.core.compaction.request_summary", side_effect=summarize):
+                    if name == "cancelled":
+                        with self.assertRaises(TaskCancelled):
+                            cycle.compact(messages, 2, 32000, 28000, 20000)
+                        cycle.save.assert_not_called()
+                        self.assertEqual([event["action"] for event in events], ["started"])
+                        continue
+                    compacted = cycle.compact(messages, 2, 32000, 28000, 20000)
+                self.assertEqual([event["action"] for event in events],
+                                 ["started", "compacted" if name == "success" else "failed"])
+                if name == "success":
+                    self.assertIn("history", compacted)
+                    self.assertGreater(events[-1]["freed_est"], 0)
+                else:
+                    self.assertEqual(compacted, {})
+                    cycle.save.assert_called_once_with(messages)
+                    if name == "no_savings":
+                        self.assertEqual(events[-1]["reason"], "freed_too_small")
 
     def test_slow_goal_a_does_not_starve_goal_b_cancellation(self):
         entered, release = threading.Event(), threading.Event()

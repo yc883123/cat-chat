@@ -10,7 +10,7 @@ import { loadTasks, renderPermissionModeSwitch } from "./06-tasks-plans.js";
 import { updateUnloadModelButton } from "./07-models-agents.js";
 import { conversationOpenGeneration, isConversationOpenCurrent, createConversation, openConversation, renderSidebar } from "./08-conversations.js";
 import { uploadFiles, renderPendingFiles } from "./10-upload.js";
-import { SKILL_INSTALL_PRESET, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, settleReconnectStatus, showElapsedStatus, stopRunWatchdog } from "./11-run-stream.js";
+import { SKILL_INSTALL_PRESET, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, settleReconnectStatus, showCompactionStatus, showElapsedStatus, stopRunWatchdog } from "./11-run-stream.js";
 import { insertTextAtCursor, renderInputMirror, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
 import { normalizeChoiceGroups } from "./17-choice-groups.js";
 import { freezeQueuedInterjections, handleInterjectionConsumedEvent, handleUserGuidanceEvent, queuedInterjectionStats } from "./18-interjections.js";
@@ -1134,9 +1134,14 @@ function handleRunFailedEvent(event, { row, answer, setActivity }) {
   freezeQueuedInterjections();
 }
 
-function clearCompactionIndicator(row = null) {
+export function clearCompactionIndicator(row = state.runRow) {
   row?.classList.remove('compaction-running');
-  $('#runtimeStatus')?.classList.remove('compaction-running');
+  const runtimeStatus = $('#runtimeStatus');
+  if (runtimeStatus?.classList.contains('compaction-running')) {
+    runtimeStatus.classList.remove('compaction-running');
+    clearElapsedStatus();
+    runtimeStatus.textContent = state.chatBusy ? '正在处理' : '就绪';
+  }
   $('#contextUsageRing')?.classList.remove('compaction-running');
 }
 
@@ -1152,13 +1157,11 @@ function handleCompactionEvent(event, { setActivity, row }) {
   }
   if (action === 'started') {
     if (row) row.classList.add('compaction-running');
-    if (runtimeStatus) {
-      runtimeStatus.textContent = event.message || '正在整理上下文…';
-      runtimeStatus.classList.add('compaction-running');
-    }
+    runtimeStatus?.classList.add('compaction-running');
     if (ring) ring.classList.add('compaction-running');
+    showCompactionStatus();
     setActivity(event.message || '正在整理较早的对话，当前轮会继续…');
-    return false;
+    return true;
   }
   if (action === 'compacted' || action === 'failed' || action === 'estimated') {
     if (action !== 'estimated') clearCompactionIndicator(row);
@@ -1882,6 +1885,7 @@ export async function cancelCurrentRun() {
   state.runAttempt = 0;
   state.runRecovering = false;
   setConnectionState('connected');
+  clearCompactionIndicator();
   setBusy(true);
   $('#runtimeStatus').textContent = '正在停止';
 

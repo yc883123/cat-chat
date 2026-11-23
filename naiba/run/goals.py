@@ -181,8 +181,18 @@ class GoalCycle:
 
         profile = resolve_profile_with_override(self.service.app.config, str(self.snapshot["model_key"]),
                                                 str(self.snapshot["model_name"]))
+        started = False
+
+        def on_started() -> None:
+            nonlocal started
+            if not started:
+                self.event({"type": "compaction", "action": "started",
+                            "message": "正在整理较早的对话和本轮工具记录，当前轮会继续…"})
+                started = True
+
         result = compaction.request_summary(self.service.app, region, profile=profile, settings=settings,
             cancel_event=self.cancel_event, before_request_send=self.before_send,
+            on_started=on_started,
             attempt_limit=min(compaction.MAX_SUMMARY_ATTEMPTS, compaction.MAX_RUN_SUMMARY_ATTEMPTS - attempts))
         self.checkpoint["round_summary_attempts"] = attempts + len(result.get("attempts") or [])
         summary = str(result.get("summary") or "")
@@ -195,6 +205,8 @@ class GoalCycle:
         before = compaction.estimate_messages_tokens(list(messages))
         after = compaction.estimate_messages_tokens(projected)
         if after >= before:
+            self.event({"type": "compaction", "action": "failed", "reason": "freed_too_small",
+                        "attempts": result.get("attempts") or [], "message": compaction.failure_message("freed_too_small")})
             self.save(messages)
             return {}
         self.checkpoint["compaction_generation"] = int(self.checkpoint.get("compaction_generation") or 0) + 1

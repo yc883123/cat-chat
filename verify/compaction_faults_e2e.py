@@ -12,6 +12,7 @@ import auto_compaction_e2e as base
 ROOT = base.ROOT
 STATE = {"scenario": "", "turn": 0, "summaries": 0, "requests": []}
 LOCK = threading.Lock()
+SUMMARY_RELEASE = threading.Event()
 WORKSPACE: Path
 
 
@@ -26,6 +27,8 @@ class ModelHandler(base._StubModelHandler):
             with LOCK:
                 STATE["summaries"] += 1
                 number = STATE["summaries"]
+            if not SUMMARY_RELEASE.wait(timeout=30):
+                raise RuntimeError("浏览器未释放摘要请求，整理中提醒验收失败")
             content, finish = base.SUMMARY, "length" if number == 1 else "stop"
         elif any(message.get("content") == "下一轮：确认整理后仍可继续" for message in messages):
             content, finish = "下一轮使用已整理视图成功。", "stop"
@@ -34,7 +37,7 @@ class ModelHandler(base._StubModelHandler):
                 STATE["turn"] += 1
                 number = STATE["turn"]
                 scenario = STATE["scenario"]
-            if scenario.startswith("first") and number <= 9:
+            if scenario.startswith(("first", "second")) and number <= 9:
                 content = json.dumps({"type": "tool", "tool": "read_file",
                                       "arguments": {"path": str(WORKSPACE / f"part-{number}.txt")}}, ensure_ascii=False)
             else:
@@ -71,10 +74,19 @@ def run():
     config.save()
     storage = ChatStorage(root / "data" / "chat.db")
     for width in (1280, 375):
-        conversation = storage.create_conversation(f"首轮工具整理 {width}",
-            model_key=f"online:{base.PROVIDER_ID}", model_name=base.MODEL_NAME,
-            agent_id="tutor", permission_mode="full", workspace_dir=str(WORKSPACE))
-        conversations[f"first-{width}"] = str(conversation["id"])
+        for kind in ("first", "second"):
+            conversation = storage.create_conversation(f"{kind} 工具整理 {width}",
+                model_key=f"online:{base.PROVIDER_ID}", model_name=base.MODEL_NAME,
+                agent_id="tutor", permission_mode="full", workspace_dir=str(WORKSPACE))
+            cid = str(conversation["id"])
+            conversations[f"{kind}-{width}"] = cid
+            if kind == "second":
+                storage.add_message(cid, "user", "上一轮的简短问题。")
+                storage.add_message(cid, "assistant", "上一轮的简短回复。", {"usage": {
+                    "input_tokens": 64, "output_tokens": 16, "total_tokens": 80,
+                    "context_tokens": 80, "context_limit": 32000,
+                    "context_limit_source": "local_config", "requests": 1,
+                }})
     for cid in conversations.values():
         storage.update_conversation_settings(cid, stream_enabled=False)
     for number in range(1, 10):
@@ -90,8 +102,14 @@ def run():
         def do_POST(self):
             if self.path == "/_fixture/scenario":
                 body = self._read_json()
+                SUMMARY_RELEASE.clear()
                 with LOCK:
                     STATE.update(scenario=str(body.get("scenario") or ""), turn=0, summaries=0)
+                self._json({"ok": True})
+                return
+            if self.path == "/_fixture/release-summary":
+                self._read_json()
+                SUMMARY_RELEASE.set()
                 self._json({"ok": True})
                 return
             return super().do_POST()
@@ -119,7 +137,7 @@ def run():
             conversation = app.storage.get_conversation(cid)
             messages = conversation.get("messages") or []
             views = [message for message in messages if (message.get("metadata") or {}).get("trace_view")]
-            if key.startswith("first"):
+            if key.startswith(("first", "second")):
                 # 浏览器已撤销投影；完整原始记录仍在。
                 trace_messages = [message for message in messages if (message.get("metadata") or {}).get("trace")]
                 longest = max((message["metadata"]["trace"] for message in trace_messages), key=len)
@@ -130,6 +148,7 @@ def run():
         print("ALL PASS", json.dumps(evidence, ensure_ascii=False))
         return 0
     finally:
+        SUMMARY_RELEASE.set()
         server.shutdown()
         server.server_close()
         app.stop()

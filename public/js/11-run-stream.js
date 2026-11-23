@@ -9,7 +9,7 @@ import { loadTasks, scheduleTaskSync } from "./06-tasks-plans.js";
 import { conversationOpenGeneration, isConversationOpenCurrent, createConversation, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
 import { composerModelChoice, composerModelIsValidated, pendingConversationModelSave, selectedProvider } from "./07-models-agents.js";
 import { attachmentChips, folderChips, folderIndexMetadata, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
-import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
+import { beginChoiceSubmit, clearCompactionIndicator, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
 import { collapseComposerIfExpanded, hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
 import { sendRunInterjection } from "./18-interjections.js";
@@ -50,6 +50,7 @@ export function detachRunSubscription() {
   // （这条路径不经过 setConnectionState，见上面的注释）。
   settleReconnectStatus();
   clearElapsedStatus();
+  clearCompactionIndicator();
   clearRunReconnectTimers();
   state.chatRunId = '';
   state.runConversationId = '';
@@ -148,6 +149,12 @@ export function clearElapsedStatus() {
   if (state.elapsedTimer) window.clearInterval(state.elapsedTimer);
   state.elapsedTimer = null;
   state.elapsedBase = '';
+}
+
+export function showCompactionStatus() {
+  state.runWaitShown = false;
+  state.runWaitPrevText = '';
+  showElapsedStatus('正在整理上下文');
 }
 
 // 重连已恢复（重连成功或真实内容已到达）：清掉「重连中…」计时并把状态文本还原。
@@ -396,12 +403,12 @@ export async function finishRunSubscription(conversationId, controller) {
     clearElapsedStatus();
     state.runWaitShown = false;
     state.runWaitPrevText = '';
+    clearCompactionIndicator();
     state.abortController = null;
     state.chatRunId = '';
     state.runConversationId = '';
     state.runSequence = 0;
     state.runRow = null;
-    document.querySelectorAll('.compaction-running').forEach((node) => node.classList.remove('compaction-running'));
     state.runAttempt = 0;
     state.runReconnectAt = 0;
     state.runProbeMisses = 0;
@@ -499,6 +506,7 @@ export async function resumeRun(run, options = {}) {
       }
       setConnectionState('connected');   // 离开 reconnect 态即由状态机收走「重连中…」横幅
       clearRunLinkNotice(row);           // 流重新建立：断流提示已经过期，别留在气泡里
+      if (row.classList.contains('compaction-running')) showCompactionStatus();
       await consumeRunStream(response, row, conversationId, runId, controller, generation);
     } catch (error) {
       if (error.name !== 'AbortError' && !state.cancelRequested && state.conversationId === conversationId) {

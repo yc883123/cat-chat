@@ -356,11 +356,14 @@ class NovelContinuationTests(unittest.TestCase):
         self.store.save_setup(bid, content={**initial, "continuation_summary": changed})
         self.assertEqual(self.store.load_setup(bid)["continuation_summary"], changed)
         self.assertEqual(self.store.load_setup(bid, version_id=initial["id"])["continuation_summary"], SUMMARY)
+        before = self.store.get_active_pipeline(bid)
+        submitted = len(self.app.studio.jobs.submitted)
         retried, status = self.service.api_retry_pipeline(bid, {})
-        self.assertEqual(status, 200, retried)
-        self.service.pipeline.tick()
-        retry_pipeline = self.store.get_active_pipeline(bid)
-        retry_task = self.app.studio.jobs.tasks[retry_pipeline["current_task_id"]]
+        self.assertEqual(status, 409, retried)
+        self.assertEqual(retried["code"], "writer_rebase_required")
+        self.assertEqual(self.store.get_active_pipeline(bid), before)
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
+        retry_task = self.app.studio.jobs.tasks[before["current_task_id"]]
         content = json.dumps(retry_task["input"], ensure_ascii=False)
         for value in SUMMARY.values():
             self.assertIn(value, content)
@@ -398,16 +401,19 @@ class NovelContinuationTests(unittest.TestCase):
         if clear_after:
             manifest = self.store._load_manifest(bid)
             self.store.delete_setup_versions(bid, [row["id"] for row in manifest["setup_versions"]])
+        before = self.store.get_active_pipeline(bid)
+        submitted = len(self.app.studio.jobs.submitted)
         retried, status = self.service.api_retry_pipeline(bid, {})
-        self.assertEqual(status, 200, retried)
-        self.assertEqual(retried["pipeline"]["request_snapshot"], snapshot)
-        retry_task = self.app.studio.jobs.tasks[self.store.get_active_pipeline(bid)["current_task_id"]]
+        self.assertEqual(status, 409, retried)
+        self.assertEqual(retried["code"], "writer_rebase_required")
+        self.assertEqual(self.store.get_active_pipeline(bid), before)
+        self.assertEqual(before["request_snapshot"], snapshot)
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
+        retry_task = self.app.studio.jobs.tasks[before["current_task_id"]]
         content = json.dumps(retry_task["input"], ensure_ascii=False)
         for value in SUMMARY.values():
             self.assertIn(value, content)
         self.assertNotIn("新确认：", content)
-        self.app.studio.jobs.finish(retry_task["id"], "", status="failed", error="模拟第二次生成失败")
-        self.service.pipeline.tick()
         rebased, status = self.service.api_retry_pipeline(bid, {"rebase": True})
         self.assertEqual(status, 200, rebased)
         self.assertEqual(rebased["pipeline"]["request_snapshot"][WRITER_SETUP_SNAPSHOT_KEY]["continuation_summary"], changed)

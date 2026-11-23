@@ -79,6 +79,8 @@ WRITER_DECISION_DIGEST_KEY = "request_digest"
 WRITER_DECISION_REVISION_KEY = "decision_revision"
 WRITER_DECISION_HISTORY_KEY = "decision_history"
 WRITER_DECISION_REQUEST_KEY = "request_key"
+# Retry refuses stale frozen input before creating another model execution.
+WRITER_REBASE_REQUIRED_CODE = "writer_rebase_required"
 STUDIO_RESULT_ISSUE_KEY = "result_issue"
 
 

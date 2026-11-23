@@ -236,6 +236,46 @@ class PipelineArtifactConsumers(PipelineTestCase):
         self.assertIn("resumed-execution", self.app.studio.jobs.cancelled)
         self.assertEqual(self.current_pipeline()["status"], "cancelled")
 
+    def test_expired_resume_stop_keeps_late_child_out_of_new_generation(self):
+        self.prepared(done=False)
+        self.tick()
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+
+        def prepare(task_id, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test release")
+            return self.resume_child(task_id, **kwargs)
+
+        def run():
+            try:
+                self.manager.resume_pipeline(self.book_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        self.app.studio.jobs.prepare_resume = prepare
+        thread = threading.Thread(target=run, name="writer-delayed-resume")
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.manager.cancel_pipeline(self.book_id)
+            with mock.patch("naiba.writer.pipeline.WRITER_STOP_CONFIRM_BOUND_MS", 0):
+                self.assertEqual(self.manager.get_pipeline(self.book_id)["pipeline"]["status"], "cancelled")
+            current = self.start(kind="setup_step", step="world")
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.scheduled, [])
+        self.assertEqual(self.current_pipeline(), current)
+        self.assertIn("resumed-execution", self.app.studio.jobs.cancelled)
+        self.app.studio.jobs.finish("resumed-execution", "迟到的恢复内容")
+        self.tick()
+        self.assertEqual(self.current_pipeline(), current)
+        self.assertEqual(self.store.load_setup(self.book_id)["worldview"], "")
+
 
 class NovelArtifactConsumers(unittest.TestCase):
     def setUp(self):

@@ -121,6 +121,10 @@ class WriterPipelineError(ValueError):
     """流水线操作非法（用户可读，API 边界转 4xx）。"""
 
 
+class WriterRebaseRequiredError(WriterPipelineError):
+    """重试来源已变化，必须显式换基才能提交下一次模型执行。"""
+
+
 class WriterPipelineManager:
     """每部作品同一时刻最多一个活动流水线；状态持久化在 book.json。
 
@@ -453,10 +457,13 @@ class WriterPipelineManager:
             if not isinstance(pipeline, dict):
                 raise WriterPipelineError("这部作品没有进行中的生成")
             if identity is not None:
-                if pipeline.get("id") != identity.get("pipeline_id"):
-                    raise WriterConflictError("流水线已变化，请重新打开作品")
-                self._check_decision_identity(pipeline, identity)
-                if pipeline.get("status") != WRITER_PIPELINE_NEEDS_USER:
+                self._check_pipeline_identity(pipeline, identity)
+                pending_command = any(key in identity for key in ("step", "step_index", WRITER_DECISION_REVISION_KEY))
+                if pipeline.get("status") == WRITER_PIPELINE_NEEDS_USER:
+                    self._check_decision_identity(pipeline, identity)
+                    if identity.get("step") != (pipeline.get(WRITER_PENDING_USER_KEY) or {}).get("step"):
+                        raise WriterConflictError("待处理步骤已变化，请重新打开作品")
+                elif pending_command:
                     raise WriterConflictError("待处理步骤已变化，请重新打开作品")
             if pipeline.get("status") == WRITER_PIPELINE_NEEDS_USER:
                 def abandon(record: dict[str, Any]) -> None:
@@ -488,22 +495,31 @@ class WriterPipelineManager:
             fresh = self._matching_pipeline(book_id, updated)
             return fresh if fresh is not None else updated
 
-    def retry_pipeline(self, book_id: str, *, rebase: bool = False) -> dict[str, Any]:
+    def retry_pipeline(self, book_id: str, *, rebase: bool = False,
+                       identity: dict[str, Any] | None = None) -> dict[str, Any]:
         """失败步重试：attempt+1 重提当前步；conflict 状态需 `rebase=True` 显式换基。"""
         with self.store._lock:
             manifest = self.store._load_manifest(book_id)
             pipeline = manifest.get("active_pipeline")
             if not isinstance(pipeline, dict):
                 raise WriterPipelineError("这部作品没有可重试的生成")
+            if identity is not None:
+                self._check_pipeline_identity(pipeline, identity)
             status = str(pipeline.get("status") or "")
             if status in ("running", WRITER_PIPELINE_STOPPING):
                 raise WriterPipelineError("当前生成还在进行中或停止尚未确认")
             if status == "conflict" and not rebase:
-                raise WriterPipelineError(
-                    "作品或章节已被修改（版本冲突）；请重新读取作品后，勾选「基于当前版本重新生成」再试"
-                )
+                raise WriterRebaseRequiredError("作品或章节已变化，请基于当前版本重新生成")
             if status not in ("failed", "conflict", "interrupted", "cancelled"):
                 raise WriterPipelineError("只有失败、冲突、中断或取消的生成可以重试")
+            if not rebase:
+                steps = pipeline.get("steps") or []
+                step_index = int(pipeline.get("step_index") or 0)
+                step = steps[step_index] if 0 <= step_index < len(steps) else ""
+                try:
+                    self._check_step_source(book_id, pipeline, step, check_state=True)
+                except (WriterConflictError, LookupError) as exc:
+                    raise WriterRebaseRequiredError("作品或章节已变化，请基于当前版本重新生成") from exc
             if not rebase and isinstance(manifest.get("continuation"), dict):
                 # 先校验旧任务来源，避免缺少可恢复快照时先改成 running 再报错。
                 self._pipeline_setup(book_id, pipeline.get("request_snapshot") or {})
@@ -664,11 +680,16 @@ class WriterPipelineManager:
     # ---- 查询 ----
 
     def get_pipeline(self, book_id: str) -> dict[str, Any]:
-        manifest = self.store._load_manifest(book_id)
-        pipeline = manifest.get("active_pipeline")
-        if not isinstance(pipeline, dict):
-            return {"pipeline": None}
-        payload = self.store.public_pipeline(pipeline)
+        with self.store._lock:
+            pipeline = self.store.get_active_pipeline(book_id)
+            if not isinstance(pipeline, dict):
+                return {"pipeline": None}
+            if pipeline.get("status") == WRITER_PIPELINE_STOPPING:
+                # Polling can reap an overdue stop even when the worker is
+                # blocked inside submission or cancellation outside this lock.
+                self._settle_overdue_stop(book_id, pipeline)
+                pipeline = self.store.get_active_pipeline(book_id)
+            payload = self.store.public_pipeline(pipeline)
         task_id = str(payload.get("current_task_id") or "")
         if task_id:
             task = self._task(task_id)
@@ -743,33 +764,31 @@ class WriterPipelineManager:
         if task_id:
             self._request_stop(book_id, current, task_id)
 
-    def _settle_overdue_stop(self, book_id: str, task_id: str) -> None:
+    def _settle_overdue_stop(self, book_id: str, pipeline: dict[str, Any]) -> None:
         """停止确认有界：stopping 超过上限仍未收尾时强制落 cancelled，解除作品占用。
 
-        常规收尾在 `_request_stop`（任务终态即确认）；本方法只接它接不住的两类残留：
-        任务被环境级卡死迟迟不终态，或任务已终态但收尾被迟到的提交句柄挡住。
+        常规收尾在 `_request_stop`（任务终态即确认）；本方法处理提交未返回任务号、
+        任务迟迟不终态，以及任务已终态但收尾被迟到的提交句柄挡住的情况。
         老版本遗留的无计时 stopping 记录按 updated_at 兜底计时，升级后也能自愈。
         """
         with self.store._lock:
-            current = self.store.get_active_pipeline(book_id)
+            current = self._matching_pipeline(book_id, pipeline)
             if not isinstance(current, dict) or current.get("status") != WRITER_PIPELINE_STOPPING:
-                return
-            if str(current.get("current_task_id") or "") != task_id:
                 return
             requested_at = int(current.get("stop_requested_at") or current.get("updated_at") or 0)
             attempt = int(current.get("attempt") or 0)
             pipeline_id = str(current.get("id") or "")
-        if not requested_at or int(time.time() * 1000) - requested_at < WRITER_STOP_CONFIRM_BOUND_MS:
-            return
-
-        def _force(record: dict[str, Any]) -> None:
-            if record.get("status") != WRITER_PIPELINE_STOPPING:
+            if not requested_at or int(time.time() * 1000) - requested_at < WRITER_STOP_CONFIRM_BOUND_MS:
                 return
-            record["status"] = "cancelled"
-            record["error"] = "取消等待超时，已自动结束本次生成；已落盘的未完成 TXT 保留，可重新生成本章"
-            record["stop_requested_at"] = 0
 
-        self.store.update_pipeline(book_id, pipeline_id, _force, expected_attempt=attempt)
+            def _force(record: dict[str, Any]) -> None:
+                if record.get("status") != WRITER_PIPELINE_STOPPING:
+                    return
+                record["status"] = "cancelled"
+                record["error"] = "取消等待超时，已自动结束本次生成；已落盘的未完成 TXT 保留，可重新生成本章"
+                record["stop_requested_at"] = 0
+
+            self.store.update_pipeline(book_id, pipeline_id, _force, expected_attempt=attempt)
 
     def tick(self) -> None:
         """扫全部活动流水线：任务终态则推进；一次 tick 处理完当前所有可推进项。"""
@@ -787,10 +806,10 @@ class WriterPipelineManager:
                 continue
             try:
                 if pipeline.get("status") == WRITER_PIPELINE_STOPPING:
+                    self._settle_overdue_stop(book_id, pipeline)
                     task_id = str(pipeline.get("current_task_id") or "")
                     if task_id:
                         self._request_stop(book_id, pipeline, task_id)
-                        self._settle_overdue_stop(book_id, task_id)
                     continue
                 if pipeline.get("status") != "running":
                     continue
@@ -1065,6 +1084,12 @@ class WriterPipelineManager:
     def _clear_pending(record: dict[str, Any]) -> None:
         record[WRITER_PENDING_USER_KEY] = None
         record.pop(WRITER_PENDING_ACCEPTED_KEY, None)
+
+    @staticmethod
+    def _check_pipeline_identity(record: dict[str, Any], body: dict[str, Any]) -> None:
+        if (body.get("pipeline_id") != record.get("id")
+                or type(body.get("attempt")) is not int or body["attempt"] != record.get("attempt")):
+            raise WriterConflictError("生成任务已变化，请重新读取后再操作")
 
     @staticmethod
     def _check_decision_identity(record: dict[str, Any], body: dict[str, Any]) -> None:

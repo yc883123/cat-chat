@@ -165,7 +165,7 @@ async function fixture(page) {
           await geometry(page,'#writerManageDialog',`writer 管理记录 ${width}/${theme}/${tab}`);scans++;
         }
         await page.locator('#writerManageClose').click();
-        await page.locator('#writerBookMenuBtn').click();
+        await page.locator('#writerMoreBtn').click();
         await page.locator('#writerNovelContinueBtn').click();
         await page.waitForSelector('#writerNovelTxtFile');
         assert.equal(await page.locator('#writerNovelTxtFile').getAttribute('type'),'file','默认 TXT 页应提供文件选择入口');

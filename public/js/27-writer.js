@@ -92,6 +92,31 @@ function pipelineWaiting(pipeline = writer.pipeline) {
   return pipeline?.status === "needs_user";
 }
 
+const VERSION_SWITCH_GENERATING = "当前生成尚未结束，请结束后再切换版本";
+
+function versionSwitchLocked() {
+  return writer.busy || writer.pollBusy || pipelineRefreshing() || pipelineActive() || pipelineWaiting()
+    || Boolean(pipelineCommand && samePipelineTarget(pipelineCommand));
+}
+
+function renderVersionSwitchState() {
+  const locked = versionSwitchLocked();
+  document.querySelectorAll([
+    "#writerDraftVersion", "#writerOutlineVersion", "#writerChapterOutlineVersion",
+    "[data-writer-setup-version]", "[data-writer-manage-use]",
+  ].join(",")).forEach((control) => {
+    control.disabled = locked || (control.id === "writerDraftVersion" && Boolean(writer.chapter?.read_only));
+  });
+  document.querySelectorAll("[data-writer-version-lock-note]").forEach((note) => {
+    note.hidden = !locked;
+  });
+  const manageNote = $("#writerManageNote");
+  if (manageNote) {
+    const text = manageTabNote();
+    if (manageNote.textContent !== text) manageNote.textContent = text;
+  }
+}
+
 // 流水线类型的中文名（与服务端 PIPELINE_KINDS 对齐）。
 const KIND_LABELS = {
   setup_all: "生成整套设定",
@@ -378,6 +403,7 @@ function setBusy(busy) {
     if (btn) btn.disabled = busy;
   }
   renderDraft();
+  renderVersionSwitchState();
 }
 
 function kindLabel(kind) {
@@ -503,7 +529,7 @@ function renderPageState() {
   const el = $("#writerPageState");
   if (!el) return;
   if (!writer.bookId) {
-    el.textContent = "选择作品";
+    el.textContent = "未打开作品";
     el.title = el.textContent;
     return;
   }
@@ -588,7 +614,7 @@ function renderChapters() {
     list.replaceChildren();
     if (empty) {
       empty.hidden = false;
-      empty.textContent = "还没有打开作品。打开页头作品菜单，新建或切换作品。";
+      empty.textContent = "还没有打开作品。点击右上角「⋯」新建或切换作品。";
     }
     return;
   }
@@ -631,6 +657,7 @@ function renderSetupVersions() {
     item.type = "button";
     item.className = `writer-version-row${String(row.id) === current ? " active" : ""}`;
     item.dataset.writerSetupVersion = String(row.id || "");
+    item.disabled = versionSwitchLocked();
     const title = document.createElement("strong");
     title.textContent = `v${row.version} · ${VERSION_KIND_LABELS[row.kind] || row.kind || "版本"}`;
     const meta = document.createElement("small");
@@ -1417,6 +1444,20 @@ function renderOutlineVersions() {
   if (versions.length) select.value = current || String(versions.at(-1).id || "");
 }
 
+function renderDraftGenerationControls() {
+  const chapter = writer.chapter;
+  const blocked = writer.busy || pipelineRefreshing() || writer.pipeline?.status === "stopping";
+  const writable = Boolean(chapter && !chapter.read_only);
+  const canWrite = writable && Boolean(writer.book?.current_outline_version_id);
+  for (const id of ["writerDraftGenerate", "writerDraftSegs", "writerDraftRewrite"]) {
+    const btn = $(`#${id}`);
+    if (btn) btn.disabled = !canWrite || blocked;
+  }
+  const continueBtn = $("#writerDraftContinue");
+  const content = writer.draftDirty ? $("#writerDraftContent")?.value : chapter?.content;
+  if (continueBtn) continueBtn.disabled = blocked || !writable || !String(content || "").trim();
+}
+
 function renderDraft() {
   const chapter = writer.chapter;
   const hasChapter = Boolean(chapter);
@@ -1450,14 +1491,7 @@ function renderDraft() {
     else if (String(chapter.content || "").trim()) meta.textContent = `${fmtChars(String(chapter.content).length)} 字 · ${chapter.versions?.length || 0} 个版本`;
     else meta.textContent = "还没有正文";
   }
-  const canWrite = hasChapter && !imported && Boolean(writer.book?.current_outline_version_id);
-  for (const id of ["writerDraftGenerate", "writerDraftSegs", "writerDraftRewrite"]) {
-    const btn = $(`#${id}`);
-    if (btn) btn.disabled = !canWrite || writer.busy || writer.pipeline?.status === "stopping";
-  }
-  const continueBtn = $("#writerDraftContinue");
-  if (continueBtn) continueBtn.disabled = imported || !(hasChapter
-    && String(writer.draftDirty ? content?.value || "" : chapter?.content || "").trim()) || writer.busy || writer.pipeline?.status === "stopping";
+  renderDraftGenerationControls();
   const save = $("#writerDraftSave");
   if (save) save.disabled = imported || !hasChapter || !writer.draftDirty || writer.busy;
   const rebuild = $("#writerDraftRebuildState");
@@ -1475,7 +1509,7 @@ function renderDraft() {
       String(row.id || ""),
     )));
     if (versions.length) select.value = String(chapter.current_version_id || versions.at(-1).id || "");
-    select.disabled = imported || writer.busy;
+    select.disabled = imported || versionSwitchLocked();
   }
 }
 
@@ -1851,6 +1885,11 @@ const DECISION_FIELD_LABELS = {
 const decisionDrafts = new Map();
 let renderedDecision = null;
 let pipelineCommand = null;
+let pipelineRefresh = null;
+
+function pipelineRefreshing() {
+  return pipelineRefresh?.bookId === writer.bookId && pipelineRefresh.bookSelection === writer.bookSelection;
+}
 
 function pipelineStepKey(pipeline = writer.pipeline) {
   return JSON.stringify([pipeline?.id, pipeline?.status, pipeline?.step_index, pipeline?.attempt,
@@ -1870,6 +1909,10 @@ function samePipelineTarget(target) {
 function pendingIdentity(pipeline, pending) {
   return { pipeline_id: pipeline.id, step: pending.step, step_index: pending.step_index,
     attempt: pending.attempt, decision_revision: pipeline.decision_revision };
+}
+
+function pipelineIdentity(pipeline) {
+  return { pipeline_id: pipeline.id, attempt: pipeline.attempt };
 }
 
 function decisionText(value) {
@@ -2175,6 +2218,8 @@ async function decidePipeline(action) {
 function renderPipeline() {
   const pipeline = writer.pipeline;
   renderPipelineEntry();
+  renderVersionSwitchState();
+  renderDraftGenerationControls();
   applyOutputModeUi();
   const block = $("#writerPipelineBlock");
   if (!block) return;
@@ -2246,7 +2291,7 @@ function renderPipeline() {
         : raw;
     }
   }
-  const commandBusy = Boolean(pipelineCommand && samePipelineTarget(pipelineCommand));
+  const commandBusy = pipelineRefreshing() || Boolean(pipelineCommand && samePipelineTarget(pipelineCommand));
   const cancel = $("#writerPipelineCancel");
   if (cancel) {
     cancel.hidden = pipeline.status !== "running" && !waiting;
@@ -2288,6 +2333,8 @@ function showPipelineOutcome(pipeline, decision = null) {
       || pipeline.skipped_steps?.length;
     setSaveState(incomplete ? "本轮已结束" : "生成完成", incomplete
       ? "有阶段未写回；详情见「生成进度」。" : "本轮完成，写入的内容可在各阶段查看。");
+  } else if (pipeline.status === "cancelled") {
+    setSaveState("生成已取消", "取消前已保存的内容保留。");
   } else if (!pipelineActive(pipeline)) {
     const label = PIPELINE_STATUS_LABELS[pipeline.status] || pipeline.status;
     setSaveState(`生成${label}`, "详情见「生成进度」。");
@@ -2296,18 +2343,31 @@ function showPipelineOutcome(pipeline, decision = null) {
   }
 }
 
-async function refreshPipelineBook(target) {
+async function refreshPipelineBook(target, { syncPipeline = false } = {}) {
+  if (!samePipelineTarget(target)) return;
+  if (syncPipeline) {
+    // 取消或重试目标过期时，以这次作品读取为准，作废之前发出的流水线查询。
+    writer.pollToken += 1;
+    target = pipelineTarget();
+  }
+  const refresh = pipelineRefresh = { bookId: target.bookId, bookSelection: target.bookSelection };
+  renderPipeline();
   const path = `/api/writer/books/${encodeURIComponent(target.bookId)}`;
   try {
     const payload = await api(path);
-    if (!samePipelineTarget(target) || writer.draftOperation) return;
-    // The GET may already know about a later server step. Never use its active
-    // pipeline to rewind the watch or replace the decision currently on screen.
+    if (pipelineRefresh !== refresh || !samePipelineTarget(target) || writer.draftOperation) return;
     writer.book = payload.book;
     writer.setup = payload.setup;
-    writer.outline = payload.outline;
+    // 分部结构也含未保存的编辑，不能只保留当前 textarea。
+    if (!writer.partsDirty) writer.outline = payload.outline;
     writer.chapters = payload.chapters || [];
     writer.broken = payload.broken || [];
+    if (syncPipeline) {
+      const fresh = payload.book?.active_pipeline || null;
+      if (pipelineStepKey(fresh) !== pipelineStepKey()) beginPipelineWatch(fresh);
+      target = pipelineTarget();
+      if (writer.pipeline && !pipelineActive()) showPipelineOutcome(writer.pipeline);
+    }
     if (!writer.draftDirty && writer.chapterNo) {
       if (!writer.chapters.some((row) => Number(row.no) === writer.chapterNo)) {
         writer.chapter = null;
@@ -2317,9 +2377,13 @@ async function refreshPipelineBook(target) {
         await openChapter(writer.chapterNo, { silent: true, pipelineGuard: target });
       }
     }
-    if (samePipelineTarget(target)) renderAll();
+    if (pipelineRefresh === refresh && samePipelineTarget(target)) renderAll();
   } catch (error) {
-    if (samePipelineTarget(target)) fail("无法刷新作品内容", error);
+    if (pipelineRefresh === refresh && samePipelineTarget(target)) fail("无法刷新作品内容", error);
+  } finally {
+    if (pipelineRefresh === refresh) pipelineRefresh = null;
+    if (samePipelineTarget(target)) renderPipeline();
+    if (syncPipeline) schedulePipelinePolling();
   }
 }
 
@@ -2327,9 +2391,9 @@ async function pollPipelineTick() {
   const target = pipelineTarget();
   const { bookId } = target;
   if (writer.pollBusy || !bookId || !writer.visible || !samePipelineTarget(target) || !pipelineActive()) return;
-  if (pipelineCommand && samePipelineTarget(pipelineCommand)) { schedulePipelinePolling(); return; }
+  if (pipelineRefreshing() || (pipelineCommand && samePipelineTarget(pipelineCommand))) { schedulePipelinePolling(); return; }
   writer.pollBusy = true;
-  const current = () => samePipelineTarget(target) && !(pipelineCommand && samePipelineTarget(pipelineCommand));
+  const current = () => samePipelineTarget(target) && !pipelineRefreshing() && !(pipelineCommand && samePipelineTarget(pipelineCommand));
   try {
     const { pipeline: fresh } = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipeline`);
     if (!current() || !fresh) return;
@@ -2371,6 +2435,7 @@ async function pollPipelineTick() {
     // 网络抖动不终止轮询；下一轮继续。
   } finally {
     writer.pollBusy = false;
+    renderVersionSwitchState();
     schedulePipelinePolling();
   }
 }
@@ -2422,6 +2487,13 @@ async function syncBlockedPipeline(bookId, bookToken) {
   }
 }
 
+function showVersionSwitchLock(error, bookId, bookToken) {
+  if (error?.status !== 409 || error.message !== VERSION_SWITCH_GENERATING) return false;
+  toast(error.message);
+  void syncBlockedPipeline(bookId, bookToken);
+  return true;
+}
+
 /** 生成前把表单里未保存的设定改动先存成一版（人工）。
  *
  * 为什么必须有这一步：流水线读的是**服务端已保存的设定版本**，不是表单。
@@ -2462,6 +2534,10 @@ async function saveSetupBeforeGenerate() {
 }
 
 function canStartPipeline(pipeline = writer.pipeline) {
+  if (pipelineRefreshing()) {
+    toast("正在读取已保存的内容，请稍后再生成");
+    return false;
+  }
   if (pipelineWaiting(pipeline)) {
     toast("这部作品有待处理的生成。请继续处理，或明确放弃本轮生成。");
     if (pipelineWaiting()) revealPipeline();
@@ -2694,7 +2770,7 @@ async function openStepRerunDialog(step) {
 }
 
 async function pipelinePost(command, body, target = pipelineTarget()) {
-  if (!target.bookId || !samePipelineTarget(target) || writer.busy || renderedDecision?.busy
+  if (!target.bookId || !samePipelineTarget(target) || writer.busy || pipelineRefreshing() || renderedDecision?.busy
     || (pipelineCommand && samePipelineTarget(pipelineCommand))) return null;
   // Ignore an in-flight poll while the command is pending; beginPipelineWatch
   // invalidates that generation when the command succeeds.
@@ -2718,19 +2794,30 @@ async function pipelinePost(command, body, target = pipelineTarget()) {
 async function cancelPipeline() {
   const pipeline = writer.pipeline;
   if (!writer.bookId || (pipeline?.status !== "running" && !pipelineWaiting(pipeline))) return;
+  const target = pipelineTarget();
   const pending = pipeline.pending_user;
   const waiting = pipelineWaiting(pipeline);
   if (waiting && !window.confirm("要放弃本轮生成吗？未提交的补充内容不会写入作品；之前已经保存的内容会保留。")) return;
   try {
-    const payload = await pipelinePost("cancel", waiting && pending ? pendingIdentity(pipeline, pending) : {});
+    const identity = waiting && pending ? pendingIdentity(pipeline, pending) : pipelineIdentity(pipeline);
+    const payload = await pipelinePost("cancel", identity, target);
     if (!payload) return;
-    beginPipelineWatch(payload.pipeline);
-    if (waiting) {
-      setSaveState("已放弃本轮生成", "之前已经保存的内容保留；可以发起新的生成。");
-    } else {
-      toast(writer.pipeline.status === "stopping" ? "停止尚未确认；正在等待任务结束" : "已取消；已完成的步骤保留");
+    const fresh = payload.pipeline;
+    beginPipelineWatch(fresh);
+    if (pipelineActive(fresh)) {
+      toast("停止尚未确认，正在等待任务结束");
+      return;
     }
+    showPipelineOutcome(fresh);
+    toast(waiting ? "已放弃本轮生成，之前保存的内容保留" : "已取消，之前保存的内容保留");
+    await refreshPipelineBook(pipelineTarget(), { syncPipeline: true });
   } catch (error) {
+    if (!samePipelineTarget(target)) return;
+    if (error?.status === 409) {
+      toast(error.message);
+      await refreshPipelineBook(target, { syncPipeline: true });
+      return;
+    }
     if (renderedDecision && waiting) renderDecisionError(renderedDecision, `放弃失败：${error.message}`);
     else fail("取消失败", error);
   }
@@ -2738,22 +2825,31 @@ async function cancelPipeline() {
 
 async function retryPipeline() {
   if (!writer.bookId || !writer.pipeline || writer.busy || writer.draftOperation) return;
-  const status = String(writer.pipeline.status || "");
+  const { status } = writer.pipeline;
   if (!["failed", "cancelled", "interrupted", "conflict"].includes(status)) return;
-  let rebase = false;
-  if (status === "conflict") {
-    rebase = window.confirm(
-      "作品或章节在生成期间被修改过（版本冲突）。\n要基于当前最新版本重新生成本步吗？",
-    );
-    if (!rebase) return;
-  }
+  const target = pipelineTarget();
+  const identity = pipelineIdentity(writer.pipeline);
+  const confirmRebase = () => window.confirm("作品或章节版本已变化。要基于当前版本重新生成这一步吗？之前保存的内容会保留。");
+  const rebase = status === "conflict";
+  if (rebase && !confirmRebase()) return;
   try {
-    const payload = await pipelinePost("retry", { rebase: rebase || undefined });
+    let payload;
+    try {
+      payload = await pipelinePost("retry", { ...identity, rebase: rebase || undefined }, target);
+    } catch (error) {
+      if (rebase || error?.status !== 409 || error.payload?.code !== "writer_rebase_required") throw error;
+      if (!samePipelineTarget(target) || !confirmRebase()) return;
+      payload = await pipelinePost("retry", { ...identity, rebase: true }, target);
+    }
     if (!payload) return;
     beginPipelineWatch(payload.pipeline);
     toast("已重试本步");
   } catch (error) {
-    fail("重试失败", error);
+    if (!samePipelineTarget(target)) return;
+    if (error?.status === 409) {
+      toast(error.message);
+      await refreshPipelineBook(target, { syncPipeline: true });
+    } else fail("重试失败", error);
   }
 }
 
@@ -3252,26 +3348,33 @@ async function saveChapterEdit({ beforeGenerate = false } = {}) {
 }
 
 async function selectChapterVersion(versionId) {
-  if (!writer.bookId || !writer.chapter || !versionId || writer.draftOperation) return;
-  if (!await preserveWriterBody()) return;
+  if (!writer.bookId || !writer.chapter || !versionId || writer.draftOperation || versionSwitchLocked()
+    || versionId === writer.chapter.current_version_id) return;
+  const target = draftSnapshot();
+  if (!await preserveWriterBody() || !sameDraftEdit(target) || versionSwitchLocked()) return;
+  const { bookId, bookToken, chapterNo } = target;
   try {
-    await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/versions/select`, {
+    await api(`/api/writer/books/${encodeURIComponent(bookId)}/versions/select`, {
       method: "POST",
       body: {
         kind: "chapter",
-        chapter_no: writer.chapter.no,
+        chapter_no: chapterNo,
         version_id: versionId,
         revision: writer.chapter.revision,
       },
     });
+    if (!sameDraftEdit(target)) return;
     writer.draftDirty = false;
     toast("已切换版本");
-    await openChapter(writer.chapter.no, { silent: true });
+    await openChapter(chapterNo, { silent: true });
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return;
     await reloadBookIndex();
   } catch (error) {
+    if (!sameDraftEdit(target)) return;
+    if (showVersionSwitchLock(error, bookId, bookToken)) return;
     if (error?.status === 409) {
       toast("这一章在别处被修改过；已自动重读最新内容");
-      await openChapter(writer.chapter.no, { silent: true });
+      await openChapter(chapterNo, { silent: true });
       return;
     }
     fail("切换版本失败", error);
@@ -3313,6 +3416,7 @@ async function reloadBookIndex() {
     renderBookSummary();
     renderChapters();
     if (writer.stage === "outline") { renderOutline(); renderOutlineVersions(); }
+    renderVersionSwitchState();
   } catch (_error) {
     // 索引刷新失败不阻断主流程；下一次操作会再读。
   }
@@ -3823,18 +3927,22 @@ async function updateChapterMeta(chapterNo, patch) {
 }
 
 async function selectSetupVersion(versionId) {
-  if (!writer.bookId || !versionId) return;
+  if (!writer.bookId || !versionId || versionSwitchLocked() || versionId === writer.book?.current_setup_version_id) return;
+  const { bookId, bookToken } = writer;
   try {
-    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/versions/select`, {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/versions/select`, {
       method: "POST",
       body: { kind: "setup", version_id: versionId, revision: writer.book?.revision },
     });
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return;
     writer.book = payload.book;
     writer.setupDirty = false;
     writer.outputMode = String(payload.book?.output_mode || "json");
     toast("已切换设定版本");
     await openBook(writer.bookId, { keepStage: true });
   } catch (error) {
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return;
+    if (showVersionSwitchLock(error, bookId, bookToken)) return;
     if (error?.status === 409) {
       toast("作品在别处被修改过；已重新读取");
       await openBook(writer.bookId, { keepEdits: true, keepStage: true });
@@ -3845,16 +3953,20 @@ async function selectSetupVersion(versionId) {
 }
 
 async function selectOutlineVersion(versionId) {
-  if (!writer.bookId || !versionId) return;
+  if (!writer.bookId || !versionId || versionSwitchLocked() || versionId === writer.book?.current_outline_version_id) return;
+  const { bookId, bookToken } = writer;
   try {
-    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/versions/select`, {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/versions/select`, {
       method: "POST",
       body: { kind: "outline", version_id: versionId, revision: writer.book?.revision },
     });
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return;
     writer.book = payload.book;
     toast("已切换大纲版本；大纲汇总与拆分会跟着这一版走");
     await openBook(writer.bookId, { keepStage: true });
   } catch (error) {
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return;
+    if (showVersionSwitchLock(error, bookId, bookToken)) return;
     if (error?.status === 409) {
       toast("作品在别处被修改过；已重新读取");
       await openBook(writer.bookId, { keepEdits: true, keepStage: true });
@@ -4290,6 +4402,7 @@ function manageRowSelectable(row) {
 }
 
 function manageTabNote() {
+  if (versionSwitchLocked() && writer.manage.tab !== "task") return "生成结束后可切换版本。仍可查看记录。";
   return {
     setup: "设定版本逐条保留；「设为当前」立即切换。勾选后可删除不要的版本（删除不能恢复；删的是版本文件本身）。",
     outline: "大纲版本逐条保留；「设为当前」立即切换。勾选后可删除不要的版本（删除不能恢复）。",
@@ -4368,6 +4481,7 @@ function renderManage() {
         use.className = "control-button tiny";
         use.dataset.writerManageUse = key;
         use.textContent = "设为当前";
+        use.disabled = versionSwitchLocked();
         item.append(use);
       } else if (writer.manage.tab === "chapter") {
         const count = document.createElement("span");
@@ -4441,6 +4555,7 @@ async function renderChapterVersionRows() {
         use.className = "control-button tiny";
         use.dataset.writerManageUse = `chapterver:${no}:${row.id}`;
         use.textContent = "设为当前";
+        use.disabled = versionSwitchLocked();
         item.append(use);
       }
       holder.append(item);
@@ -4677,6 +4792,7 @@ function setStage(stage) {
   renderSide();
   renderChapters();
   renderTocLimits();
+  renderVersionSwitchState();
   renderPageState();
   if (next === "draft") void loadContinuityReport();
   void refreshPlan();
@@ -4957,7 +5073,6 @@ export function bindWriterEvents() {
     if (btn) setPane(btn.dataset.writerPane);
   });
   watchWorkbenchSize($("#studioPageWriter"), applyPaneAccessibility);
-  bindWorkbenchMenu($("#writerBookMenuBtn"), $("#writerBookMenu"));
   bindWorkbenchMenu($("#writerMoreBtn"), $("#writerMoreMenu"));
   bindWorkSystemPrompt({ module: "writer", getBook: () => writer.book,
     onSaved: (book) => {
@@ -4966,10 +5081,9 @@ export function bindWriterEvents() {
       writer.book.global_system_prompt_revision = book.global_system_prompt_revision;
       void refreshPlan();
     } });
-  for (const id of ["writerBooksDialog", "writerImportDialog", "writerNovelImportDialog"]) {
-    bindWorkbenchDialogReturn($(`#${id}`), $("#writerBookMenuBtn"));
+  for (const id of ["writerBooksDialog", "writerImportDialog", "writerNovelImportDialog", "writerManageDialog"]) {
+    bindWorkbenchDialogReturn($(`#${id}`), $("#writerMoreBtn"));
   }
-  bindWorkbenchDialogReturn($("#writerManageDialog"), $("#writerMoreBtn"));
   $("#writerAsideBtn")?.addEventListener("click", () => {
     if (writer.pane === "notes") setPane("editor");
     else if (pipelineWaiting()) revealPipeline();
@@ -5280,9 +5394,13 @@ export function bindWriterEvents() {
   $("#writerOutlineUpgrade")?.addEventListener("click", () => void upgradeLegacyOutline());
   $("#writerGotoChapter")?.addEventListener("click", () => setStage("chapter"));
   $("#writerOutlineNote")?.addEventListener("change", () => void refreshPlan());
-  $("#writerOutlineVersion")?.addEventListener("change", (event) => {
-    void selectOutlineVersion(String(event.target.value || ""));
-  });
+  for (const id of ["writerOutlineVersion", "writerChapterOutlineVersion"]) {
+    $(`#${id}`)?.addEventListener("change", (event) => {
+      const versionId = event.target.value;
+      if (writer.book?.current_outline_version_id) event.target.value = writer.book.current_outline_version_id;
+      void selectOutlineVersion(versionId);
+    });
+  }
 
   // ---- 章节（拆分 + 简述） ----
   $("#writerSplitStart")?.addEventListener("click", () => void startSplit());
@@ -5321,11 +5439,6 @@ export function bindWriterEvents() {
     setStage("draft");
     void openChapter(Number(open.dataset.writerBriefOpen || 0));
   });
-  // 章节页左栏切大纲版本：切换后汇总与「拆哪一部」都会跟着新版本走。
-  $("#writerChapterOutlineVersion")?.addEventListener("change", (event) => {
-    void selectOutlineVersion(String(event.target.value || ""));
-  });
-
   // ---- 正文 ----
   $("#writerDraftGenerate")?.addEventListener("click", () => void submitPipeline("chapter", { chapterNo: writer.chapterNo }));
   $("#writerDraftSegs")?.addEventListener("click", () => void submitPipeline("chapter_segs", { chapterNo: writer.chapterNo }));
@@ -5358,7 +5471,9 @@ export function bindWriterEvents() {
   });
   $("#writerDraftNote")?.addEventListener("change", () => void refreshPlan());
   $("#writerDraftVersion")?.addEventListener("change", (event) => {
-    void selectChapterVersion(String(event.target.value || ""));
+    const versionId = event.target.value;
+    if (writer.chapter?.current_version_id) event.target.value = writer.chapter.current_version_id;
+    void selectChapterVersion(versionId);
   });
 
   // ---- 流水线 ----

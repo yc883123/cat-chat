@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from naiba.writer import prompts  # noqa: E402
-from naiba.writer.pipeline import WriterPipelineManager  # noqa: E402
+from naiba.writer.pipeline import WriterPipelineManager, WriterRebaseRequiredError  # noqa: E402
 from naiba.writer.store import WriterConflictError, WriterStore, WriterStoreError  # noqa: E402
 
 
@@ -1314,6 +1314,8 @@ class ContinuationRegressionTests(PipelineTestCase):
         self.assertEqual(len(chapter["versions"]), 2)
         self.tick()
         self.assertEqual(len(self.store.get_chapter(self.book_id, 2)["versions"]), 2)
+        self.finish_state(2)
+        self.assertEqual(self.current_pipeline()["status"], "done")
         self.store.select_chapter_version(self.book_id, 2, version_id=first["version"]["id"])
         self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"], body)
 
@@ -1341,14 +1343,14 @@ class ContinuationRegressionTests(PipelineTestCase):
         self.store.save_chapter_version(self.book_id, 1, content="新前章")
         self.store.save_chapter_version(self.book_id, 2, content="新基线")
         self.store.save_setup(self.book_id, content={"idea": "新设定"})
-        retried = self.manager.retry_pipeline(self.book_id)
+        before = self.current_pipeline()
+        submitted = len(self.app.studio.jobs.submitted)
+        with self.assertRaises(WriterRebaseRequiredError):
+            self.manager.retry_pipeline(self.book_id)
+        self.assertEqual(self.current_pipeline(), before)
         for key in ("request_snapshot", "base_revision", "chapter_revision"):
-            self.assertEqual(retried[key], original[key])
-        self.assertIn("旧基线", self.last_task()["input"]["content"])
-        self.assertNotIn("新基线", self.last_task()["input"]["content"])
-        self.app.studio.jobs.finish(self.last_task()["id"], "新增")
-        self.tick()
-        self.assertEqual(self.current_pipeline()["status"], "conflict")
+            self.assertEqual(before[key], original[key])
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
         rebased = self.manager.retry_pipeline(self.book_id, rebase=True)
         snap = rebased["request_snapshot"]
         self.assertEqual(snap["chapter_baseline"]["content"], "新基线")

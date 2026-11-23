@@ -6,7 +6,7 @@ from unittest import mock
 
 from tests.test_writer_pipeline import PipelineTestCase
 from naiba.writer.pipeline import WriterPipelineManager
-from naiba.writer.store import WriterStore
+from naiba.writer.store import WriterConflictError, WriterStore
 
 
 class WriterPipelineRaceTests(PipelineTestCase):
@@ -56,6 +56,24 @@ class WriterPipelineRaceTests(PipelineTestCase):
         self.assertEqual(errors, [])
         self.assertEqual(self.current_pipeline()["current_task_id"], self.last_task()["id"])
         self.assertEqual(len(self.app.studio.jobs.submitted), 1)
+
+    def test_version_switch_during_submit_cannot_invalidate_generation(self):
+        old = self.store.get_book(self.book_id)["book"]["current_setup_version_id"]
+        saved = self.store.save_setup(self.book_id, content={"idea": "当前创意"})
+        revision = saved["book"]["revision"]
+        finish, _, errors = self.run_blocked(self.start)
+        with self.assertRaisesRegex(WriterConflictError, "当前生成尚未结束"):
+            self.store.select_setup_version(self.book_id, version_id=old, expected_revision=revision)
+        self.store.select_setup_version(self.book_id, version_id=saved["setup_version_id"],
+                                        expected_revision=revision)
+        self.assertEqual(self.store.get_book(self.book_id)["book"]["revision"], revision)
+        finish()
+        self.assertEqual(errors, [])
+        self.app.studio.jobs.finish(self.last_task()["id"], '{"channel":"male","cat":"奇幻"}')
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "running")
+        self.assertEqual(self.current_pipeline()["step_index"], 1)
+        self.assertEqual(self.store.load_setup(self.book_id)["genre"]["cat"], "奇幻")
 
     def test_poll_during_retry_submit_does_not_fail_pipeline(self):
         self.start()
@@ -453,6 +471,68 @@ class WriterPipelineRaceTests(PipelineTestCase):
         retried = self.manager.retry_pipeline(self.book_id)
         self.assertEqual(retried["status"], "running")
         self.assertEqual(retried["attempt"], 2)
+
+    def test_stop_before_task_handle_expires_and_late_submit_cannot_touch_new_generation(self):
+        submit = self.app.studio.jobs.submit
+        finish, _, errors = self.run_blocked(self.start, task_after_submit=False)
+        stopped = self.manager.cancel_pipeline(self.book_id)
+        self.assertEqual(stopped["status"], "stopping")
+        self.assertEqual(stopped["current_task_id"], "")
+        with mock.patch("naiba.writer.pipeline.WRITER_STOP_CONFIRM_BOUND_MS", 0):
+            self.assertEqual(self.manager.get_pipeline(self.book_id)["pipeline"]["status"], "cancelled")
+        self.app.studio.jobs.submit = submit
+        new_pipeline = self.start()
+        finish()
+        self.assertEqual(errors, [])
+        self.assertEqual(self.current_pipeline(), new_pipeline)
+        tasks = self.app.studio.jobs.tasks
+        self.assertEqual(tasks[new_pipeline["current_task_id"]]["status"], "queued")
+        late_tasks = [row for row in tasks.values() if row["id"] != new_pipeline["current_task_id"]]
+        self.assertEqual(len(late_tasks), 1)
+        self.assertEqual(late_tasks[0]["status"], "cancelled")
+
+    def test_empty_task_handle_stop_expires_during_tick(self):
+        finish, _, errors = self.run_blocked(self.start, task_after_submit=False)
+        self.manager.cancel_pipeline(self.book_id)
+        with mock.patch("naiba.writer.pipeline.WRITER_STOP_CONFIRM_BOUND_MS", 0):
+            self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "cancelled")
+        finish()
+        self.assertEqual(errors, [])
+        self.assertEqual(self.current_pipeline()["status"], "cancelled")
+
+    def test_pipeline_poll_expires_stop_while_cancellation_call_is_blocked(self):
+        self.start()
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        cancel = self.app.studio.jobs.cancel
+
+        def blocked(task_id):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("cancel gate was not released")
+            return cancel(task_id)
+
+        def worker():
+            try:
+                self.manager.cancel_pipeline(self.book_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker, name="writer-blocked-cancel")
+        with mock.patch.object(self.app.studio.jobs, "cancel", side_effect=blocked):
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with mock.patch("naiba.writer.pipeline.WRITER_STOP_CONFIRM_BOUND_MS", 0):
+                    payload = self.manager.get_pipeline(self.book_id)
+                self.assertEqual(payload["pipeline"]["status"], "cancelled")
+            finally:
+                release.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.current_pipeline()["status"], "cancelled")
 
     def test_stop_overdue_settles_even_when_task_already_terminal_but_blocked(self):
         """任务已终态但收尾被迟到的提交句柄挡住：超时后同样强制收尾。"""

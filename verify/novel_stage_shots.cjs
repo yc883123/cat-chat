@@ -132,6 +132,7 @@ async function openElements(page) {
   await page.waitForTimeout(1000);
   await page.locator('#studioPages [data-studio-page="novel"]').click();
   await page.waitForTimeout(300);
+  await page.locator('#novelMoreBtn').click();
   await page.locator('#novelBooksBtn').click();
   await page.waitForTimeout(500);
   await page.locator('#novelBookList [data-novel-open]').first().click({ force: true });

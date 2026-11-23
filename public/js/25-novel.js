@@ -419,7 +419,7 @@ function renderChapters() {
     empty.hidden = rows.length > 0;
     empty.textContent = novel.chapters.length
       ? "没有匹配的章节。换个关键词试试。"
-      : "还没有章节。打开页头作品菜单，选择「导入 TXT 新建作品」。";
+      : "还没有章节。点击右上角「⋯」，选择「导入 TXT 新建作品」。";
   }
   renderChapterSourceNote();
   updatePickedCount();
@@ -1075,7 +1075,10 @@ function renderPickManuscripts() {
   if (!host) return;
   const picked = [...novel.picked].sort((a, b) => a - b);
   // 拆章与分镜生图不按章节选稿：分镜吃的是已保存剧本场次，没有逐章素材。
-  if (novel.stage === "split" || novel.stage === "storyboard" || !picked.length) {
+  // 导入暂存态（还没保存为作品）也不画：清单要按章接口取，bookId 为空时
+  // loadChapterRoster 直接短路，下拉会永远停在「正在读取稿件…」。
+  if (novel.stage === "split" || novel.stage === "storyboard"
+    || novel.staged || !novel.bookId || !picked.length) {
     host.replaceChildren();
     host.hidden = true;
     return;
@@ -1526,7 +1529,7 @@ function renderPlan() {
   if (pageState) {
     const book = novel.staged
       ? "待保存作品"
-      : (novel.bookId ? `${bookTitleLabel(novel.book?.title || "已打开作品")}已保存` : "选择作品");
+      : (novel.bookId ? `${bookTitleLabel(novel.book?.title || "已打开作品")}已保存` : "未打开作品");
     pageState.textContent = `${book} · ${stageLabel(novel.stage)}`;
     pageState.title = pageState.textContent;
   }
@@ -4081,7 +4084,7 @@ export function bindNovelEvents() {
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   });
-  bindWorkbenchDialogReturn($("#novelBooksDialog"), $("#novelBookMenuBtn"));
+  bindWorkbenchDialogReturn($("#novelBooksDialog"), $("#novelMoreBtn"));
   bindWorkbenchDialogReturn($("#novelManageDialog"), $("#novelMoreBtn"));
   $("#novelBooksClose")?.addEventListener("click", () => {
     const dialog = $("#novelBooksDialog");
@@ -4449,7 +4452,6 @@ export function bindNovelEvents() {
   });
 
   watchWorkbenchSize($("#studioPageNovel"), applyPaneAccessibility);
-  bindWorkbenchMenu($("#novelBookMenuBtn"), $("#novelBookMenu"));
   bindWorkbenchMenu($("#novelMoreBtn"), $("#novelMoreMenu"));
   bindWorkSystemPrompt({ module: "novel", getBook: () => novel.book,
     onSaved: (book) => {

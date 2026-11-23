@@ -1,4 +1,4 @@
-// 真页面 + 隔离服务：验证改版后的书名菜单、分栏、固定动作栏与原有流程入口。
+// 真页面 + 隔离服务：验证页头「⋯」作品菜单、分栏、固定动作栏与原有流程入口。
 const {chromium} = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -17,6 +17,9 @@ fs.mkdirSync(output,{recursive:true});
     const page = await browser.newPage({viewport:{width:1440,height:900}});
     const errors=[];
     page.on('pageerror',error=>errors.push(error.message));
+    page.on('console',message=>{
+      if(message.type()==='error'&&!message.text().includes('Failed to load resource')) errors.push(message.text());
+    });
     await page.addInitScript(f=>{
       localStorage.setItem('naibaOnboardingDismissed','1');
       localStorage.setItem('naibaNovelLastBookId',f.novel_book_id);
@@ -24,7 +27,7 @@ fs.mkdirSync(output,{recursive:true});
     },fixture);
     await page.goto(BASE,{waitUntil:'domcontentloaded'});
     await page.waitForSelector('#openStudio');
-    for (const width of [1440,1280,1160,1024,900,390]) {
+    for (const width of [1440,1280,1160,1024,900,390,375]) {
       await page.setViewportSize({width,height:900});
       for (const prefix of ['novel','writer']) {
         const root = '#studioPage'+(prefix==='novel'?'Novel':'Writer');
@@ -63,22 +66,64 @@ fs.mkdirSync(output,{recursive:true});
           }
           assert.deepEqual(errors,[],`${prefix}/${stage}/${width} 脚本异常`);
         }
-        await page.locator('#'+prefix+'BookMenuBtn').click();
-        assert.equal(await page.locator('#'+prefix+'BookMenu').isVisible(),true);
-        assert.ok((await page.locator('#'+prefix+'BookMenuBtn').boundingBox()).width>=40);
+        const menuTrigger=page.locator(root).getByRole('button',{name:'更多作品操作'});
+        assert.equal(await menuTrigger.getAttribute('id'),prefix+'MoreBtn');
+        assert.equal(await page.locator('#'+prefix+'BookMenuBtn').count(),0);
+        assert.equal(await page.locator('#'+prefix+'PageState').evaluate(el=>Boolean(el.closest('button,a,summary'))),false);
+        const triggerRect=await menuTrigger.boundingBox();
+        const touchTarget=size==='narrow'||width<=760||await page.evaluate(()=>matchMedia('(pointer: coarse)').matches);
+        const minimumTriggerSize=touchTarget?40:32;
+        assert.ok(triggerRect&&triggerRect.width>=minimumTriggerSize&&triggerRect.height>=minimumTriggerSize
+          &&triggerRect.x>=0&&triggerRect.x+triggerRect.width<=width,
+        `页头菜单按钮尺寸或位置异常 ${JSON.stringify({prefix,width,size,minimumTriggerSize,triggerRect})}`);
+        const menu=page.locator('#'+prefix+'MoreMenu');
+        await menuTrigger.click();
+        assert.equal(await menu.isVisible(),true);
+        assert.equal(await menuTrigger.getAttribute('aria-expanded'),'true');
+        const actionSuffixes=['BooksBtn','ImportBtn','SystemPromptBtn','ManageBtn','ExportBtn'];
+        if(prefix==='writer') actionSuffixes.push('NewBookBtn','NovelContinueBtn');
+        for(const suffix of actionSuffixes) {
+          assert.equal(await menu.locator('#'+prefix+suffix).isVisible(),true,`${prefix}/${width} 菜单缺少 ${suffix}`);
+        }
+        assert.equal(await menu.locator('[data-resource-details]').isVisible(),true);
+        assert.equal(await menu.locator('[data-studio-refresh]').isVisible(),true);
+        const menuRect=await menu.boundingBox();
+        assert.ok(menuRect&&menuRect.x>=12&&menuRect.x+menuRect.width<=width-12&&menuRect.y>=0&&menuRect.y+menuRect.height<=900,'作品菜单必须完整位于视口');
+        await page.screenshot({path:path.join(output,`${prefix}-${width}-menu.png`)});
+        assert.deepEqual(errors,[],`${prefix}/${width} 打开作品菜单后脚本异常`);
         await page.locator('#'+prefix+'BooksBtn').click();
         await page.waitForSelector('#'+prefix+'BooksDialog[open]');
         await page.locator('#'+prefix+'BooksClose').click();
-        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'BookMenuBtn',prefix);
-        // 键盘进入作品列表并用 Escape 关闭，也必须返回可见的书名入口。
+        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'MoreBtn',prefix);
+        assert.equal(await menuTrigger.getAttribute('aria-expanded'),'false');
+        assert.deepEqual(errors,[],`${prefix}/${width} 关闭作品列表后脚本异常`);
+        // 从页头用键盘打开菜单、遍历到作品列表，Escape 关闭后回到同一按钮。
         await page.keyboard.press('Enter');
-        await page.waitForSelector('#'+prefix+'BookMenu');
+        await menu.waitFor({state:'visible'});
+        await page.waitForFunction(prefix=>document.getElementById(prefix+'MoreMenu').contains(document.activeElement),prefix);
+        const menuButtonCount=await menu.locator('button:not(:disabled)').count();
+        for(let index=0;index<menuButtonCount&&await page.evaluate(()=>document.activeElement.id)!==prefix+'BooksBtn';index++) {
+          await page.keyboard.press('Tab');
+        }
+        assert.equal(await page.evaluate(()=>document.activeElement.id),prefix+'BooksBtn');
         await page.keyboard.press('Enter');
         await page.waitForSelector('#'+prefix+'BooksDialog[open]');
         await page.keyboard.press('Escape');
-        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'BookMenuBtn',prefix);
-        await page.locator('#'+prefix+'MoreBtn').click();
-        const anchorRect=await page.locator('#'+prefix+'MoreBtn').boundingBox();
+        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'MoreBtn',prefix);
+        assert.deepEqual(errors,[],`${prefix}/${width} 键盘作品菜单后脚本异常`);
+        await menuTrigger.click();
+        await page.locator('#'+prefix+'SystemPromptBtn').click();
+        await page.waitForSelector('#'+prefix+'SystemPromptDialog[open]');
+        await page.locator('#'+prefix+'SystemPromptCancel').click();
+        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'MoreBtn',prefix);
+        await menuTrigger.click();
+        await page.locator('#'+prefix+'ManageBtn').click();
+        await page.waitForSelector('#'+prefix+'ManageDialog[open]');
+        await page.locator('#'+prefix+'ManageClose').click();
+        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'MoreBtn',prefix);
+        assert.deepEqual(errors,[],`${prefix}/${width} 关闭作品设置与管理后脚本异常`);
+        await menuTrigger.click();
+        const anchorRect=await menuTrigger.boundingBox();
         await page.locator('#'+prefix+'ExportBtn').click();
         await page.waitForSelector('#'+prefix+'ExportMenu');
         assert.equal(await page.locator('#'+prefix+'ExportMenu').isVisible(),true);
@@ -101,11 +146,17 @@ fs.mkdirSync(output,{recursive:true});
           assert.equal(await page.locator('#'+prefix+'AsideBtn').getAttribute('aria-expanded'),'false');
         }
         if(prefix==='writer') {
-          await page.locator('#writerBookMenuBtn').click();
+          await menuTrigger.click();
+          await page.locator('#writerNewBookBtn').click();
+          await page.waitForSelector('#writerBooksDialog[open]');
+          assert.equal(await page.evaluate(()=>document.activeElement.id),'writerNewTitle');
+          await page.locator('#writerBooksClose').click();
+          await page.waitForFunction(()=>document.activeElement.id==='writerMoreBtn');
+          await menuTrigger.click();
           await page.locator('#writerNovelContinueBtn').click();
           await page.waitForSelector('#writerNovelImportDialog[open]');
           await page.locator('#writerNovelImportClose').click();
-          await page.waitForFunction(()=>document.activeElement.id==='writerBookMenuBtn');
+          await page.waitForFunction(()=>document.activeElement.id==='writerMoreBtn');
         }
         await page.screenshot({path:path.join(output,`${prefix}-${width}.png`)});
         assert.deepEqual(errors,[]);

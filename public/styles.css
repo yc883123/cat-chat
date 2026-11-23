@@ -6041,7 +6041,8 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-sm);
   background: var(--surface); cursor: pointer;
 }
-.writer-version-row:hover { border-color: var(--violet-line); background: var(--accent-soft); }
+.writer-version-row:hover:not(:disabled) { border-color: var(--violet-line); background: var(--accent-soft); }
+.writer-version-row:disabled { cursor: not-allowed; }
 .writer-version-row.active { border-color: var(--accent-solid); background: var(--accent-soft); }
 .writer-version-row strong { font-size: 12px; }
 .writer-version-row small { font-size: 10.5px; color: var(--muted); }
@@ -6603,11 +6604,7 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   /* 与拆书匠导出菜单同根因同修法：操作条 overflow-x:auto 裁掉 absolute 下拉，
      手机端改 fixed + JS 按钮落位（见 .novel-export-menu 注释与 27-writer.js）。 */
   .writer-export-menu { position: fixed; top: auto; right: auto; left: auto; margin-top: 0; }
-  /* 与拆书匠同一套窄屏页头：只放 4 个按钮——「新建作品」的入口在「作品」弹窗里
-     （顶部有书名输入 + 新建），页面上不必再占一格。
-     阶段说明是桌面提示，窄屏必须收起：5 个按钮（382）+ 说明（176）会把整页的
-     最小宽度顶到 406px，360 宽手机上右边会被裁 46px（2026-10-30 实测）。 */
-  #writerNewBookBtn { display: none; }
+  /* 新建作品等操作放在页头更多菜单；窄屏收起阶段说明。 */
   .writer-stagebar-note { display: none; }
   .writer-stagebar { min-height: 46px; padding: 0 12px; }
   .writer-stage { height: 30px; padding: 0 12px; }
@@ -7571,18 +7568,11 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
   min-height: 52px; gap: 8px; padding: 8px 16px; flex-wrap: nowrap;
 }
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-page-title-row, .writer-page-title-row) { flex: 1 1 180px; align-items: center; gap: 10px; min-width: 0; }
-.wb-book-switch {
-  display: flex; flex: 1 1 auto; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; max-width: 280px;
-  border: 0; border-radius: var(--r-sm); padding: 4px 6px; background: transparent; color: var(--text); cursor: pointer;
-}
-.wb-book-switch:hover { background: var(--surface-2); }
-.wb-book-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.wb-book-switch > span:first-child { width: auto; min-width: 0; max-width: 260px; }
 .wb-book-menu { position: fixed; inset: auto; margin: 0; box-sizing: border-box; width: max-content; min-width: 180px; max-width: min(340px, calc(100vw - 24px)); padding: 6px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--text); box-shadow: var(--shadow-3); overflow: auto; }
 .wb-book-menu[hidden] { display: none; }
 .wb-book-menu > button { display: flex; width: 100%; justify-content: flex-start; text-align: left; white-space: normal; border: 0; background: transparent; color: var(--text); border-radius: var(--r-sm); padding: 8px 12px; }
 .wb-book-menu > button:hover:not(:disabled) { background: var(--accent-soft); }
-#writerBookMenu #writerNewBookBtn { display: flex; }
+.wb-book-menu > hr { margin: 6px; border: 0; border-top: 1px solid var(--line); }
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-page-actions, .writer-page-actions) { order: 3; flex: none; gap: 6px; overflow: visible; }
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-page-actions, .writer-page-actions) > button { padding: 0 10px; }
 :is(#studioPageNovel, #studioPageWriter) .wb-book-more { min-width: 32px; font-size: 20px; }
@@ -7602,6 +7592,7 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-stage-group, .writer-stage-group, .novel-block, .writer-block) { border: 0; border-radius: 0; padding: 0 0 14px; background: transparent; gap: 12px; }
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-group-head, .writer-group-head, .novel-block-title, .writer-block-title) { padding-bottom: 8px; border-bottom: 1px solid var(--line); align-items: baseline; flex-wrap: wrap; }
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-group-head, .writer-group-head) small { display: inline; text-align: left; }
+#studioPageWriter [data-writer-version-lock-note][hidden] { display: none; }
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-book-stats, .writer-book-stats) { gap: 10px; }
 :is(#studioPageNovel, #studioPageWriter) :is(.novel-book-stat, .writer-book-stat) { border: 0; border-radius: 0; background: transparent; padding: 4px 0; text-align: left; }
 #novelEditorBody, #writerEditorBody { display: flex; flex-direction: column; overflow: hidden; min-height: 0; flex: 1; }
@@ -7630,8 +7621,7 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] :is(.novel-panes, .writer-panes) { display: flex; order: 10; flex: none; border-top: 1px solid var(--line); border-bottom: 0; padding: 6px 12px; padding-bottom: max(6px, env(safe-area-inset-bottom)); background: var(--surface); }
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] :is(.novel-pane-btn, .writer-pane-btn) { flex: 1; min-height: 40px; }
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] :is(.novel-page-title-row, .writer-page-title-row) { flex: 1 1 120px; gap: 6px; }
-:is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] .wb-book-switch > span:first-child { max-width: none; }
-:is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] :is(.wb-book-switch, .wb-book-more) { min-width: 40px; }
+:is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] .wb-book-more { min-width: 40px; }
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] :is(.novel-stage, .writer-stage) { height: 40px; padding: 0 8px; }
 :is(#studioPageNovel, #studioPageWriter)[data-wb-size="narrow"] :is(.novel-grid-2, .writer-grid-2, .novel-stage-model) { grid-template-columns: minmax(0, 1fr); }
 /* wb-books:end */

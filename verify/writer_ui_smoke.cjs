@@ -394,14 +394,9 @@ async function runViewport(browser, vp) {
     check('页面标题是「织书台」', (await page.textContent('#studioPageWriter h2')).trim() === '织书台');
     check('未打开作品时显示占位与空目录', await page.isVisible('#writerEditorPlaceholder'));
 
-    // 2) 新建作品（走注入的 POST）。手机页头与拆书匠同一套：页面上没有「新建作品」，
-    //    入口在「作品」弹窗顶部的书名输入 + 新建。
-    if (isMobile) {
-      await page.click('#writerBooksBtn');
-      await page.waitForTimeout(300);
-    } else {
-      await page.click('#writerNewBookBtn');
-    }
+    // 2) 桌面和手机均从页头「⋯」菜单新建作品（走注入的 POST）。
+    await page.click('#writerMoreBtn');
+    await page.click('#writerNewBookBtn');
     await page.fill('#writerNewTitle', '雾港旧事');
     await page.click('#writerCreateBtn');
     await page.waitForTimeout(400);
@@ -589,6 +584,7 @@ async function runViewport(browser, vp) {
       JSON.stringify(afterSwitch));
 
     // 8) 导入存档（两段式）
+    await page.click('#writerMoreBtn');
     await page.click('#writerImportBtn');
     await page.waitForTimeout(300);
     const tmpJson = `${require('os').tmpdir()}/writer_smoke_archive_${Date.now()}.json`;
@@ -604,6 +600,7 @@ async function runViewport(browser, vp) {
       await page.inputValue('#writerIdea'));
 
     // 9) 导出：后端落盘 + 原生另存为（exe 里 <a download> 会被 pywebview 静默取消）
+    await page.click('#writerMoreBtn');
     await page.click('#writerExportBtn');
     await page.waitForTimeout(250);
     await page.click('[data-writer-export="txt"]');
@@ -621,6 +618,7 @@ async function runViewport(browser, vp) {
 
     // 9b) 整本没有正文：不弹保存框（空壳文件正是「导出又坏了」的来源），明确提示换一种导出
     exportEmpty = true;
+    await page.click('#writerMoreBtn');
     await page.click('#writerExportBtn');
     await page.waitForTimeout(250);
     await page.click('[data-writer-export="md-extras"]');
@@ -647,9 +645,7 @@ async function runViewport(browser, vp) {
       await page.waitForTimeout(200);
       check('说明档：只有右栏可见', await page.isVisible('.writer-notes') && !(await page.isVisible('.writer-book')));
 
-      // 页头窄屏与拆书匠同一套：只留 4 个按钮，整页不得被顶宽。
-      // 判据用「页面宽 = 视口宽」，而不是肉眼看截图：5 个按钮 + 阶段说明会把最小宽度顶到 406px，
-      // 在 360/375 宽手机上右边被整块裁掉（2026-10-30 实测）。
+      // 手机页头动作收进「⋯」，检查页面几何与菜单中的新建入口。
       const mobileLayout = await page.evaluate(() => {
         const pageEl = document.querySelector('#studioPageWriter');
         const actions = document.querySelector('.writer-page-actions');
@@ -657,19 +653,23 @@ async function runViewport(browser, vp) {
           pageW: Math.round(pageEl.getBoundingClientRect().width),
           vw: window.innerWidth,
           actionsOverflow: actions.scrollWidth - actions.clientWidth,
-          newBook: getComputedStyle(document.querySelector('#writerNewBookBtn')).display,
+          newBookInMenu: Boolean(document.querySelector('#writerMoreMenu #writerNewBookBtn')),
           note: getComputedStyle(document.querySelector('.writer-stagebar-note')).display,
         };
       });
       check('手机：整页宽度等于视口（无横向裁切）', mobileLayout.pageW <= mobileLayout.vw, JSON.stringify(mobileLayout));
       check('手机：页头按钮不横向溢出', mobileLayout.actionsOverflow <= 0, `overflow=${mobileLayout.actionsOverflow}`);
-      check('手机：隐藏「新建作品」与阶段说明（同拆书匠）', mobileLayout.newBook === 'none' && mobileLayout.note === 'none');
+      check('手机：新建作品位于页头菜单，阶段说明收起', mobileLayout.newBookInMenu && mobileLayout.note === 'none');
+      await page.click('#writerMoreBtn');
+      check('手机：页头菜单中的「新建作品」可见', await page.isVisible('#writerNewBookBtn'));
+      await page.keyboard.press('Escape');
     } else {
       check('桌面三栏同显', await page.isVisible('.writer-book') && await page.isVisible('.writer-editor') && await page.isVisible('.writer-notes'));
     }
 
     // 11) 任务来源映射：模块库列表不出现 writer 任务（exclude_modules 分区），
     // 织书台管理记录里则显示 taskOrigin=织书台 的标题。
+    await page.click('#writerMoreBtn');
     await page.click('#writerManageBtn');
     await page.waitForTimeout(300);
     await page.click('[data-writer-manage-tab="task"]');

@@ -56,7 +56,7 @@ async function unknown(context, page, source, width) {
   assert.deepEqual(fingerprints(novelRoot), before, 'preflight modified the source data');
 
   await enter(page, 'writer');
-  await page.locator('#writerBookMenuBtn').click();
+  await page.locator('#writerMoreBtn').click();
   await page.locator('#writerNovelContinueBtn').click();
   await page.waitForFunction(() => !document.querySelector('#writerNovelImportNext').disabled);
   await page.locator('[data-writer-source-mode="book"]').click();

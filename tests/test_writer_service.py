@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from naiba.writer.pipeline import WriterPipelineManager  # noqa: E402
 from naiba.writer.service import WriterService  # noqa: E402
 from naiba.writer.store import WriterStore  # noqa: E402
+from naiba.core.contracts import WRITER_REBASE_REQUIRED_CODE  # noqa: E402
 
 
 class _Jobs:
@@ -202,6 +203,58 @@ class ServiceTestCase(unittest.TestCase):
             self.book_id, {"kind": "bogus", "version_id": "x"})
         self.assertEqual(status, 400)
 
+    def test_active_generation_blocks_version_changes_and_keeps_history_readable(self):
+        store = self.service.store
+        setup = store.get_book(self.book_id)["book"]["current_setup_version_id"]
+        outline = store.get_book(self.book_id)["book"]["current_outline_version_id"]
+        chapter = store.save_chapter_version(self.book_id, 1, content="第一份正文")["version"]["id"]
+        store.save_setup(self.book_id, content={"idea": "第二版创意"})
+        store.save_outline(self.book_id, chapters=[{"no": 1, "title": "第二版大纲", "beat": "继续调查"}])
+        store.save_chapter_version(self.book_id, 1, content="第二份正文")
+        selections = [("setup", setup), ("outline", outline), ("chapter", chapter)]
+        for state in ("running", "stopping", "needs_user"):
+            with self.subTest(state=state):
+                with store._lock:
+                    manifest = store._load_manifest(self.book_id)
+                    manifest["active_pipeline"] = {"id": "pl-aaaaaaaaaaaa", "status": state}
+                    store._save_manifest(store._book_dir(self.book_id), manifest)
+                before = store._load_manifest(self.book_id)
+                chapter_before = store.get_chapter(self.book_id, 1)
+                for kind, version_id in selections:
+                    payload, status = self.service.api_select_version(self.book_id, {
+                        "kind": kind, "version_id": version_id, "chapter_no": 1,
+                        "revision": chapter_before["revision"] if kind == "chapter" else before["revision"],
+                    })
+                    self.assertEqual(status, 409, payload)
+                    self.assertEqual(payload["error"], "当前生成尚未结束，请结束后再切换版本")
+                self.assertEqual(store._load_manifest(self.book_id), before)
+                self.assertEqual(store.get_chapter(self.book_id, 1), chapter_before)
+                self.assertEqual(store.load_setup(self.book_id, version_id=setup)["idea"], "一句话创意")
+                self.assertEqual(store.load_outline(self.book_id, version_id=outline)["chapters"][0]["title"], "第1章")
+                self.assertIn(chapter, [row["id"] for row in chapter_before["versions"]])
+
+    def test_selecting_current_version_is_idempotent_during_generation(self):
+        store = self.service.store
+        saved = store.save_chapter_version(self.book_id, 1, content="当前正文")
+        with store._lock:
+            manifest = store._load_manifest(self.book_id)
+            manifest["active_pipeline"] = {"id": "pl-aaaaaaaaaaaa", "status": "running"}
+            store._save_manifest(store._book_dir(self.book_id), manifest)
+        before = store._load_manifest(self.book_id)
+        chapter_before = store.get_chapter(self.book_id, 1)
+        for kind, version_id in [
+            ("setup", before["current_setup_version_id"]),
+            ("outline", before["current_outline_version_id"]),
+            ("chapter", saved["version"]["id"]),
+        ]:
+            payload, status = self.service.api_select_version(self.book_id, {
+                "kind": kind, "version_id": version_id, "chapter_no": 1,
+                "revision": chapter_before["revision"] if kind == "chapter" else before["revision"],
+            })
+            self.assertEqual(status, 200, payload)
+        self.assertEqual(store._load_manifest(self.book_id), before)
+        self.assertEqual(store.get_chapter(self.book_id, 1), chapter_before)
+
     def test_manual_outline_patch_syncs_chapters(self):
         """人工编辑大纲走 PATCH book（织书台前端「保存大纲修改」）：manual 版本 + 章节同步。"""
         current_revision = self.service.store.get_book(self.book_id)["book"]["revision"]
@@ -347,6 +400,100 @@ class ServiceTestCase(unittest.TestCase):
             self.book_id, {"kind": "setup_all", "model_name": "probe"})
         payload, status = self.service.api_retry_pipeline(self.book_id, {})
         self.assertEqual(status, 409)  # running 不可重试
+
+    def test_retry_after_cancel_and_version_change_requires_rebase_before_submit(self):
+        first = self.service.store.get_book(self.book_id)["book"]["current_setup_version_id"]
+        self.service.store.save_setup(self.book_id, content={"idea": "当前创意"})
+        started, status = self.service.api_start_pipeline(
+            self.book_id, {"kind": "setup_step", "step": "genre", "model_name": "probe"})
+        self.assertEqual(status, 201, started)
+        identity = {"pipeline_id": started["pipeline"]["id"], "attempt": started["pipeline"]["attempt"]}
+        self.assertEqual(self.service.api_cancel_pipeline(self.book_id, identity)[1], 200)
+        self.service.store.select_setup_version(self.book_id, version_id=first)
+        before = self.service.store.get_active_pipeline(self.book_id)
+        submitted = len(self.app.studio.jobs.submitted)
+        rejected, status = self.service.api_retry_pipeline(self.book_id, identity)
+        self.assertEqual(status, 409, rejected)
+        self.assertEqual(rejected["code"], WRITER_REBASE_REQUIRED_CODE)
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id), before)
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
+        rebased, status = self.service.api_retry_pipeline(self.book_id, {**identity, "rebase": True})
+        self.assertEqual(status, 200, rebased)
+        self.assertEqual(rebased["pipeline"]["attempt"], before["attempt"] + 1)
+        self.assertEqual(rebased["pipeline"]["request_snapshot"]["setup_version_id"], first)
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted + 1)
+
+    def test_old_cancel_and_retry_commands_cannot_modify_new_attempt(self):
+        started, _ = self.service.api_start_pipeline(
+            self.book_id, {"kind": "setup_all", "model_name": "probe"})
+        original = {"pipeline_id": started["pipeline"]["id"], "attempt": started["pipeline"]["attempt"]}
+        self.assertEqual(self.service.api_cancel_pipeline(self.book_id, original)[1], 200)
+        retried, status = self.service.api_retry_pipeline(self.book_id, original)
+        self.assertEqual(status, 200, retried)
+        current = self.service.store.get_active_pipeline(self.book_id)
+        self.assertEqual(self.service.api_cancel_pipeline(self.book_id, original)[1], 409)
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id), current)
+        identity = {"pipeline_id": current["id"], "attempt": current["attempt"]}
+        self.assertEqual(self.service.api_cancel_pipeline(self.book_id, identity)[1], 200)
+        current = self.service.store.get_active_pipeline(self.book_id)
+        submitted = len(self.app.studio.jobs.submitted)
+        for body in (original, {**original, "rebase": True}):
+            self.assertEqual(self.service.api_retry_pipeline(self.book_id, body)[1], 409)
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id), current)
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
+
+    def test_retry_checks_chapter_revision_even_when_book_revision_matches(self):
+        self._running_chapter_task()
+        self.assertEqual(self.service.api_cancel_pipeline(self.book_id)[1], 200)
+        with self.service.store._lock:
+            book_dir = self.service.store._book_dir(self.book_id)
+            chapter = self.service.store._load_chapter_index(book_dir, 1)
+            chapter["revision"] += 1
+            self.service.store._write_chapter_index(book_dir, chapter)
+        before = self.service.store.get_active_pipeline(self.book_id)
+        submitted = len(self.app.studio.jobs.submitted)
+        payload, status = self.service.api_retry_pipeline(self.book_id, {})
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["code"], WRITER_REBASE_REQUIRED_CODE)
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id), before)
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
+
+    def test_cancel_identity_follows_same_attempt_to_next_step(self):
+        started, _ = self.service.api_start_pipeline(
+            self.book_id, {"kind": "setup_all", "model_name": "probe"})
+        pipeline = started["pipeline"]
+        self.app.studio.jobs.finish(pipeline["current_task_id"], '{"channel":"male","cat":"奇幻"}')
+        self.service.pipeline.tick()
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id)["step_index"], 1)
+        cancelled, status = self.service.api_cancel_pipeline(
+            self.book_id, {"pipeline_id": pipeline["id"], "attempt": pipeline["attempt"]})
+        self.assertEqual(status, 200, cancelled)
+        self.assertEqual(cancelled["pipeline"]["status"], "cancelled")
+
+    def test_cancel_supplied_identity_cannot_abandon_new_pending_decision(self):
+        started, _ = self.service.api_start_pipeline(
+            self.book_id, {"kind": "setup_step", "step": "genre", "model_name": "probe"})
+        pipeline = started["pipeline"]
+        self.app.studio.jobs.finish(pipeline["current_task_id"], '无结构的题材结果')
+        self.service.pipeline.tick()
+        pending = self.service.store.get_active_pipeline(self.book_id)
+        self.assertEqual(pending["status"], "needs_user")
+        identity = {"pipeline_id": pipeline["id"], "attempt": pipeline["attempt"]}
+        self.assertEqual(self.service.api_cancel_pipeline(self.book_id, identity)[1], 409)
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id), pending)
+        full = {**identity, "step": pending["pending_user"]["step"], "step_index": pending["step_index"],
+                "decision_revision": pending["decision_revision"]}
+        self.assertEqual(self.service.api_cancel_pipeline(self.book_id, full)[1], 200)
+
+    def test_cancel_rejects_partial_or_invalid_supplied_identity(self):
+        started, _ = self.service.api_start_pipeline(
+            self.book_id, {"kind": "setup_all", "model_name": "probe"})
+        current = self.service.store.get_active_pipeline(self.book_id)
+        for body in ({"pipeline_id": current["id"]}, {"attempt": current["attempt"]},
+                     {"pipeline_id": current["id"], "attempt": True},
+                     {"pipeline_id": "pl-outdated", "attempt": current["attempt"]}):
+            self.assertEqual(self.service.api_cancel_pipeline(self.book_id, body)[1], 409)
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id), current)
 
     # ---- 写回语义（计划点名的场景） ----
 

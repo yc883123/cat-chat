@@ -771,6 +771,12 @@ class WriterStore:
                 f"{what}已被修改过（你看到的是第 {expected_no} 版，现在是第 {actual} 版），请重新读取后再操作"
             )
 
+    @staticmethod
+    def _assert_version_switch_allowed(manifest: dict[str, Any]) -> None:
+        pipeline = manifest.get("active_pipeline") or {}
+        if pipeline.get("status") in ("running", WRITER_PIPELINE_STOPPING, WRITER_PIPELINE_NEEDS_USER):
+            raise WriterConflictError("当前生成尚未结束，请结束后再切换版本")
+
     # ---- 对外视图 ----
 
     @staticmethod
@@ -1641,6 +1647,10 @@ class WriterStore:
             known = [str(row.get("id") or "") for row in (index.get("version_ids") or []) if isinstance(row, dict)]
             if vid not in known:
                 raise WriterStoreError(f"第 {chapter_no} 章没有这份正文版本")
+            if vid == str(index.get("current_version_id") or ""):
+                return {"chapter_no": chapter_no, "current_version_id": vid,
+                        "chapter_revision": int(index.get("revision") or 0)}
+            self._assert_version_switch_allowed(manifest)
             index["current_version_id"] = vid
             index["revision"] = int(index.get("revision") or 0) + 1
             index["updated_at"] = _now_ms()
@@ -1663,6 +1673,9 @@ class WriterStore:
                      if isinstance(row, dict)]
             if vid not in known:
                 raise WriterStoreError("设定版本不存在")
+            if vid == str(manifest.get("current_setup_version_id") or ""):
+                return {"book": self._public_manifest(manifest)}
+            self._assert_version_switch_allowed(manifest)
             book_dir = self._book_dir(book_id)
             manifest["current_setup_version_id"] = vid
             self._bump_manifest(book_dir, manifest)
@@ -1678,6 +1691,9 @@ class WriterStore:
                      if isinstance(row, dict)]
             if vid not in known:
                 raise WriterStoreError("大纲版本不存在")
+            if vid == str(manifest.get("current_outline_version_id") or ""):
+                return {"book": self._public_manifest(manifest)}
+            self._assert_version_switch_allowed(manifest)
             book_dir = self._book_dir(book_id)
             manifest["current_outline_version_id"] = vid
             self._bump_manifest(book_dir, manifest)

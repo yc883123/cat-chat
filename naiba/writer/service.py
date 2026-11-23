@@ -15,11 +15,12 @@ from typing import Any
 from naiba.core.contracts import (
     WRITER_CHAPTER_BASELINE_KEY, WORK_GLOBAL_SYSTEM_PROMPT_KEY,
     WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, WRITER_OUTPUT_MODE_KEY,
+    WRITER_REBASE_REQUIRED_CODE,
 )
 from naiba.core.shell_open import open_folder
 from naiba.writer import coherence
 from naiba.writer import prompts
-from naiba.writer.pipeline import WriterPipelineManager, WriterPipelineError
+from naiba.writer.pipeline import WriterPipelineManager, WriterPipelineError, WriterRebaseRequiredError
 from naiba.writer.store import (
     WriterConflictError,
     WriterStore,
@@ -457,6 +458,8 @@ class WriterService:
             return {"error": str(exc)}, 400
 
     def api_cancel_pipeline(self, book_id: str, body: dict[str, Any] | None = None) -> tuple[dict[str, Any], int]:
+        if body is not None and not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
         try:
             pipeline = (self.pipeline.cancel_pipeline(book_id, identity=body) if body
                         else self.pipeline.cancel_pipeline(book_id))
@@ -469,11 +472,19 @@ class WriterService:
             return {"error": str(exc)}, 400
 
     def api_retry_pipeline(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
         rebase = isinstance(body, dict) and str(body.get("rebase") or "").lower() in ("1", "true", "yes")
+        identity = body if "pipeline_id" in body or "attempt" in body else None
         try:
-            return {"pipeline": self.store.public_pipeline(self.pipeline.retry_pipeline(book_id, rebase=rebase))}, 200
+            return {"pipeline": self.store.public_pipeline(self.pipeline.retry_pipeline(
+                book_id, rebase=rebase, identity=identity))}, 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
+        except WriterRebaseRequiredError as exc:
+            return {"error": str(exc), "code": WRITER_REBASE_REQUIRED_CODE}, 409
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
         except WriterStoreError as exc:
             return {"error": str(exc)}, 400
         except WriterPipelineError as exc:

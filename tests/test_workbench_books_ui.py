@@ -53,14 +53,26 @@ class WorkbenchBookStructureTests(unittest.TestCase):
             for suffix in names:
                 with self.subTest(control=prefix + suffix):
                     self.assertEqual(len(doc.ids.get(prefix + suffix, [])), 1)
-            for suffix in ["BookMenu", "MoreMenu", "ExportMenu"]:
+            self.assertNotIn(prefix + "BookMenu", doc.ids)
+            self.assertNotIn(prefix + "BookMenuBtn", doc.ids)
+            trigger, ancestors = doc.ids[prefix + "MoreBtn"][0]
+            self.assertEqual(trigger["aria-controls"], prefix + "MoreMenu")
+            self.assertEqual(trigger["aria-haspopup"], "menu")
+            self.assertTrue(any(tag == "header" and "data-wb-page-header" in attrs for tag, attrs in ancestors))
+            for suffix in ["MoreMenu", "ExportMenu"]:
                 attrs, _ = doc.ids[prefix + suffix][0]
                 self.assertEqual(attrs["role"], "menu")
                 self.assertIn("popover", attrs)
             _, ancestors = doc.ids[prefix + "Stages"][0]
             self.assertTrue(any(tag == "header" and "data-wb-page-header" in attrs for tag, attrs in ancestors))
-            _, ancestors = doc.ids[prefix + "BooksBtn"][0]
-            self.assertTrue(any(attrs.get("id") == prefix + "BookMenu" for _, attrs in ancestors))
+            menu_actions = ["BooksBtn", "ImportBtn", "SystemPromptBtn", "ManageBtn", "ExportBtn"]
+            if prefix == "writer":
+                menu_actions += ["NewBookBtn", "NovelContinueBtn"]
+            for suffix in menu_actions:
+                with self.subTest(menu_action=prefix + suffix):
+                    attrs, ancestors = doc.ids[prefix + suffix][0]
+                    self.assertEqual(attrs["role"], "menuitem")
+                    self.assertTrue(any(attrs.get("id") == prefix + "MoreMenu" for _, attrs in ancestors))
 
     def test_responsive_visibility_has_container_contract(self):
         css = (ROOT / "public/styles.css").read_text(encoding="utf-8")

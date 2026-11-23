@@ -851,8 +851,8 @@ async function main() {
     download ? await download.suggestedFilename() : '无下载事件');
 
   // ---- 7. 作品列表与删除确认 ----
-  // 「切换作品…」在作品菜单 popover 里，先打开标题旁的下拉。
-  await page.locator('#novelBookMenuBtn').click();
+  // 「切换作品…」收在页头「⋯」菜单中。
+  await page.locator('#novelMoreBtn').click();
   await page.waitForTimeout(200);
   await page.locator('#novelBooksBtn').click();
   await page.waitForTimeout(400);

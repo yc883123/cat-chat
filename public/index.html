@@ -1118,19 +1118,16 @@
             <div class="wb-header-main">
             <div class="novel-page-title-row">
               <h2>拆书匠</h2>
-              <button class="wb-book-switch" id="novelBookMenuBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelBookMenu" title="切换作品或导入 TXT">
-                <span class="novel-page-state" id="novelPageState">选择作品</span><span aria-hidden="true">⌄</span>
-              </button>
-            </div>
-            <div class="wb-book-menu" id="novelBookMenu" role="menu" popover hidden>
-              <button class="control-button" id="novelBooksBtn" type="button" role="menuitem" title="打开已保存的作品列表">切换作品…</button>
-              <button class="control-button" id="novelImportBtn" type="button" role="menuitem" title="导入一本 TXT 小说并自动拆章">导入 TXT 新建作品</button>
+              <span class="novel-page-state" id="novelPageState">未打开作品</span>
             </div>
             </div>
             <div class="novel-page-actions wb-header-actions">
               <button class="control-button wb-book-aside" id="novelAsideBtn" type="button" aria-controls="novelColumns" aria-expanded="false">查看说明</button>
-              <button class="control-button wb-book-more" id="novelMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelMoreMenu" aria-label="更多作品操作">⋯</button>
+              <button class="control-button wb-book-more" id="novelMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelMoreMenu" aria-label="更多作品操作" title="切换、导入与管理作品">⋯</button>
               <div class="wb-book-menu" id="novelMoreMenu" role="menu" popover hidden>
+              <button class="control-button" id="novelBooksBtn" type="button" role="menuitem" title="打开已保存的作品列表">切换作品…</button>
+              <button class="control-button" id="novelImportBtn" type="button" role="menuitem" title="导入一本 TXT 小说并自动拆章">导入 TXT 新建作品</button>
+              <hr role="separator">
               <button class="control-button" type="button" role="menuitem" data-resource-details data-resource-opener="novelMoreBtn">资源监控</button>
               <button class="control-button" type="button" role="menuitem" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button>
               <button class="control-button" id="novelSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
@@ -1190,7 +1187,7 @@
               </div>
               <p class="novel-note novel-chapter-note" id="novelChapterNote" hidden></p>
               <div class="novel-chapter-list" id="novelChapterList" aria-label="章节列表">
-                <p class="novel-empty" id="novelChapterEmpty">还没有章节。打开页头作品菜单，选择「导入 TXT 新建作品」。</p>
+                <p class="novel-empty" id="novelChapterEmpty">还没有章节。点击右上角「⋯」，选择「导入 TXT 新建作品」。</p>
               </div>
             </aside>
 
@@ -1512,11 +1509,13 @@
             <div class="wb-header-main">
             <div class="writer-page-title-row">
               <h2>织书台</h2>
-              <button class="wb-book-switch" id="writerBookMenuBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerBookMenu" title="切换、新建或导入作品">
-                <span class="writer-page-state" id="writerPageState">选择作品</span><span aria-hidden="true">⌄</span>
-              </button>
+              <span class="writer-page-state" id="writerPageState">未打开作品</span>
             </div>
-            <div class="wb-book-menu" id="writerBookMenu" role="menu" popover hidden>
+            </div>
+            <div class="writer-page-actions wb-header-actions">
+              <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerNotesPane" aria-expanded="false">查看说明</button>
+              <button class="control-button wb-book-more" id="writerMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerMoreMenu" aria-label="更多作品操作" title="切换、新建、导入与管理作品">⋯</button>
+              <div class="wb-book-menu" id="writerMoreMenu" role="menu" popover hidden>
               <button class="control-button" id="writerBooksBtn" type="button" role="menuitem" title="打开已保存的作品列表">切换作品…</button>
               <button class="control-button" id="writerNewBookBtn" type="button" role="menuitem"
                       title="从一句话创意开始一本新书">新建作品</button>
@@ -1524,12 +1523,7 @@
                       role="menuitem" title="导入启元的「作品存档.json」，先预览再入库">导入存档</button>
               <button class="control-button" id="writerNovelContinueBtn" type="button"
                       role="menuitem" title="直接导入 TXT 或选择拆书匠作品，在末章后创建新章">从已有小说续写</button>
-            </div>
-            </div>
-            <div class="writer-page-actions wb-header-actions">
-              <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerNotesPane" aria-expanded="false">查看说明</button>
-              <button class="control-button wb-book-more" id="writerMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerMoreMenu" aria-label="更多作品操作">⋯</button>
-              <div class="wb-book-menu" id="writerMoreMenu" role="menu" popover hidden>
+              <hr role="separator">
               <button class="control-button" type="button" role="menuitem" data-resource-details data-resource-opener="writerMoreBtn">资源监控</button>
               <button class="control-button" type="button" role="menuitem" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button>
               <button class="control-button" id="writerSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
@@ -1573,7 +1567,7 @@
                   <div class="writer-book-cover" id="writerBookCover" aria-hidden="true">织</div>
                   <div>
                     <strong id="writerBookTitle">未打开作品</strong>
-                    <small id="writerBookMeta">新建或从「作品」里打开</small>
+                    <small id="writerBookMeta">点击右上角「⋯」新建或切换作品</small>
                   </div>
                 </div>
                 <div class="writer-book-stats">
@@ -1589,7 +1583,7 @@
               </div>
               <div class="writer-panel-head writer-toc-head">
                 <strong>设定版本</strong>
-                <small>点一版切回</small>
+                <small data-writer-version-lock-note hidden>生成结束后可切换版本</small>
               </div>
               <div class="writer-scroll">
                 <div class="writer-version-list" id="writerSetupVersionList"></div>
@@ -1614,6 +1608,7 @@
                 </div>
                 <label class="writer-field" id="writerChapterOutlineVersionGroup" hidden>大纲版本
                   <select id="writerChapterOutlineVersion" aria-label="大纲版本"></select>
+                  <small data-writer-version-lock-note hidden>生成结束后可切换版本</small>
                 </label>
                 <div class="writer-scroll">
                   <div class="writer-outline-view" id="writerChapterOutlineText"></div>
@@ -1628,7 +1623,7 @@
                 <div class="writer-toc-limits" id="writerTocLimits"></div>
                 <div class="writer-scroll">
                   <div class="writer-chapter-list" id="writerChapterList" aria-label="章节列表"></div>
-                  <p class="writer-empty" id="writerChapterEmpty">还没有打开作品。打开页头作品菜单，新建或切换作品。</p>
+                  <p class="writer-empty" id="writerChapterEmpty">还没有打开作品。点击右上角「⋯」，新建或切换作品。</p>
                 </div>
               </div><!-- /side draft -->
             </aside>
@@ -1642,7 +1637,7 @@
               <div class="writer-scroll writer-editor-body" id="writerEditorBody">
                 <div class="writer-placeholder" id="writerEditorPlaceholder">
                   <strong>还没有打开作品</strong>
-                  <p>打开页头作品菜单，新建一本（从一句话创意开始），或切换到已保存的书。设定、大纲和正文的每一版都会自动保留，随时可以切回。</p>
+                  <p>点击右上角「⋯」新建作品或打开已保存的作品。设定、大纲和正文的旧版本都会保留。</p>
                 </div>
 
                 <!-- ===== 阶段一：设定 ===== -->
@@ -1843,8 +1838,8 @@
                     <p class="writer-hint">单部作品只生成一部大纲即可；多部作品建议「一次性生成全部」，保证七部之间互相衔接。大纲不逐章罗列，章节由拆章产出。</p>
                   </div>
                   <div class="writer-stage-group" id="writerOutlineVersionsGroup" hidden>
-                    <div class="writer-group-head"><strong>历史版本</strong><small>切换后立即生效，可随时切回</small></div>
-                    <label class="writer-field">大纲版本
+                    <div class="writer-group-head"><strong>历史版本</strong><small data-writer-version-lock-note hidden>生成结束后可切换版本</small></div>
+                    <label class="writer-field">当前大纲版本
                       <select id="writerOutlineVersion" aria-label="大纲版本"></select>
                     </label>
                   </div>
@@ -1965,8 +1960,8 @@
                     </div>
                   </div>
                   <div class="writer-stage-group" id="writerDraftVersionsGroup" hidden>
-                    <div class="writer-group-head"><strong>正文版本</strong><small>切换后立即生效，可随时切回</small></div>
-                    <label class="writer-field">版本
+                    <div class="writer-group-head"><strong>正文版本</strong><small data-writer-version-lock-note hidden>生成结束后可切换版本</small></div>
+                    <label class="writer-field">当前版本
                       <select id="writerDraftVersion" aria-label="正文版本"></select>
                     </label>
                   </div>

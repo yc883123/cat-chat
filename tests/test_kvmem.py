@@ -427,6 +427,22 @@ class ConsoleLauncherTests(KVMemFixture):
 
 
 class KVMemAppTests(KVMemFixture):
+    def test_status_uses_one_provider_snapshot_for_endpoint_auth_and_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _Console.state = "ready"
+            _Console.auth_required = True
+            original = self.profile(api_key=INFERENCE_KEY)
+            changed = self.profile(service_manager_url="http://127.0.0.1:1", api_key="new-key")
+            app = self.make_app(temporary, original)
+            app.config.profile = mock.Mock(side_effect=[original, changed])
+            payload, code = NaibaChatApp.api_kvmem_status(app, "kv")
+            self.assertEqual(code, 200, payload)
+            self.assertEqual(payload["status"], "ready")
+            self.assertEqual(app.config.profile.call_count, 1)
+            record = read_last_run(last_start_path(temporary), "kv", self.url)
+            self.assertEqual(record["config"]["parameters"]["Model"], "model.gguf")
+            self.assertIsNone(read_last_run(last_start_path(temporary), "kv", changed["service_manager_url"]))
+
     def test_status_saves_full_run_and_fills_stopped_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
             app = self.make_app(temporary, self.profile())
@@ -615,6 +631,26 @@ class KVMemAppTests(KVMemFixture):
                     NaibaChatApp._kvmem_ensure_console(app, self.profile(kvmem_install_dir=r"D:\kvmem-fixture"),
                                                        "http://127.0.0.1:1", client)
             self.assertIn("不一致", str(caught.exception))
+
+    def test_ensure_console_reuses_owned_process_with_matching_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            install = Path(temporary) / "owned-kvmem"
+            process = SimpleNamespace(poll=lambda: None)
+            log_path = Path(temporary) / "console.log"
+            launcher = SimpleNamespace(
+                owned_running=lambda _url: True,
+                handle=lambda _url: {"process": process, "install": str(install), "log_path": log_path},
+            )
+            app = self.make_app(temporary, self.profile(), launcher=launcher)
+            client = KVMemClient(self.url, self.inference_url)
+            for profile in (self.profile(kvmem_install_dir=str(install)), self.profile()):
+                with mock.patch("naiba.kvmem.wait_for_console", return_value={"backend_root": str(install)}) as wait:
+                    NaibaChatApp._kvmem_ensure_console(app, profile, self.url, client)
+                wait.assert_called_once_with(client, process, log_path=log_path)
+            with mock.patch("naiba.kvmem.wait_for_console", return_value={"backend_root": str(install)}):
+                with self.assertRaisesRegex(KVMemError, "不一致"):
+                    NaibaChatApp._kvmem_ensure_console(
+                        app, self.profile(kvmem_install_dir=str(Path(temporary) / "other-install")), self.url, client)
 
     def test_concurrent_starts_submit_once(self):
         with tempfile.TemporaryDirectory() as temporary:

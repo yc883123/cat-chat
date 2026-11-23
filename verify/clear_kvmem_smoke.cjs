@@ -1,9 +1,175 @@
 // 使用隔离真实 HTTP 源码实例；状态响应为本地替身，不访问真实 KVMem。
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const BASE = process.env.NAIBA_SMOKE_BASE;
 const OUTPUT = process.env.NAIBA_SMOKE_OUTPUT;
+
+async function kvmemCommandRaces(page, context, viewport, clean) {
+  const reports = [];
+  const read = async () => (await context.request.get(`${BASE}/_fixture/kvmem`)).json();
+  const control = async body => {
+    const response = await context.request.post(`${BASE}/_fixture/kvmem`, { data: body });
+    assert.equal(response.status(), 200, await response.text());
+    return response.json();
+  };
+  const wait = async (label, condition) => {
+    let latest;
+    for (let index = 0; index < 200; index++) {
+      latest = await read();
+      if (condition(latest)) return latest;
+      await page.waitForTimeout(50);
+    }
+    throw Error(`${label}: ${JSON.stringify(latest)}`);
+  };
+  const hold = target => control({ action: 'hold', target });
+  const release = target => control({ action: 'release', target });
+  const setStatus = status => control({ action: 'set', status });
+  const entered = target => wait(`KVMem ${target}门控未进入`, state => state.entered.some(row => row.target === target));
+  const count = (state, target) => state.requests.filter(row => row.provider_id === 'kv-a' && row.target === target).length;
+  const status = expected => page.waitForFunction(expected => document.querySelector('#kvmemStatusDot').dataset.status === expected, expected);
+  const unlocked = () => page.waitForFunction(() => !document.querySelector('#kvmemRefresh').disabled);
+  const choose = async providerId => {
+    await page.evaluate(async providerId => {
+      const core = await import('/js/01-core.js');
+      core.setAppView('chat');
+      const models = await import('/js/07-models-agents.js');
+      models.applyConversationModel({ model_key: `local:${providerId}`, model_name: `${providerId}-model` });
+    }, providerId);
+  };
+  const buttons = () => page.evaluate(() => Object.fromEntries(['Start', 'Stop', 'Refresh']
+    .map(name => [name, document.getElementById(`kvmem${name}`).disabled])));
+  const rapid = name => page.locator(`#kvmem${name}`).evaluate(button => {
+    for (let index = 0; index < 5; index++) button.click();
+  });
+  await choose('kv-a');
+  await status('stopped');
+  await page.locator('#kvmemStatusButton').click();
+  await page.waitForFunction(() => !document.querySelector('#kvmemPopover').hidden);
+
+  // The action owns its UI state before the first status request resolves.
+  const initial = await read();
+  await hold('status');
+  await hold('start');
+  await rapid('Start');
+  await entered('status');
+  await page.waitForTimeout(100);
+  const preflight = await read();
+  const observed = { scenario: 'rapid_start_preflight', width: viewport.width,
+    buttons: await buttons(), status: await page.locator('#kvmemStatusDot').getAttribute('data-status'),
+    status_requests: count(preflight, 'status') - count(initial, 'status') };
+  assert.deepEqual(observed.buttons, { Start: true, Stop: true, Refresh: true }, JSON.stringify(observed));
+  assert.equal(observed.status, 'starting');
+  assert.equal(observed.status_requests, 1, '连点五次只允许一个状态预检');
+  await release('status');
+  await entered('start');
+  await rapid('Start');
+  await rapid('Stop');
+  await rapid('Refresh');
+  assert.deepEqual(await buttons(), { Start: true, Stop: true, Refresh: true });
+  assert.equal(count(await read(), 'start') - count(initial, 'start'), 1, '启动POST在途时重复按钮不发新命令');
+  assert.equal(count(await read(), 'stop') - count(initial, 'stop'), 0);
+  await page.screenshot({ path: path.join(OUTPUT, `kvmem-start-pending-${viewport.width}.png`) });
+  await control({ action: 'set', status: 'error', http_status: 400, error: '控制服务暂时未响应' });
+  await release('start');
+  await wait('启动期间暂时400已读取', state => state.requests.slice(preflight.requests.length)
+    .some(row => row.target === 'status' && row.http_status === 400));
+  await status('starting');
+  assert.deepEqual(await buttons(), { Start: true, Stop: true, Refresh: true });
+  await control({ action: 'set', status: 'failed', raw_status: 'ready', error: '推理服务健康检查尚未就绪' });
+  await wait('模型预热状态已读取', state => state.requests.slice(preflight.requests.length)
+    .some(row => row.target === 'status' && row.status === 'failed' && row.raw_status === 'ready'));
+  await status('starting');
+  assert.deepEqual(await buttons(), { Start: true, Stop: true, Refresh: true });
+  assert.equal(count(await read(), 'start') - count(initial, 'start'), 1);
+  await page.screenshot({ path: path.join(OUTPUT, `kvmem-warmup-${viewport.width}.png`) });
+  await setStatus('ready');
+  await status('ready');
+  await unlocked();
+  await clean();
+  reports.push({ ...observed, passed: true });
+  reports.push({ scenario: 'transient_warmup', passed: true, start_posts: 1 });
+
+  const beforeStop = await read();
+  await hold('status');
+  await hold('stop');
+  await rapid('Stop');
+  await entered('status');
+  assert.deepEqual(await buttons(), { Start: true, Stop: true, Refresh: true });
+  await status('stopping');
+  assert.equal(count(await read(), 'status') - count(beforeStop, 'status'), 1);
+  await release('status');
+  await entered('stop');
+  await rapid('Start');
+  await rapid('Stop');
+  assert.equal(count(await read(), 'stop') - count(beforeStop, 'stop'), 1);
+  await release('stop');
+  await status('stopped');
+  await unlocked();
+  await clean();
+  reports.push({ scenario: 'rapid_stop', passed: true });
+
+  // A refresh captured before Start cannot overwrite the operation's starting state.
+  await hold('status');
+  await page.evaluate(async () => { void (await import('/js/07-models-agents.js')).refreshKvmemStatus({ quiet: true }); });
+  await entered('status');
+  await hold('start');
+  await page.locator('#kvmemStart').click();
+  await status('starting');
+  await release('status');
+  await entered('start');
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('#kvmemStatusDot').getAttribute('data-status'), 'starting');
+  assert.deepEqual(await buttons(), { Start: true, Stop: true, Refresh: true });
+  await page.screenshot({ path: path.join(OUTPUT, `kvmem-stale-refresh-${viewport.width}.png`) });
+  await setStatus('ready');
+  await release('start');
+  await status('ready');
+  await unlocked();
+  await clean();
+  reports.push({ scenario: 'refresh_before_start', passed: true });
+
+  // If the service changed after the last UI refresh, an already-satisfied command sends no POST.
+  await page.locator('#kvmemStop').click();
+  await status('stopped');
+  await unlocked();
+  const beforeReady = await read();
+  await setStatus('ready');
+  await page.locator('#kvmemStart').click();
+  await status('ready');
+  await unlocked();
+  assert.equal(count(await read(), 'start'), count(beforeReady, 'start'), '实际服务已就绪时不重复启动');
+  await clean();
+  reports.push({ scenario: 'already_ready', passed: true });
+
+  // A pending A command remains locked across A -> B -> A until its own POST settles.
+  await page.locator('#kvmemStop').click();
+  await status('stopped');
+  await unlocked();
+  const beforeRoundTrip = await read();
+  await hold('start');
+  await page.locator('#kvmemStart').click();
+  await entered('start');
+  await choose('kv-b');
+  await status('ready');
+  await choose('kv-a');
+  await status('starting');
+  assert.deepEqual(await buttons(), { Start: true, Stop: true, Refresh: true });
+  await rapid('Start');
+  await rapid('Stop');
+  assert.equal(count(await read(), 'start') - count(beforeRoundTrip, 'start'), 1);
+  await page.screenshot({ path: path.join(OUTPUT, `kvmem-provider-roundtrip-${viewport.width}.png`) });
+  await setStatus('ready');
+  await release('start');
+  await status('ready');
+  await unlocked();
+  assert.equal(await page.locator('#kvmemSummary').textContent().then(text => text.includes('kv-a-model')), true);
+  await clean();
+  reports.push({ scenario: 'provider_roundtrip', passed: true, start_posts: 1 });
+  fs.writeFileSync(path.join(OUTPUT, `kvmem-command-report-${viewport.width}.json`), JSON.stringify(reports, null, 2));
+  console.log(`KVMem ${viewport.width}px：启动/停止连点、预检锁、预热状态、迟到刷新、已就绪去重与切卡往返通过`);
+}
 
 async function run(browser, viewport) {
   const context = await browser.newContext({ viewport });
@@ -18,6 +184,8 @@ async function run(browser, viewport) {
   });
   page.on('response', response => {
     if (response.status() < 400) return;
+    if (process.env.NAIBA_KVMEM_ACTION_ONLY && response.status() === 400
+        && /\/api\/providers\/[^/]+\/kvmem\/status$/.test(new URL(response.url()).pathname)) return;
     // 并行 dream_* 会话 WIP：前端 24-comfyui.js 已请求任务事件流，后端 /events 路由未跟上。
     // 它补齐路由后 404 自然消失，届时移除这条豁免。
     if (/\/api\/comfyui\/tasks\/[^/]+\/events/.test(response.url())) return;
@@ -44,6 +212,10 @@ async function run(browser, viewport) {
   try {
     await context.request.post(`${BASE}/_fixture/reset`, { data: {} });
     await page.goto(BASE, { waitUntil: 'networkidle' });
+    if (process.env.NAIBA_KVMEM_ACTION_ONLY) {
+      await kvmemCommandRaces(page, context, viewport, clean);
+      return;
+    }
     await page.evaluate(async () => {
       const studio = await import('/js/22-studio.js'); studio.openStudioView(); studio.setStudioPage('comfyui');
     });
@@ -67,7 +239,7 @@ async function run(browser, viewport) {
     }
     await page.waitForFunction(() => document.querySelector('#comfyuiTaskHistoryFooter').innerText.includes('已加载全部'));
     await page.locator('#comfyuiClearSelectAll').click();
-    await page.waitForFunction(() => document.querySelector('.comfyui-clear-count').textContent.includes('260 / 260'));
+    await page.waitForFunction(() => document.querySelector('#comfyuiClearBar .comfyui-clear-count').textContent.includes('260 / 260'));
     await page.locator('#comfyuiClearDelete').click();
     await page.waitForFunction(() => document.querySelector('#comfyuiClearBar').hidden);
     assert.deepEqual(deletionSizes, [200, 60]);
@@ -99,7 +271,7 @@ async function run(browser, viewport) {
     release();
     await page.waitForFunction(() => !document.querySelector('#comfyuiClearSelectAll').disabled);
     assert.equal(await page.locator('#comfyuiClearBar').isVisible(), true);
-    assert.equal(await page.locator('.comfyui-clear-count').innerText().then(text => text.startsWith('已选 0 /')), true);
+    assert.equal(await page.locator('#comfyuiClearBar .comfyui-clear-count').innerText().then(text => text.startsWith('已选 0 /')), true);
     await page.unroute('**/api/comfyui/tasks');
     await clean();
 

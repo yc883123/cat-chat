@@ -189,7 +189,7 @@ function extract(name) {
   return source.slice(start, source.indexOf('\n}', start) + 2).replace(/^export /, '');
 }
 const nodes = new Map(), pending = [];
-const s = { kvmemState: { providerId: '', payload: null, busy: false, request: 0 }, current: { id: 'A' },
+const s = { kvmemState: { providerId: '', payload: null, busy: false, request: 0, operation: null, operations: new Map() }, current: { id: 'A' },
   currentKvmemProvider() { return s.current; }, kvmemLabel: value => value,
   $(key) { if (!nodes.has(key)) nodes.set(key, { dataset: {}, setAttribute() {} }); return nodes.get(key); },
   toast() { throw Error('迟到失败不得提示'); },

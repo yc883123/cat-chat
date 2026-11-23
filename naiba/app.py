@@ -1774,11 +1774,12 @@ class NaibaChatApp:
     def _kvmem_ensure_console(self, profile: dict[str, Any], manager_url: str, client) -> None:
         """控制地址明确不可达时后台拉起 KVMem 控制程序（不打开窗口）。"""
         from naiba.kvmem import _nested, _port_from_url, wait_for_console
+        install_dir = str(profile.get("kvmem_install_dir") or "").strip()
         if self.kvmem_launcher.owned_running(manager_url):
             handle = self.kvmem_launcher.handle(manager_url) or {}
-            info = wait_for_console(client, handle.get("process"))
+            install_dir = install_dir or str(handle.get("install") or "")
+            info = wait_for_console(client, handle.get("process"), log_path=handle.get("log_path"))
         else:
-            install_dir = str(profile.get("kvmem_install_dir") or "").strip()
             if not install_dir:
                 raise KVMemError("KVMem 控制程序未运行，且本供应商没有配置安装目录；"
                                  "请在 Cat Chat 设置中填写 KVMem 安装目录后重试")
@@ -1797,9 +1798,9 @@ class NaibaChatApp:
 
     def api_kvmem_status(self, provider_id: str) -> tuple[dict[str, Any], int]:
         try:
-            profile, manager_url = self._kvmem_provider(provider_id)
             from naiba.kvmem import KVMemError
-            client = self._kvmem_client(provider_id)[1]
+            profile, client = self._kvmem_client(provider_id)
+            manager_url = client.manager_url
             status = client.readiness(str(profile.get("model") or ""),
                                       auth_token=str(profile.get("api_key") or ""))
             status["provider_id"] = str(profile.get("id") or provider_id)

@@ -853,7 +853,7 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
     : '';
   $('#providerKvmemDetails').open = false;
   $('#providerKvmemCaptureHint').textContent = '';
-  // 已保存的卡自动带出服务状态；新卡没 id，按钮提示先保存。
+  // 只读取已保存的 KVMem 配置，表单中的新配置要先保存。
   void refreshProviderKvmemService();
   $('#providerContextWindow').value = provider.context_window || provider.context_size || '';
   $('#providerMaxOutputTokens').value = provider.max_output_tokens || '';
@@ -920,7 +920,10 @@ const providerKvmemServiceState = { busy: false, request: 0 };
 
 function providerKvmemServiceTarget() {
   const id = $('#providerId')?.value.trim();
-  return id ? `/api/providers/${encodeURIComponent(id)}/kvmem` : null;
+  const saved = providerProfiles().find((provider) => provider.id === id);
+  if (saved?.kind !== 'local' || saved.service_manager !== 'kvmem'
+      || $('#providerKind')?.value !== '1' || !$('#providerKvmemEnabled')?.checked) return null;
+  return `/api/providers/${encodeURIComponent(id)}/kvmem`;
 }
 
 function renderProviderKvmemService(payload) {

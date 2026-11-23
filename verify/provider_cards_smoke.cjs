@@ -110,8 +110,7 @@ async function runProviderCopyViewport(browser, width) {
   fs.mkdirSync(shots, { recursive: true });
   const errors = [], saves = [], secretRequests = [], createdIds = [];
   const sourceName = `复制验收${width}-${Date.now()}供应商`;
-  let modelGate = null;
-  let releaseModelGate = null;
+  let modelRequests = 0;
   let secretGate = null;
   let releaseSecretGate = null;
   let expectedSecretRequests = 0;
@@ -181,18 +180,14 @@ async function runProviderCopyViewport(browser, width) {
     if (pathname === '/api/providers' && request.method() === 'POST') {
       const values = request.postDataJSON();
       // 只记录身份和是否填写密钥；测试日志和断言不保留密钥内容。
-      saves.push({ id: values.id, name: values.name, hasKey: Boolean(values.api_key) });
+      saves.push({ id: values.id, name: values.name, hasKey: Boolean(values.api_key),
+        context: values.context_window, output: values.max_output_tokens });
     }
   });
   await page.addInitScript(() => { localStorage.clear(); localStorage.setItem('naibaOnboardingDismissed', '1'); });
   // 只隔离模型目录，不拦截供应商创建/编辑/删除和 bootstrap 持久读回。
   await page.route('**/api/providers/models', async route => {
-    if (modelGate) {
-      const pending = modelGate;
-      modelGate = null;
-      pending.arrived();
-      await pending.wait;
-    }
+    modelRequests += 1;
     return json(route, { models: [{
       id: sourceValues.model, name: sourceValues.model, context_window: 65536, max_output_tokens: 2345,
     }] });
@@ -234,23 +229,40 @@ async function runProviderCopyViewport(browser, width) {
     assert.equal((await profiles()).length, beforeCancel, '取消复制不创建记录');
     assert.deepEqual((await profiles()).find(item => item.id === source.id), sourceBefore, '取消不改变源卡');
 
-    // 保存前的可选模型探测尚未结束时取消，迟到探测不能继续创建新卡。
+    // 模型目录仅展示建议，显式采用才填入。清空后保存必须保持留空。
     await copy.click();
     await page.locator('#providerDialog[open]').waitFor();
     await page.locator('#providerContextWindow').fill('');
     await page.locator('#providerMaxOutputTokens').fill('');
-    let arrived, release;
-    const probeStarted = new Promise(resolve => { arrived = resolve; });
-    modelGate = { arrived, wait: new Promise(resolve => { release = resolve; }) };
-    releaseModelGate = release;
-    await page.locator('#saveProvider').click();
-    await Promise.race([probeStarted, new Promise((_, reject) => setTimeout(() => reject(new Error('保存前模型探测未发出')), 5000))]);
+    await page.locator('#providerApiKey').fill(`fixture-capability-${width}`);
+    await page.locator('#loadProviderModels').click();
+    await page.waitForFunction(() => !document.querySelector('#applyProviderContextCapability').hidden
+      && !document.querySelector('#applyProviderMaxOutputCapability').hidden
+      && !document.querySelector('#loadProviderModels').disabled);
+    assert.equal((await form()).context, '', '目录返回上下文建议时不自动填写');
+    assert.equal((await form()).output, '', '目录返回输出建议时不自动填写');
+    assert.ok((await page.locator('#providerContextCapability').textContent()).includes('尚未写入设置'));
+    await page.locator('#applyProviderContextCapability').click();
+    await page.locator('#applyProviderMaxOutputCapability').click();
+    assert.equal((await form()).context, '65536', '显式采用上下文建议');
+    assert.equal((await form()).output, '2345', '显式采用输出建议');
+    await page.locator('#providerContextWindow').fill('');
+    await page.locator('#providerMaxOutputTokens').fill('');
+    const checkedBeforeSave = modelRequests;
+    const blank = await saveDraft();
+    createdIds.push(blank.id);
+    assert.equal(modelRequests, checkedBeforeSave, '保存不再额外探测模型目录');
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0].context, undefined, '保存请求保留空上下文设置');
+    assert.equal(saves[0].output, undefined, '保存请求保留空输出设置');
+    await page.locator(`[data-provider-card="${blank.id}"] .provider-card-name`).click();
+    await page.locator('#providerDialog[open]').waitFor();
+    assert.equal((await form()).context, '', '重新打开后上下文设置仍为空');
+    assert.equal((await form()).output, '', '重新打开后输出设置仍为空');
     await closeDraft();
-    release();
-    releaseModelGate = null;
-    await page.waitForFunction(() => !document.querySelector('#saveProvider').disabled);
-    assert.equal(saves.length, 0, '取消正在预探测的保存后，不发起创建请求');
-    assert.equal((await profiles()).length, beforeCancel, '迟到预探测回包不创建记录');
+    await apiJson(`/api/providers/${encodeURIComponent(blank.id)}`, { method: 'DELETE' });
+    saves.length = 0;
+    assert.equal((await profiles()).length, beforeCancel, '空值保存夹具清理完成');
     await noErrors();
 
     await seed({ ...sourceValues, name: `${sourceName}1`, api_key: '' });
@@ -367,7 +379,6 @@ async function runProviderCopyViewport(browser, width) {
     failures.push(`provider-copy-${width}: ${error.message}`);
     console.log(`[provider-copy-${width}] FAIL ${error.stack || error.message}`);
   } finally {
-    if (releaseModelGate) releaseModelGate();
     if (releaseSecretGate) releaseSecretGate();
     await page.close();
     // 即使某个回归意外创建了卡，也只清理本轮唯一名称前缀下的夹具。

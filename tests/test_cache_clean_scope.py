@@ -405,22 +405,23 @@ class AsyncCleanTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="naiba_scope_async_")
         self.addCleanup(self._tmp.cleanup)
+        existing_threads = set(threading.enumerate())
         root = Path(self._tmp.name).resolve()
         self.app = NaibaChatApp(paths=PathContext.local(root, root / "config.json"))
+        self.addCleanup(self.app.stop)
+        self.addCleanup(self._join_cache_workers, existing_threads)
         self.data_dir = self.app.paths.data_dir
         self.uploads = self.data_dir / "uploads" / "2026-01-01"
         self.uploads.mkdir(parents=True, exist_ok=True)
         # 阈值单位 MB，最小只能设 1 ⇒ 夹具必须 > 1MB，否则触发条件本身就不成立。
         self.app.config.update_settings({"imaging": {"auto_clean_limit_mb": 1}})
         (self.uploads / "big.bin").write_bytes(_blob(2 * 1024 * 1024, b"u"))
-        self.addCleanup(self._drain_lock)
 
-    def _drain_lock(self) -> None:
-        deadline = time.monotonic() + 5
-        while app_module._CACHE_CLEAN_LOCK.locked() and time.monotonic() < deadline:  # noqa: SLF001
-            time.sleep(0.02)
-        if app_module._CACHE_CLEAN_LOCK.locked():  # noqa: SLF001 - 别把锁泄漏给其它用例
-            app_module._CACHE_CLEAN_LOCK.release()  # noqa: SLF001
+    def _join_cache_workers(self, existing_threads: set[threading.Thread]) -> None:
+        for worker in threading.enumerate():
+            if worker.name == "naiba-cache-clean" and worker not in existing_threads:
+                worker.join(timeout=10)
+                self.assertFalse(worker.is_alive(), "关闭临时数据库前，缓存清理线程必须退出")
 
     def test_trigger_returns_immediately_and_runs_in_background(self) -> None:
         done = threading.Event()
@@ -430,8 +431,9 @@ class AsyncCleanTests(unittest.TestCase):
         def slow_once(scope, protect_paths, trigger):
             calls.append(scope)
             time.sleep(0.4)
+            result = real_once(scope, protect_paths, trigger)
             done.set()
-            return real_once(scope, protect_paths, trigger)
+            return result
 
         self.app._run_cache_clean_once = slow_once  # noqa: SLF001
         started = time.monotonic()
@@ -450,8 +452,9 @@ class AsyncCleanTests(unittest.TestCase):
 
         def slow_once(scope, protect_paths, trigger):
             time.sleep(0.4)
+            result = real_once(scope, protect_paths, trigger)
             done.set()
-            return real_once(scope, protect_paths, trigger)
+            return result
 
         self.app._run_cache_clean_once = slow_once  # noqa: SLF001
         spool = self.data_dir / "spool.part"

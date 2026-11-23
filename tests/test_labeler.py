@@ -824,13 +824,87 @@ class LabelerRunnerTests(unittest.TestCase):
         app = self._make_app(_StubModels(behavior))
         _, task = self._submit(app, config=_base_config(retry_limit=0), images=self.images[:2])
         self._wait(task["id"])
-        # 把第二项改为 uncertain：failed_only 不能把它一并带入新任务。
+        # 把第二项改为 uncertain：failed_only 只能重试原批次中的失败项。
         with self.db._connect() as db:
             db.execute("UPDATE task_items SET state='uncertain' WHERE task_id=? AND ordinal=1", (task["id"],))
         jobs = self._jobs(app)
-        new_task = jobs.continue_task(task["id"], mode="failed_only")
-        self.assertEqual(self.db.counts(new_task["id"])["total"], 1)
-        self.assertEqual(self.db.list_items(new_task["id"])[0]["name"], self.images[0].name)
+        retried = jobs.continue_task(task["id"], mode="failed_only")
+        self.assertEqual(retried["id"], task["id"])
+        self._wait(task["id"])
+        self.assertEqual(self.db.counts(task["id"])["total"], 2)
+        self.assertEqual(self.db.list_items(task["id"])[1]["state"], "uncertain")
+        self.assertEqual(len(app.models.calls), 3, "只重试失败的一张")
+        self.assertEqual(len(self.store.list_tasks()), 1)
+
+    def test_retry_failed_completes_original_batch_and_exports_all_captions(self):
+        calls = {"n": 0}
+
+        def behavior(profile, messages, options, status):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise RuntimeError("401 unauthorized")
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":"一只猫"}'
+
+        app = self._make_app(_StubModels(behavior))
+        jobs, task = self._submit(app, config=_base_config(retry_limit=0, write_txt=True))
+        self._wait(task["id"])
+        self.assertEqual(self.db.counts(task["id"])["done"], 2)
+        annotations_before = self.db.annotations(task_id=task["id"])
+        succeeded_before = [item for item in self.db.list_items(task["id"])
+                            if item["state"] == "succeeded"]
+        txt_before = {item["item_id"]: (self.store.outputs_dir(task["id"]) / item["txt_path"]).read_bytes()
+                      for item in succeeded_before}
+        retried = jobs.continue_task(task["id"], mode="failed_only")
+        self.assertEqual(retried["id"], task["id"])
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual((state["progress"]["done"], state["progress"]["total"]), (3, 3))
+        self.assertEqual(state["usage"]["total_tokens"], 45)
+        self.assertEqual(calls["n"], 5, "首图含工具回退调用，两张成功图片不能再次调用模型")
+        self.assertEqual(len(self.store.list_tasks()), 1)
+        for old in succeeded_before:
+            self.assertEqual(self.db.get_item(task["id"], old["item_id"]), old)
+            self.assertEqual((self.store.outputs_dir(task["id"]) / old["txt_path"]).read_bytes(),
+                             txt_before[old["item_id"]])
+        records = self.db.annotations(task_id=task["id"])
+        by_id = {row["id"]: row for row in records}
+        for old in annotations_before:
+            self.assertEqual(by_id[old["id"]], old)
+        with zipfile.ZipFile(io.BytesIO(render(records, "captions"))) as archive:
+            self.assertEqual(sorted(archive.namelist()), [f"d/a{i}.txt" for i in range(3)])
+
+    def test_cancel_retry_before_old_worker_finally_cancels_new_queue(self):
+        published = threading.Event()
+        release = threading.Event()
+        app = self._make_app(_StubModels(
+            lambda *args: (_ for _ in ()).throw(RuntimeError("401 unauthorized"))))
+        jobs = self._jobs(app)
+        original_finish = jobs.runner._finish_task_terminal
+
+        def finish(task_id, status, payload, **kwargs):
+            original_finish(task_id, status, payload, **kwargs)
+            if status == "failed":
+                published.set()
+                if not release.wait(5):
+                    raise RuntimeError("等待旧执行释放超时")
+
+        with mock.patch.object(jobs.runner, "_finish_task_terminal", side_effect=finish):
+            task = jobs.submit({"image_refs": [{"path": str(self.images[0])}],
+                                "config": _base_config(retry_limit=0)})
+            try:
+                self.assertTrue(published.wait(3))
+                self.assertIn(task["id"], jobs.runner._cancel_events)
+                jobs.continue_task(task["id"], mode="failed_only")
+                self.assertTrue(jobs.cancel(task["id"]))
+                self.assertEqual(self.store.get_task(task["id"])["status"], "cancelled")
+                self.assertEqual(self.db.counts(task["id"])["cancelled"], 1)
+            finally:
+                release.set()
+            deadline = time.time() + 3
+            while jobs.runner.is_busy() and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(jobs.runner.is_busy())
+            self.assertEqual(len(app.models.calls), 1, "取消的新一轮不能再调用模型")
 
     def test_resume_candidate_matches_reuploaded_folder(self):
         """重新拖入同一文件夹后，按原图身份认出上次批次，续跑跳过已成功的图。"""

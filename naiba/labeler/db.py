@@ -307,13 +307,14 @@ class LabelerDB:
             return int(cursor.rowcount or 0)
 
     @_retry_transient
-    def reset_items_for_resume(self, task_id: str) -> int:
+    def reset_items_for_resume(self, task_id: str, *, failed_only: bool = False) -> int:
         """「接着上次批次」：把没成功的逐图项重置回排队，已成功的一项不动。
 
         同一任务续跑（不新建批次）时用：失败原因、重试次数、监督证据与
         上一轮的 TXT 状态都清掉，避免界面继续显示旧结论；``usage_json``
         保留（可能已计费），任务累计用量仍从任务记录累加。
         """
+        state_filter = "state IN ('failed','human_check')" if failed_only else "state<>'succeeded'"
         with self._connect() as db:
             cursor = db.execute(
                 """
@@ -324,8 +325,8 @@ class LabelerDB:
                     supervisor_decision='', supervisor_attempts=0, supervisor_reason='',
                     supervisor_usage_json='{}', candidate_json='{}',
                     txt_path='', txt_state='', txt_chars=0
-                  WHERE task_id=? AND state<>'succeeded'
-                """,
+                  WHERE task_id=? AND
+                """ + state_filter,
                 (task_id,),
             )
             return int(cursor.rowcount or 0)

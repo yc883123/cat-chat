@@ -238,10 +238,69 @@ class LabelerSkillRetryTests(unittest.TestCase):
         payload, status = self.service.api_retry(source["id"], {"mode": "failed_only"})
         self.assertEqual(status, 201, payload)
         retried = payload["task"]
-        self.assertEqual(retried["source_task_id"], source["id"])
+        self.assertEqual(retried["source_task_id"], source["source_task_id"])
         self.assertEqual(retried["input"]["config"], source["input"]["config"])
-        self.assertNotEqual(retried["id"], source["id"])
+        self.assertEqual(retried["id"], source["id"])
+        self.assertEqual(retried["progress"]["total"], 1)
+        self.assertEqual(self.service.db.list_items(source["id"])[0]["state"], "queued")
+        self.assertEqual(len(self.service.store.list_tasks()), 1)
         self.assertEqual(self.service.store.get_task(source["id"])["input"], source["input"])
+
+    def test_duplicate_failed_retry_queues_original_task_once(self):
+        source = self.failed_task()
+        barrier = threading.Barrier(2, timeout=3)
+
+        def retry():
+            barrier.wait()
+            return self.service.api_retry(source["id"], {"mode": "failed_only"})
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: retry(), range(2)))
+        self.assertEqual(sorted(status for _, status in results), [201, 400])
+        self.assertEqual(self.submit.call_count, 2, "一次初始提交，加一次原批次重试")
+        self.assertEqual(len(self.service.store.list_tasks()), 1)
+
+    def test_failed_retry_rejects_lingering_queued_items_without_mutation(self):
+        source = self.failed_task()
+        item = self.service.db.list_items(source["id"])[0]
+        self.service.db.add_items(source["id"], [{
+            **item, "item_id": "queued-other", "path_key": "other-path-key", "state": "queued",
+        }], item["config_fingerprint"])
+        before = self.service.db.list_items(source["id"])
+        payload, status = self.service.api_retry(source["id"], {"mode": "failed_only"})
+        self.assertEqual(status, 400)
+        self.assertIn("继续未完成", payload["error"])
+        self.assertEqual(self.service.db.list_items(source["id"]), before)
+        self.assertEqual(self.submit.call_count, 1)
+
+    def test_failed_retry_rejects_changed_image_before_resetting_item(self):
+        source = self.failed_task()
+        self.image.write_bytes(self.image.read_bytes() + b"changed")
+        payload, status = self.service.api_retry(source["id"], {"mode": "failed_only"})
+        self.assertEqual(status, 400)
+        self.assertIn("缓存内容已变化", payload["error"])
+        self.assertEqual(self.service.db.list_items(source["id"])[0]["state"], "failed")
+        self.assertEqual(self.submit.call_count, 1)
+
+    def test_cancelled_retry_cannot_be_claimed_by_popped_worker(self):
+        source = self.failed_task()
+        self.service.api_retry(source["id"], {"mode": "failed_only"})
+        started = threading.Event()
+
+        def run():
+            started.set()
+            self.service.runner._run_task(source["id"])
+
+        with self.service.store._lock:
+            worker = threading.Thread(target=run)
+            worker.start()
+            self.assertTrue(started.wait(3))
+            self.assertTrue(self.service.runner.cancel(source["id"]))
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.service.store.get_task(source["id"])["status"], "cancelled")
+        self.assertEqual(self.service.db.counts(source["id"])["cancelled"], 1)
+        self.assertEqual(self.app.models.calls, [])
 
     def test_changed_skill_is_rejected_before_creating_retry(self):
         source = self.failed_task()

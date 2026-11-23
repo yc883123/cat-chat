@@ -137,6 +137,58 @@ p.labeler.items[0].worker_slot=0;p.renderResultBody();
 assert.match(JSON.stringify(resultBody.children),/打标员 #1/);
 """)
 
+    def test_failed_retry_preserves_completed_text_and_rejects_old_results(self):
+        self.run_case(r"""
+seed();elements['#labelerTaskHint']=node();
+p.labeler.task={id:'tg-test',status:'done',can_retry_failed:true,progress:{done:1,total:2,failed:1}};
+p.labeler.items.push({item_id:'i2',name:'failed.png',state:'failed',error:'首次失败'});
+const resumed={id:'tg-test',status:'running',progress:{done:1,total:2},items_total:2,
+  items:[{item_id:'i2',name:'failed.png',state:'queued',error:''}]};
+let oldItems,oldResults,finishBatches;let annotationReads=0;
+apiImpl=(url)=>{
+  if(url.endsWith('/retry'))return Promise.resolve({task:resumed,skipped_succeeded:1});
+  if(url.endsWith('/tasks'))return new Promise(resolve=>{finishBatches=resolve;});
+  if(url.includes('/items?'))return new Promise(resolve=>{oldItems=resolve;});
+  if(url.includes('/annotations?')){
+    if(++annotationReads===1)return new Promise(resolve=>{oldResults=resolve;});
+    return Promise.resolve({annotations:[{id:1,description:'一只猫坐在窗台上'}],total:1});
+  }
+  if(url.endsWith('/tg-test'))return Promise.resolve({task:resumed});
+  throw Error('unexpected '+url);
+};
+const items=p.loadTaskItems('tg-test',{refresh:true}),results=p.loadTaskResults('tg-test');
+const retry=p.retryTask('failed_only');await new Promise(resolve=>setTimeout(resolve,0));
+assert.equal(p.labeler.taskId,'tg-test');assert.equal(p.labeler.items.length,2);
+assert.equal(p.labeler.items[1].state,'queued');
+assert.equal(p.labeler.annotations[0].description,'一只猫坐在窗台上','重试不能清掉成功图片正文');
+assert.match(JSON.stringify(resultBody.children),/一只猫坐在窗台上/);
+oldItems({items:[{item_id:'i2',state:'failed',error:'过期错误'}],total:2});
+oldResults({annotations:[],total:0});
+assert.equal(await items,false);assert.equal(await results,false);
+assert.equal(p.labeler.items[1].state,'queued');assert.equal(p.labeler.annotations.length,1);
+finishBatches({tasks:[resumed]});await retry;
+assert.match(elements['#labelerTaskHint'].textContent,/原批次/);
+assert.equal(p.labeler.retryBusy,false);
+""")
+
+    def test_old_terminal_poll_cannot_finish_same_task_retry(self):
+        self.run_case(r"""
+seed();p.labeler.task={id:'tg-test',status:'done',can_retry_failed:true,progress:{done:1,total:2,failed:1}};
+p.labeler.items.push({item_id:'i2',name:'failed.png',state:'failed'});
+let finishOldPoll;
+apiImpl=(url)=>{
+  if(url.endsWith('/retry'))return Promise.resolve({task:{id:'tg-test',status:'queued',
+    progress:{done:1,total:2},items:[{item_id:'i2',name:'failed.png',state:'queued'}]}});
+  if(url.endsWith('/tasks'))return Promise.resolve({tasks:[]});
+  if(url.endsWith('/tg-test'))return new Promise(resolve=>{finishOldPoll=resolve;});
+  throw Error('旧终态不能再加载结果 '+url);
+};
+const old=p.pollTask();await p.retryTask('failed_only');
+finishOldPoll({task:{id:'tg-test',status:'done',items:[],progress:{done:1,total:2,failed:1}}});await old;
+assert.equal(p.labeler.task.status,'queued');assert.equal(p.labeler.items[1].state,'queued');
+assert.equal(p.labeler.annotations.length,1);
+""")
+
 
 if __name__ == "__main__":
     unittest.main()

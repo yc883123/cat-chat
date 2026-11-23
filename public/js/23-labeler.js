@@ -1462,7 +1462,7 @@ async function retryFailedTask() {
 async function retryTask(mode) {
   const taskId = labeler.taskId;
   if (!taskId || labeler.retryBusy) return;
-  const token = labeler.detailToken;
+  let token = labeler.detailToken;
   const task = labeler.task || {};
   const uncertain = mode === "unfinished" ? Number(task.uncertain_count || 0) : 0;
   let confirmUncertain = false;
@@ -1485,29 +1485,36 @@ async function retryTask(mode) {
     });
     if (labeler.taskId !== taskId || token !== labeler.detailToken) return;
     const next = payload.task || {};
-    labeler.taskId = String(next.id || "");
-    labeler.task = next;
-    labeler.items = next.items || [];
-    labeler.imageResultLimit = 100;
-    labeler.annotations = [];
-    labeler.annotationTotal = 0;
-    labeler.tagMatches = [];
-    labeler.tags = [];
-    labeler.sentences = [];
-    labeler.txtFiles = new Map();
-    setResultTab("images");
-    renderTask(next);
+    // 原批次重试仍用同一个 ID：作废上一轮在途回包，保留已成功图片的正文。
+    token = ++labeler.detailToken;
+    labeler.itemsToken += 1;
+    labeler.resultsToken += 1;
+    const sameTask = String(next.id || "") === taskId;
+    if (sameTask) {
+      labeler.task = next;
+      labeler.items = mergeTaskItemRows(labeler.items, next.items || []);
+      labeler.resultsSyncTaskId = "";
+      labeler.resultsSyncDoneCount = 0;
+      setResultTab("images");
+      renderTask(next);
+    } else {
+      adoptLabelerTask(next);
+    }
     const skipped = Number(payload.skipped_succeeded || 0);
     const skippedUncertain = Number(payload.skipped_uncertain || 0);
-    const notes = [];
+    const notes = [mode === "failed_only" && sameTask
+      ? "已在原批次中重试失败图片"
+      : (mode === "failed_only" ? "已创建失败图片重试任务" : "已创建继续任务")];
     if (skipped) notes.push(`${skipped} 张已完成，未重复调用`);
     if (skippedUncertain) notes.push(`${skippedUncertain} 张结果不确定，本次跳过`);
-    setHint(notes.join("；") || (mode === "failed_only" ? "已创建失败图片重试任务" : "已创建继续任务"));
+    setHint(notes.join("；"));
     await refreshBatches();
+    if (labeler.taskId !== String(next.id || "") || token !== labeler.detailToken) return;
     startPolling();
+    await pollTask();
   } catch (error) {
     if (labeler.taskId === taskId && token === labeler.detailToken) {
-      setHint(`继续失败：${error.message}`, true);
+      setHint(`${mode === "failed_only" ? "重试" : "继续"}失败：${error.message}`, true);
     }
   } finally {
     labeler.retryBusy = false;

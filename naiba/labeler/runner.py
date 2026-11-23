@@ -132,26 +132,28 @@ class LabelerRunner:
     def cancel(self, task_id: str, *, reason: str = "任务已取消") -> bool:
         """取消：请求中经 cancel_event 中断；排队中的直接终态化。"""
         task_id = str(task_id or "").strip()
-        with self._registry_lock:
-            cancel_event = self._cancel_events.get(task_id)
-            if cancel_event is not None:
-                cancel_event.set()
+        with self.store._lock:
+            task = self.store.get_task(task_id)
+            if not task:
+                return False
+            # 原批次刚重试时可能还留着上一轮的句柄；排队状态必须取消新一轮。
+            if task.get("status") == "queued":
+                with self._condition:
+                    if task_id in self._queue:
+                        self._queue.remove(task_id)
+                self.db.cancel_pending(task_id)
+                counts = self.db.counts(task_id)
+                self._finish_task_terminal(
+                    task_id, "cancelled", {"type": "cancelled"}, detail=reason,
+                    progress=self._progress_from_counts(counts),
+                    result={"annotation_ids": self.db.annotation_ids_for_task(task_id)},
+                )
                 return True
-        task = self.store.get_task(task_id)
-        if not task:
-            return False
-        if task.get("status") == "queued":
-            with self._condition:
-                if task_id in self._queue:
-                    self._queue.remove(task_id)
-            self.db.cancel_pending(task_id)
-            counts = self.db.counts(task_id)
-            self._finish_task_terminal(
-                task_id, "cancelled", {"type": "cancelled"}, detail=reason,
-                progress=self._progress_from_counts(counts),
-                result={"annotation_ids": self.db.annotation_ids_for_task(task_id)},
-            )
-            return True
+            with self._registry_lock:
+                cancel_event = self._cancel_events.get(task_id)
+                if cancel_event is not None:
+                    cancel_event.set()
+                    return True
         return False
 
     def shutdown(self, timeout: float = 5.0) -> None:
@@ -190,16 +192,20 @@ class LabelerRunner:
     # ---- 单任务 ----
 
     def _run_task(self, task_id: str) -> None:
-        task = self.store.get_task(task_id)
-        if not task or task.get("status") != "queued":
-            return
-        config = dict((task.get("input") or {}).get("config") or {})
         cancel_event = threading.Event()
-        with self._registry_lock:
-            self._cancel_events[task_id] = cancel_event
-        writer = _ProgressWriter(self.store, self.db, task_id)
+        registered = False
         try:
-            self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
+            # 队列弹出后与取消仍有一个窗口；状态检查、句柄登记和认领同锁完成。
+            with self.store._lock:
+                task = self.store.get_task(task_id)
+                if not task or task.get("status") != "queued":
+                    return
+                config = dict((task.get("input") or {}).get("config") or {})
+                with self._registry_lock:
+                    self._cancel_events[task_id] = cancel_event
+                    registered = True
+                self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
+            writer = _ProgressWriter(self.store, self.db, task_id)
             self.store.append_event(task_id, {"type": "status", "message": "开始打标"})
             if config.get("concurrency_enabled"):
                 self._run_task_concurrent(task_id, task, config, cancel_event, writer)
@@ -210,8 +216,9 @@ class LabelerRunner:
             self._fail_task(task_id, str(exc) or "打标任务执行失败")
         finally:
             cancel_event.set()
-            with self._registry_lock:
-                self._cancel_events.pop(task_id, None)
+            if registered:
+                with self._registry_lock:
+                    self._cancel_events.pop(task_id, None)
 
     def _run_task_serial(self, task_id: str, task: dict[str, Any],
                          config: dict[str, Any], cancel_event: threading.Event,

@@ -12,6 +12,7 @@
 - 启动时活跃任务 → ``interrupted``；DB 里 ``running`` 的逐图项 → ``uncertain``
   （请求已发出但结果没落库，可能已计费）。
 - 「继续未完成」总是**新建任务**并记录 ``source_task_id``；成功项不重复调用。
+- 「重试失败」在原任务中只重置失败项，保留整批结果与导出范围。
 """
 
 from __future__ import annotations
@@ -581,7 +582,13 @@ class LabelerJobManager:
 
     def continue_task(self, task_id: str, *, mode: str = "unfinished",
                       confirm_uncertain: bool = False) -> dict[str, Any]:
-        """「继续未完成」：新建关联任务，只复制未完成/失败/（已确认的）不确定项。"""
+        """继续未完成创建关联任务；重试失败沿用原批次与成功结果。"""
+        # 与同批次续跑串行认领，两个请求不能同时把原任务重新入队。
+        with self.store._lock:
+            return self._continue_task(task_id, mode=mode, confirm_uncertain=confirm_uncertain)
+
+    def _continue_task(self, task_id: str, *, mode: str,
+                       confirm_uncertain: bool) -> dict[str, Any]:
         source = self.store.get_task(task_id)
         if source is None:
             raise LookupError("任务不存在")
@@ -596,6 +603,8 @@ class LabelerJobManager:
         if len(refs) > 10000:
             raise LabelerTaskError("源任务图片清单超过处理上限，未继续任何图片")
         items = self.db.list_items(task_id, limit=10000)
+        if mode == "failed_only" and any(item.get("state") == "queued" for item in items):
+            raise LabelerTaskError("这个批次还有排队未完成项，请使用「继续未完成」")
         by_identity = {
             (str(item.get("path_key") or ""), str(item.get("content_version") or "")): item
             for item in items
@@ -612,7 +621,9 @@ class LabelerJobManager:
                 skipped_succeeded += 1
                 continue
             if mode == "failed_only":
-                if state != "failed":
+                if state not in {"failed", "human_check"}:
+                    if state in {"uncertain", "running"}:
+                        skipped_uncertain += 1
                     continue
             elif state == "uncertain" and not confirm_uncertain:
                 skipped_uncertain += 1
@@ -655,6 +666,30 @@ class LabelerJobManager:
         if config.get("concurrency_enabled") and config[LABELER_SUPERVISION_RULES_KEY] != supervision_rules:
             raise LabelerTaskError("源任务的监督规则已变化；为避免换标准重试，请按当前设置新建批次")
         refs = validate_image_refs(self.app.paths.data_dir, wanted)
+        if mode == "failed_only":
+            if any((ref["path_key"], ref["content_version"]) !=
+                   (old.get("path_key"), old.get("content_version"))
+                   for ref, old in zip(refs, wanted)):
+                raise LabelerTaskError("失败图片的缓存内容已变化，请重新拖入图片后新建批次")
+            if config["config_fingerprint"] != (source_input.get("config") or {}).get("config_fingerprint"):
+                raise LabelerTaskError("源任务的打标规则已变化，请按当前设置新建批次")
+            if not self.db.reset_items_for_resume(task_id, failed_only=True):
+                raise LabelerTaskError("这个批次没有需要重试的失败图片")
+            counts = self.db.counts(task_id)
+            self.store.update_task(
+                task_id, status="queued", detail="", error="", finished_at=None,
+                progress=self._progress(counts),
+                result={"annotation_ids": self.db.annotation_ids_for_task(task_id)},
+            )
+            try:
+                self.store.append_event(task_id, {"type": "status", "message": "在原批次重试失败图片"})
+            except Exception:  # noqa: BLE001 - 事件日志失败不影响重试
+                pass
+            self.runner.submit(task_id)
+            task = self.task(task_id) or source
+            task["skipped_succeeded"] = skipped_succeeded
+            task["skipped_uncertain"] = skipped_uncertain
+            return task
         task = self._create_task(
             {"image_refs": refs, "config": config}, source_task_id=task_id,
         )
@@ -720,6 +755,10 @@ class LabelerJobManager:
 
         已成功的图片不重复调用；沿用任务里保存的模型与参数快照。
         """
+        with self.store._lock:
+            return self._resume_task(task_id, confirm_uncertain=confirm_uncertain)
+
+    def _resume_task(self, task_id: str, *, confirm_uncertain: bool) -> dict[str, Any]:
         task = self.store.get_task(task_id)
         if task is None:
             raise LookupError("任务不存在")

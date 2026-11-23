@@ -297,6 +297,8 @@ verify/claude-cache-diagnostic/*
 !verify/branch_first_turn_smoke.cjs
 !verify/branch_first_turn_smoke.py
 !verify/browser_smoke.cjs
+!verify/_serve_labeler_retry.py
+!verify/labeler_retry_smoke.cjs
 !verify/chat_composer_layout_smoke.cjs
 !verify/comfyui_navigation_smoke.cjs
 !verify/comfyui_history_smoke.cjs

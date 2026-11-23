@@ -21,6 +21,7 @@ from naiba.core.contracts import (
     JOB_WAIT_DEADLINE_SECONDS, JOB_WAIT_MAX_ACTIVE_GLOBAL, JOB_WAIT_MAX_TARGETS,
     JOB_WAIT_STATUSES, TERMINAL_RUN_EVENT_TYPES,
 )
+from naiba.core.exceptions import ActiveRunError
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
 from naiba.storage.goals import insert_goal, migrate_goal_extensions, migrate_goals, require_no_goal
@@ -33,7 +34,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 34
+CURRENT_SCHEMA_VERSION = 35
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -1090,6 +1091,14 @@ def _migrate_to_v32(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS idx_job_waits_resume ON job_waits(resume_run_id)")
 
 
+def _migrate_to_v35(db: sqlite3.Connection) -> None:
+    """让 trace 的引用检查走索引，并让旧会话的纯文本判定可以重新检测。"""
+    db.execute("CREATE INDEX IF NOT EXISTS idx_messages_trace_hash ON messages(trace_hash)")
+    # 旧的 0 不区分后端确认与探测失败后的推断。清除这份二值结果，
+    # 保留供应商配置中的显式能力设置及已在途 Run 的快照。
+    db.execute("UPDATE conversations SET chat_supports_images = -1 WHERE chat_supports_images = 0")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -1126,6 +1135,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     32: _migrate_to_v32,
     33: migrate_goals,
     34: migrate_goal_extensions,
+    35: _migrate_to_v35,
 }
 
 
@@ -1378,6 +1388,20 @@ def _prune_orphan_message_traces(
             ((digest,) for digest in orphan_hashes),
         )
     return len(orphan_hashes)
+
+
+def _truncate_message_tail(db: sqlite3.Connection, conversation_id: str, created_at: int, rowid: int) -> int:
+    cursor = db.execute(
+        "DELETE FROM messages WHERE conversation_id = ? "
+        "AND (created_at > ? OR (created_at = ? AND rowid >= ?))",
+        (conversation_id, created_at, created_at, rowid),
+    )
+    db.execute(
+        "UPDATE conversations SET updated_at = ? WHERE id = ?",
+        (int(time.time() * 1000), conversation_id),
+    )
+    _prune_orphan_message_traces(db)
+    return cursor.rowcount
 
 
 class ChatStorage:
@@ -2422,12 +2446,16 @@ class ChatStorage:
             )
 
     @_retry_transient_write
-    def set_conversation_chat_supports_images(self, conversation_id: str, value: bool) -> None:
-        """Persist a conversation's frozen image-support capability (avoid re-probing per turn)."""
+    def set_conversation_chat_supports_images(
+        self, conversation_id: str, value: bool, *,
+        model_key: str | None = None, model_name: str | None = None,
+    ) -> None:
+        """同一模型绑定仍有效时才接受运行线程的探测结果。"""
         with self._connect() as db:
             db.execute(
-                "UPDATE conversations SET chat_supports_images = ? WHERE id = ?",
-                (int(bool(value)), conversation_id),
+                "UPDATE conversations SET chat_supports_images = ? WHERE id = ? "
+                "AND (? IS NULL OR model_key = ?) AND (? IS NULL OR model_name = ?)",
+                (int(bool(value)), conversation_id, model_key, model_key, model_name, model_name),
             )
 
     @_retry_transient_write
@@ -3346,21 +3374,31 @@ class ChatStorage:
             ).fetchone()
             if not target:
                 return 0
-            created_at = target[0]
-            rowid = target[1]
-            # 精确删除编辑点及其之后的消息：按 (created_at, rowid) 复合条件，
-            # 前缀消息一律保留。
-            cursor = db.execute(
-                "DELETE FROM messages WHERE conversation_id = ? "
-                "AND (created_at > ? OR (created_at = ? AND rowid >= ?))",
-                (conversation_id, created_at, created_at, rowid),
-            )
-            db.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                (int(time.time() * 1000), conversation_id),
-            )
-            _prune_orphan_message_traces(db)
-        return cursor.rowcount
+            return _truncate_message_tail(db, conversation_id, target[0], target[1])
+
+    @_retry_transient_write
+    def truncate_from_user_message(self, conversation_id: str, message_id: str) -> tuple[int, dict[str, Any]]:
+        """编辑重发只点读被编辑的用户消息，验证与截断在同一写事务。"""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            target = db.execute(
+                "SELECT role, metadata, created_at, rowid AS message_rowid "
+                "FROM messages WHERE id = ? AND conversation_id = ?",
+                (message_id, conversation_id),
+            ).fetchone()
+            if target is None:
+                if not db.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone():
+                    raise LookupError("对话不存在")
+                raise LookupError("消息不存在")
+            if target["role"] != "user":
+                raise ValueError("只能编辑用户消息")
+            require_no_goal(db, conversation_id)
+            active_id = self._active_top_level_run_id(db, conversation_id)
+            if active_id:
+                raise ActiveRunError(active_id)
+            metadata = self._message_dict(db, target, include_trace=False)["metadata"]
+            removed = _truncate_message_tail(db, conversation_id, target["created_at"], target["message_rowid"])
+            return removed, metadata
 
     # ---- 删除单条/整轮消息 + 撤销（快照插回） ----
     # 「删除」= 从模型上下文剔除 + 界面移除，**不动任何附件文件**：仍被其它消息引用的附件
@@ -3660,6 +3698,16 @@ class ChatStorage:
             interaction_mode=str(snapshot.get("interaction_mode") or "craft"),
             plan_id=str(snapshot.get("plan_id") or ""),
         )
+
+    @staticmethod
+    def _active_top_level_run_id(db: sqlite3.Connection, conversation_id: str) -> str:
+        row = db.execute(
+            "SELECT id FROM background_tasks WHERE conversation_id = ? "
+            f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
+            "AND (parent_job_id IS NULL OR parent_job_id = '') AND detached = 0 LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        return str(row["id"]) if row else ""
 
     def active_run(self, conversation_id: str) -> dict[str, Any] | None:
         """该对话当前的**顶层**运行中 Run（子 Job 与分离式 Job 都不算）。
@@ -4027,15 +4075,9 @@ class ChatStorage:
             # 对话发新消息会被 409 拒绝（消息不入库）。
             if not parent_job_id:
                 require_no_goal(db, conversation_id)
-                active = db.execute(
-                    "SELECT id FROM background_tasks WHERE conversation_id = ? "
-                    f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
-                    "AND (parent_job_id IS NULL OR parent_job_id = '') "
-                    "AND detached = 0 LIMIT 1",
-                    (conversation_id,),
-                ).fetchone()
-                if active:
-                    raise RuntimeError(f"ACTIVE_RUN:{active['id']}")
+                active_id = self._active_top_level_run_id(db, conversation_id)
+                if active_id:
+                    raise RuntimeError(f"ACTIVE_RUN:{active_id}")
             conversation = db.execute(
                 "SELECT title_customized, archived FROM conversations WHERE id = ?",
                 (conversation_id,),
@@ -4175,15 +4217,9 @@ class ChatStorage:
             if not parent_job_id and not detached:
                 if goal_bind is None:
                     require_no_goal(db, conversation_id)
-                active = db.execute(
-                    "SELECT id FROM background_tasks WHERE conversation_id = ? "
-                    f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
-                    "AND (parent_job_id IS NULL OR parent_job_id = '') "
-                    "AND detached = 0 LIMIT 1",
-                    (conversation_id,),
-                ).fetchone()
-                if active:
-                    raise RuntimeError(f"ACTIVE_RUN:{active['id']}")
+                active_id = self._active_top_level_run_id(db, conversation_id)
+                if active_id:
+                    raise RuntimeError(f"ACTIVE_RUN:{active_id}")
             db.execute(
                 "INSERT INTO background_tasks("
                 "id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "

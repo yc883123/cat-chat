@@ -700,9 +700,16 @@ function renderDefaultStatus() {
   const status = $('#newConversationDefaultStatus');
   if (!status) return;
   const saved = newConversationDefault();
-  status.textContent = !saved.configured ? '未设置：新对话沿用输入区的选择。'
-    : saved.valid ? `已保存：${saved.profile.name || saved.model_key} / ${saved.model_name}`
-      : '已保存的默认已失效或尚未通过模型目录检查，新对话将沿用输入区的选择。';
+  if (!saved.configured) {
+    status.textContent = '未设置默认，新对话沿用输入区的选择。';
+    return;
+  }
+  if (saved.profile && saved.model_name && !Array.isArray(state.providerModelCatalogs[saved.model_key])) {
+    status.textContent = `已保存 ${saved.profile.name || saved.model_key} / ${saved.model_name}，新对话先使用此选择，模型目录将在后台检查。`;
+    return;
+  }
+  status.textContent = saved.valid ? `已保存 ${saved.profile.name || saved.model_key} / ${saved.model_name}`
+    : '已保存的默认已失效，新对话将沿用输入区的选择。';
 }
 
 async function checkNewDefaultModels({ force = false, preferred = null } = {}) {

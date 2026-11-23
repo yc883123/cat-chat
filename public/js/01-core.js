@@ -51,6 +51,8 @@ export const state = {
   // 同一时刻最多编辑一条消息；底部草稿由编辑入口暂存，退出后恢复。
   editingMessageId: '',
   editComposerStash: null,
+  // 截断历史并准备编辑重发中的会话；等待时允许继续写草稿，发送入口按会话互斥。
+  messageEditPendingIds: new Set(),
   abortController: null,
   chatRunId: '',
   runConversationId: '',

@@ -1240,12 +1240,14 @@ export function newConversationDefault() {
 export async function resolveNewConversationModel(explicit = null) {
   if (explicit?.model_key && explicit?.model_name) return { model_key: explicit.model_key, model_name: explicit.model_name };
   const fallback = { model_key: $('#modelSelect')?.value || '', model_name: composerModelChoice() };
-  const initial = newConversationDefault();
-  if (initial.profile && initial.model_name && !Array.isArray(state.providerModelCatalogs[initial.model_key])) {
-    try { await loadModelCatalog(initial.model_key); } catch (_) { return fallback; }
+  const saved = newConversationDefault();
+  // 默认值保存时已检查目录；重新打开页面后直接使用持久选择，建会话不等待供应商。
+  // 会话视图仍在后台加载目录；本页已有目录明确表明模型失效时沿用输入区。
+  const catalogKnown = Array.isArray(state.providerModelCatalogs[saved.model_key]);
+  if (saved.profile && saved.model_name && (!catalogKnown || saved.valid)) {
+    return { model_key: saved.model_key, model_name: saved.model_name };
   }
-  const current = newConversationDefault();
-  return current.valid ? { model_key: current.model_key, model_name: current.model_name } : fallback;
+  return fallback;
 }
 // 输入区模型「可搜索下拉」浮层的状态（原生 select 仍是唯一值来源，这里只是它的投影）。
 export const composerPickerState = { open: false, activeIndex: -1, items: [] };

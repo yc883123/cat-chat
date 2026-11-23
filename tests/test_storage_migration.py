@@ -415,7 +415,7 @@ class ShowMediaToolMigrationTests(unittest.TestCase):
         return json.loads(raw or "[]")
 
     def test_version_and_id_constant(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 34)
+        self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 34)
         with closing(sqlite3.connect(self.root / "chat.db")) as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             thread_columns = {row[1] for row in db.execute("PRAGMA table_info(super_threads)")}
@@ -571,6 +571,49 @@ class DetachedJobMigrationTests(unittest.TestCase):
         self.assertEqual(row["origin_run_id"], str(blocking["id"]))
 
 
+class ConversationVisionAndTraceMigrationTests(unittest.TestCase):
+    def test_v34_upgrade_can_retry_old_text_only_decisions_and_indexes_trace_references(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chat.db"
+            with patch.object(storage_module, "CURRENT_SCHEMA_VERSION", 34):
+                storage = ChatStorage(path)
+            text = storage.create_conversation()
+            vision = storage.create_conversation()
+            unknown = storage.create_conversation()
+            storage.set_conversation_chat_supports_images(text["id"], False)
+            storage.set_conversation_chat_supports_images(vision["id"], True)
+            storage.add_message(text["id"], "user", "旧会话内容")
+
+            reopened = ChatStorage(path)
+            self.assertEqual(reopened.get_user_version(), CURRENT_SCHEMA_VERSION)
+            self.assertEqual(reopened.get_conversation(text["id"])["chat_supports_images"], -1)
+            self.assertEqual(reopened.get_conversation(text["id"])["messages"][0]["content"], "旧会话内容")
+            self.assertEqual(reopened.get_conversation(vision["id"])["chat_supports_images"], 1)
+            self.assertEqual(reopened.get_conversation(unknown["id"])["chat_supports_images"], -1)
+
+            with closing(sqlite3.connect(path)) as db:
+                plan = db.execute(
+                    "EXPLAIN QUERY PLAN SELECT trace_hash FROM message_traces "
+                    "WHERE NOT EXISTS (SELECT 1 FROM messages "
+                    "WHERE messages.trace_hash = message_traces.trace_hash)"
+                ).fetchall()
+            self.assertTrue(any("SEARCH" in row[3] and "idx_messages_trace_hash" in row[3] for row in plan), plan)
+
+            reopened.set_conversation_chat_supports_images(text["id"], False)
+            self.assertEqual(ChatStorage(path).get_conversation(text["id"])["chat_supports_images"], 0)
+
+    def test_probe_for_previous_model_cannot_freeze_new_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = ChatStorage(Path(tmp) / "chat.db")
+            conversation = storage.create_conversation(model_key="online:test", model_name="old")
+            cid = conversation["id"]
+            storage.update_conversation_settings(cid, model_name="new")
+            storage.set_conversation_chat_supports_images(cid, False, model_key="online:test", model_name="old")
+            self.assertEqual(storage.get_conversation(cid)["chat_supports_images"], -1)
+            storage.set_conversation_chat_supports_images(cid, True, model_key="online:test", model_name="new")
+            self.assertEqual(storage.get_conversation(cid)["chat_supports_images"], 1)
+
+
 class GoalMigrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -599,7 +642,7 @@ class GoalMigrationTests(unittest.TestCase):
                     for table in ("conversations", "messages", "background_tasks")]
 
     def _assert_upgraded(self):
-        self.assertEqual(self.storage.get_user_version(), 34)
+        self.assertEqual(self.storage.get_user_version(), CURRENT_SCHEMA_VERSION)
         names = {row[1] for row in self._goal_schema()}
         self.assertEqual(names, {"chat_goals", "chat_goal_rounds", "chat_goal_actions",
                                  "chat_goals_one_active", "chat_goals_queue", "chat_goal_budget_receipts",

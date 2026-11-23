@@ -6,10 +6,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server import ConfigStore  # noqa: E402
+from naiba.app import NaibaChatApp  # noqa: E402
 from naiba.storage.store import ChatStorage  # noqa: E402
 
 
@@ -38,6 +41,17 @@ class WorkspaceBindingTests(unittest.TestCase):
         self.assertEqual(self.config.workspace_dir_for_group("素材4"), str(self.materials))
         with self.assertRaisesRegex(ValueError, "不存在"):
             self.config.workspace_dir_for_group("missing")
+
+    def test_create_conversation_checks_registered_workspace_once(self):
+        app = SimpleNamespace(config=self.config, storage=self.storage)
+        with patch.object(self.config, "ensure_workspace_writable",
+                          wraps=self.config.ensure_workspace_writable) as check:
+            conversation, status = NaibaChatApp.api_create_conversation(
+                app, {"workspace_group": "素材4", "workspace_dir": str(self.input_dir)},
+            )
+        self.assertEqual(status, 201, conversation)
+        self.assertEqual(conversation["workspace_dir"], str(self.materials))
+        check.assert_called_once_with(self.materials.resolve())
 
     def test_startup_repair_corrects_mismatched_registered_group(self):
         conversation = self.storage.create_conversation(

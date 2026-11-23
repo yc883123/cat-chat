@@ -1,7 +1,7 @@
 // 「重新生成」+「编辑」回归冒烟（由 verify/regenerate_smoke.py 起独立源码 server 后调用）。
 //
 // 覆盖（全部走真实前端 + 真实后端截断，只用假流挡住模型调用）：
-//   ① 按钮就位与顺序：用户消息 编辑 → 分支；AI 回复 复制 → 重新生成 → 新会话；
+//   ① 按钮就位与顺序：用户消息 编辑 → 分支 → 删除；AI 回复 复制 → 重新生成 → 删除 → 新会话；
 //   ② 中间轮点「重新生成」必须弹确认（含剩余条数 + 草稿提示），取消则一切不变；
 //   ③ 最后一轮点「重新生成」不弹确认，**截断点是那条提问**，重发的是同一条提问原文，
 //      且前缀里没有原答复、没有重复提问；
@@ -206,11 +206,11 @@ async function messagesOf(conversationId) {
     check('初始 6 条消息（三轮问答）', snap.length === 6, JSON.stringify(snap.map((s) => s.role)));
     const userRows = snap.filter((s) => s.role === 'user');
     const aiRows = snap.filter((s) => s.role === 'assistant');
-    check('用户消息操作区 = 编辑 → 分支',
-      userRows.length === 3 && userRows.every((s) => s.buttons.join(',') === '编辑,分支'),
+    check('用户消息操作区 = 编辑 → 分支 → 删除',
+      userRows.length === 3 && userRows.every((s) => s.buttons.join(',') === '编辑,分支,删除'),
       JSON.stringify(userRows.map((s) => s.buttons)));
-    check('AI 回复操作区 = 复制 → 重新生成 → 新会话',
-      aiRows.length === 3 && aiRows.every((s) => s.buttons.join(',') === '复制,重新生成,新会话'),
+    check('AI 回复操作区 = 复制 → 重新生成 → 删除 → 新会话',
+      aiRows.length === 3 && aiRows.every((s) => s.buttons.join(',') === '复制,重新生成,删除,新会话'),
       JSON.stringify(aiRows.map((s) => s.buttons)));
     check('「重新生成」按钮在空闲态可见', aiRows.every((s) => s.regenShown === true),
       JSON.stringify(aiRows.map((s) => s.regenShown)));

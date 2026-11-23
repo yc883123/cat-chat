@@ -329,6 +329,7 @@ function restoreInlineComposer({ restoreDraft = false, resume = false } = {}) {
   wrap.hidden = false;
   wrap.classList.remove('is-inline-edit');
   wrap.querySelector('.edit-composer-header')?.remove();
+  stash.row?.querySelector('.edit-composer-header')?.remove();
   if (resume) return;
   if (stash.placeholder && stash.placeholder.parentNode) stash.placeholder.remove();
   if (restoreDraft) {
@@ -374,10 +375,14 @@ function submitEdit(row, textarea) {
   const attachments = attachmentChips()
     .map(({ name, path, size, thumb_path }) => ({ name, path, size, thumb_path }));
   const folders = folderChips().map(folderIndexMetadata);
+  const stash = state.editComposerStash;
+  const draftBeforeEdit = stash ? { text: stash.text, files: stash.files } : null;
   restoreInlineComposer();
   row.classList.remove('is-editing');
   applyEditingState(null);
-  confirmEditMessage(row, value, attachments, folders);
+  const body = row.querySelector('.message-body');
+  if (body) body.textContent = value;
+  confirmEditMessage(row, value, attachments, folders, draftBeforeEdit);
 }
 
 // 取消编辑：恢复进入编辑前的底部草稿与附件，再重新渲染当前会话。
@@ -430,6 +435,10 @@ function mountEditComposer(row, { wrap, text = '', files = [] } = {}) {
 }
 
 export function startEditMessage(row) {
+  if (state.messageEditPendingIds?.has(String(state.conversationId || ''))) {
+    toast('正在应用上一条编辑，请稍后再编辑消息');
+    return;
+  }
   if (guardGoalChat()) return;
   if (!row) return;
   // 历史消息的编辑重发仍是普通聊天，不能把底部 GOAL 草稿标签带入重发。
@@ -552,7 +561,7 @@ function resumeEditComposer(snapshot) {
 // 截断走 /api/messages/edit：它只接受 role == "user" 的 id，随即删除该消息及其之后所有消息，并回传原附件。
 // 放行口径与 sendChatMessage/submit_chat 一致：**文字与可用附件至少有一个**——纯附件轮次
 // （只发文件/图片、不写字）同样可以重发；只传空文字又无附件才拒绝。
-export async function resendFromUserMessage(userMessageId, text, { successText = '已从该消息重开，编辑点之前的上下文将复用缓存', errorPrefix = '重发', attachments = [], attachmentsOverride = null, folderIndexes = [] } = {}) {
+export async function resendFromUserMessage(userMessageId, text, { successText = '已从该消息重开，编辑点之前的上下文将复用缓存', errorPrefix = '重发', attachments = [], attachmentsOverride = null, folderIndexes = [], draftBeforeEdit = null } = {}) {
   if (guardGoalChat()) return false;
   if (goalDraftEnabled()) setGoalDraftMode(false);
   // 编辑/重发最终仍走同一条输入管线：notifyComposerChanged(input) 会刷新镜像、引用弹层与发送状态。
@@ -565,13 +574,21 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
   }
   const conversationId = state.conversationId;
   if (!userMessageId || !conversationId) return false;
+  if (state.messageEditPendingIds.has(conversationId)) return false;
   const generation = beginConversationNavigation(conversationId);
-  let restoredFiles = knownAttachments.map(file => ({ ...file }));
+  const previousValue = String(draftBeforeEdit?.text ?? $('#messageInput').value ?? '');
+  const previousDraft = previousValue.trim() === content ? '' : previousValue;
+  const previousFiles = (draftBeforeEdit?.files || state.pendingFiles).map(file => ({ ...file }));
+  let restoredFiles = [
+    ...knownAttachments.map(file => ({ ...file })),
+    ...folderChipsFromIndexes(knownFolders),
+  ];
   const restoreDraft = () => {
     const input = $('#messageInput');
     const existing = String(input.value || '');
-    input.value = existing && existing.trim() !== content ? `${existing}\n\n${content}` : content;
-    const files = [...state.pendingFiles, ...restoredFiles];
+    const drafts = [existing, previousDraft].filter(value => value.trim() && value.trim() !== content);
+    input.value = [...new Set(drafts), content].filter(Boolean).join('\n\n');
+    const files = [...state.pendingFiles, ...previousFiles, ...restoredFiles];
     state.pendingFiles = files.filter((file, index) => files.findIndex(other => other.path === file.path && other.name === file.name) === index);
     renderPendingFiles();
     resizeTextarea();
@@ -579,7 +596,15 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
     updateSkillPopup();
     notifyComposerChanged(input);
   };
+  state.messageEditPendingIds.add(conversationId);
   try {
+    // 先把原输入区交还给下一条草稿。截断回执到达前只锁发送，旧历史的满额状态不锁输入。
+    $('#messageInput').value = '';
+    state.pendingFiles = [];
+    renderPendingFiles();
+    resizeTextarea();
+    renderInputMirror();
+    updateContextComposerLock(state.chatBusy);
     const result = await api('/api/messages/edit', {
       method: 'POST',
       body: { conversation_id: conversationId, message_id: userMessageId },
@@ -599,11 +624,16 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
     ];
     // 截断后重新渲染会话（被截断的消息已从历史消失）
     let opened;
-    try { opened = await openConversation(conversationId, { expectedGeneration: generation }); }
+    try { opened = await openConversation(conversationId, { expectedGeneration: generation, recoverRun: false }); }
     catch (error) { restoreDraft(); toast(`${errorPrefix}后重新加载失败：${error.message}，内容已保留，尚未发送`); return false; }
     if (!opened) {
       restoreDraft();
       toast('已切到别的会话，编辑内容和附件已保留在输入区，尚未发送');
+      return false;
+    }
+    if (String($('#messageInput').value || '').trim() || state.pendingFiles.length) {
+      restoreDraft();
+      toast('历史已截到编辑位置。编辑内容已追加到新草稿，尚未发送，请检查后发送');
       return false;
     }
     state.pendingFiles = restoredFiles;
@@ -616,17 +646,20 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
     updateSkillPopup();
     notifyComposerChanged(input);
     toast(successText);
-    await sendMessage();
-    return true;
   } catch (error) {
     restoreDraft();
     toast(`${errorPrefix}失败：${error.message}`);
     if (isConversationOpenCurrent(generation, conversationId)) void openConversation(conversationId, { expectedGeneration: generation }).catch(() => {});
     return false;
+  } finally {
+    state.messageEditPendingIds.delete(conversationId);
+    updateContextComposerLock(state.chatBusy);
   }
+  await sendMessage();
+  return true;
 }
 
-export async function confirmEditMessage(row, newText, editedAttachments = null, editedFolders = null) {
+export async function confirmEditMessage(row, newText, editedAttachments = null, editedFolders = null, draftBeforeEdit = null) {
   const text = newText.trim();
   const messageId = row.dataset.messageId;
   if (!messageId || !state.conversationId) return;
@@ -638,6 +671,7 @@ export async function confirmEditMessage(row, newText, editedAttachments = null,
     attachments: Array.isArray(editedAttachments) ? editedAttachments : (metadata.attachments || []),
     attachmentsOverride: editedAttachments,
     folderIndexes: Array.isArray(editedFolders) ? editedFolders : (metadata.folder_indexes || []),
+    draftBeforeEdit,
   });
 }
 

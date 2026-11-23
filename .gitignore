@@ -434,6 +434,8 @@ verify/claude-cache-diagnostic/*
 !verify/conversation_navigation_inflight_test.cjs
 !verify/model_selection_race_offline_test.cjs
 !verify/conversation_model_smoke.cjs
+!verify/conversation_latency_vision_smoke.py
+!verify/conversation_latency_vision_smoke.cjs
 !verify/novel_integrity_smoke.cjs
 !verify/_serve_novel_integrity.py
 !verify/onebot_fake_napcat_smoke.py

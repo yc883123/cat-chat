@@ -55,6 +55,7 @@ from naiba.core.contracts import (
     CONVERSATION_BATCH_MAX_IDS,
     NEW_CONVERSATION_DEFAULT_FIELDS,
 )
+from naiba.core.exceptions import ActiveRunError
 from naiba.plans import PlanManager
 from naiba.run.manager import ConversationRunManager
 from naiba.search import WebSearchRuntime
@@ -65,6 +66,7 @@ from naiba.skills.install import (
 )
 from naiba.skills.overrides import SkillOverrides
 from naiba.storage.backgrounds import ensure_background_presets, is_backgrounds_path
+from naiba.storage.goals import GoalConflict
 from naiba.storage.media import (
     CACHE_SCOPES, SCOPE_GENERATED, SCOPE_UPLOADS,
     _clean_uploads_cache, _process_uploaded_image,
@@ -1273,20 +1275,15 @@ class NaibaChatApp:
         if len(model_name.strip()) > 256:
             return {"error": "模型名称不能超过 256 个字符"}, HTTPStatus.BAD_REQUEST
         workspace_group = str(workspace_group or "").strip()
-        if workspace_group:
-            try:
+        try:
+            if workspace_group:
                 # Registered workspace bindings are authoritative.
                 workspace_dir = self.config.workspace_dir_for_group(workspace_group)
+            if workspace_dir and workspace_dir.strip():
                 resolved_workspace = self.config.resolve_workspace_dir(workspace_dir)
                 self.config.ensure_workspace_writable(resolved_workspace)
-            except (OSError, ValueError) as exc:
-                return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
-        if workspace_dir is not None and str(workspace_dir).strip():
-            try:
-                resolved_workspace = self.config.resolve_workspace_dir(str(workspace_dir).strip())
-                self.config.ensure_workspace_writable(resolved_workspace)
-            except (OSError, ValueError) as exc:
-                return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+        except (OSError, ValueError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
         return (
             self.storage.create_conversation(
                 title=title, provider_id=provider_id, agent_id=agent_id,
@@ -2300,7 +2297,7 @@ class NaibaChatApp:
             "recycled_skills": self._recycled_skill_entries(),
         })
 
-    def _edit_message(self, body: dict[str, Any]) -> None:
+    def _edit_message(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """删除指定消息及其之后所有消息，供"从该处重新编辑对话"使用。
 
         前端随后会携带新内容调用 /api/chat 重发一轮，因此这里只负责截断。
@@ -2309,20 +2306,16 @@ class NaibaChatApp:
         message_id = str(body.get("message_id") or "")
         if not conversation_id or not message_id:
             return self._reply({"error": "conversation_id 和 message_id 不能为空"}, HTTPStatus.BAD_REQUEST)
-            return
-        conversation = self.storage.get_conversation(conversation_id, include_trace=False)
-        if not conversation:
-            return self._reply({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
-            return
-        target = next((m for m in conversation.get("messages", []) if m.get("id") == message_id), None)
-        if not target:
-            return self._reply({"error": "消息不存在"}, HTTPStatus.NOT_FOUND)
-            return
-        if target.get("role") != "user":
-            return self._reply({"error": "只能编辑用户消息"}, HTTPStatus.BAD_REQUEST)
-            return
-        removed = self.storage.truncate_from_message(conversation_id, message_id)
-        metadata = target.get("metadata") or {}
+        try:
+            removed, metadata = self.storage.truncate_from_user_message(conversation_id, message_id)
+        except ActiveRunError as exc:
+            return self._reply({"error": str(exc), "active_run_id": exc.run_id}, HTTPStatus.CONFLICT)
+        except GoalConflict as exc:
+            return self._reply({"error": str(exc)}, HTTPStatus.CONFLICT)
+        except LookupError as exc:
+            return self._reply({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        except ValueError as exc:
+            return self._reply({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         return self._reply({
             "ok": True,
             "removed": removed,

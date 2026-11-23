@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from naiba.llm import local_probe  # noqa: E402
 from naiba.llm import runtime as llm_runtime  # noqa: E402
+from naiba.llm.profiles import resolve_profile_with_override  # noqa: E402
 from naiba.skills.agent import SkillAgent  # noqa: E402
 from naiba.skills.context import (  # noqa: E402
     DEFAULT_CONTEXT_WINDOW,
@@ -196,6 +197,75 @@ class _ConfigStub:
 class _AppStub:
     def __init__(self, vision: dict):
         self.config = _ConfigStub(vision)
+
+
+class ImageCapabilityResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self.router = VisionRouter(_AppStub({}))
+        self.profile = {
+            "kind": "online", "request_format": "openai_chat",
+            "base_url": "https://example.invalid/v1", "model": "unknown-alias",
+            "supports_images": False, "supports_images_explicit": None,
+        }
+
+    def test_selected_model_replaces_default_model_image_inference(self):
+        config = mock.Mock()
+        config.profile.return_value = self.profile
+        profile = resolve_profile_with_override(config, "online:fixture", "gpt-5")
+        self.assertTrue(profile["supports_images"])
+        self.assertFalse(self.profile["supports_images"])
+
+    def test_selected_model_preserves_explicit_image_setting(self):
+        config = mock.Mock()
+        config.profile.return_value = {**self.profile, "supports_images_explicit": False}
+        profile = resolve_profile_with_override(config, "online:fixture", "gpt-5")
+        self.assertFalse(profile["supports_images"])
+
+    def test_deepseek_v41_names_are_inferred_for_official_and_relay_profiles(self):
+        config = mock.Mock()
+        for endpoint in ("https://api.deepseek.com/v1", "https://example.invalid/v1"):
+            for model in ("deepseek-flash", "deepseek-v4.1-flash"):
+                with self.subTest(endpoint=endpoint, model=model):
+                    config.profile.return_value = {**self.profile, "base_url": endpoint}
+                    profile = resolve_profile_with_override(config, "online:fixture", model)
+                    self.assertTrue(profile["supports_images"])
+            config.profile.return_value = {**self.profile, "base_url": endpoint}
+            unknown = resolve_profile_with_override(config, "online:fixture", "deepseek-v4.1-unknown")
+            self.assertFalse(unknown["supports_images"])
+
+    def test_unknown_cached_without_probe_still_probes_when_image_arrives(self):
+        with mock.patch.object(self.router, "_runtime_image_capability", return_value=(None, "")), \
+                mock.patch.object(self.router, "_probe_image_capability", return_value=True) as probe:
+            first = self.router.brain_image_capability(self.profile)
+            self.assertFalse(first["confirmed"])
+            probe.assert_not_called()
+            second = self.router.brain_image_capability(self.profile, probe_if_unknown=True)
+            self.assertTrue(second["supported"])
+            self.assertTrue(second["confirmed"])
+            probe.assert_called_once()
+
+    def test_inconclusive_image_probe_can_recover_on_next_image(self):
+        with mock.patch.object(self.router, "_runtime_image_capability", return_value=(None, "")), \
+                mock.patch.object(self.router, "_probe_image_capability", side_effect=(None, True)) as probe:
+            first = self.router.brain_image_capability(self.profile, probe_if_unknown=True)
+            self.assertFalse(first["confirmed"])
+            second = self.router.brain_image_capability(self.profile, probe_if_unknown=True)
+            self.assertTrue(second["confirmed"])
+            self.assertTrue(second["supported"])
+            self.assertEqual(probe.call_count, 2)
+
+    def test_generic_image_processing_errors_do_not_confirm_text_only(self):
+        for error in ("unsupported image format", "failed to load image"):
+            with self.subTest(error=error), mock.patch.object(
+                self.router._runtime, "complete", side_effect=RuntimeError(error)
+            ):
+                self.assertIsNone(self.router._probe_image_capability(self.profile))
+
+    def test_confirmed_unsupported_image_input_is_preserved(self):
+        with mock.patch.object(
+            self.router._runtime, "complete", side_effect=RuntimeError("image input is not supported")
+        ):
+            self.assertFalse(self.router._probe_image_capability(self.profile))
 
 
 def _image_part(name: str, payload: str = "YWJj") -> dict:

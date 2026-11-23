@@ -11,18 +11,21 @@
 前缀缓存照常命中（这是重发最省钱的理由）。
 
 「重新生成」= 「编辑」的不改字版本，两者截断位置完全相同，因此共用 resendFromUserMessage。
-后端零改动，复用 POST /api/messages/edit。
+两条路径共用 POST /api/messages/edit 截断用户消息与其后历史。
 """
 
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from naiba.storage.store import ChatStorage  # noqa: E402
+from naiba.app import NaibaChatApp  # noqa: E402
 
 
 def _read(*parts: str) -> str:
@@ -318,6 +321,30 @@ class RegenerateTruncationTests(unittest.TestCase):
                          [{"name": "a.png", "path": "uploads/a.png", "size": 12}])
         self.storage.truncate_from_message(self.conversation_id, u2["id"])
         self.assertEqual([m["content"] for m in self._messages()], ["第一问", "第一答"])
+
+    def test_edit_endpoint_checks_target_and_active_run_without_loading_history(self):
+        _u1, u2 = self._seed_two_rounds()
+        attachments = [{"name": "a.png", "path": "uploads/a.png", "size": 12}]
+        self.storage.merge_message_metadata(self.conversation_id, u2["id"], {"attachments": attachments})
+        before = self._messages()
+        app = SimpleNamespace(storage=self.storage, _reply=lambda payload, status=200: (payload, status))
+        request = {"conversation_id": self.conversation_id, "message_id": u2["id"]}
+        active = self.storage.create_run(self.conversation_id, "在途任务", {}, {}, kind="chat")
+        response, status = NaibaChatApp._edit_message(app, request)
+        self.assertEqual(status, 409)
+        self.assertEqual(response["active_run_id"], active["id"])
+        self.assertEqual(self._messages(), before)
+        self.storage.update_background_task(active["id"], status="completed", finished=True)
+        with patch.object(self.storage, "get_conversation", side_effect=AssertionError("编辑不得预读全文")):
+            _, status = NaibaChatApp._edit_message(app, {**request, "message_id": before[-1]["id"]})
+            self.assertEqual(status, 400)
+            response, status = NaibaChatApp._edit_message(app, request)
+            self.assertEqual(status, 200)
+            self.assertEqual(response["removed"], 2)
+            self.assertEqual(response["attachments"], attachments)
+            _, status = NaibaChatApp._edit_message(app, request)
+            self.assertEqual(status, 404)
+        self.assertEqual(self._messages(), before[:2])
 
 
 class RegenerateHistoryPrefixTests(unittest.TestCase):

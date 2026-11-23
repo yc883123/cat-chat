@@ -72,6 +72,7 @@ _WRITE_HELPERS = {
     "_coalesce_reasoning_deltas",
     "_slim_terminal_event_payload_rows",
     "_slim_terminal_snapshot_rows",
+    "_truncate_message_tail",
 }
 
 
@@ -340,6 +341,7 @@ class SqliteWriteRetryTests(unittest.TestCase):
             "create_conversation",
             "delete_conversation",
             "truncate_from_message",
+            "truncate_from_user_message",
             "update_background_task",
             "create_plan",
             "update_plan",

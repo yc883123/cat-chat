@@ -1434,7 +1434,7 @@ export async function createConversation(workspaceGroup = '', workspaceDir = '',
   return true;
 }
 
-export async function openConversation(id, { expectedGeneration = null } = {}) {
+export async function openConversation(id, { expectedGeneration = null, recoverRun = true } = {}) {
   if (expectedGeneration !== null && !isConversationOpenCurrent(expectedGeneration)) return false;
   const generation = beginConversationNavigation(id);
   if (id !== state.conversationId) {
@@ -1510,7 +1510,7 @@ export async function openConversation(id, { expectedGeneration = null } = {}) {
   state.reasoningEffort = conversation.reasoning_effort || (state.deepReasoningEnabled ? 'medium' : 'auto');
   updateDeepReasoningButton();
   document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id } }));
-  await resumeConversationRun(id, { openGeneration: generation });
+  if (recoverRun) await resumeConversationRun(id, { openGeneration: generation });
   if (!isConversationOpenCurrent(generation, id)) return false;
   closeSidebar();
   return true;

@@ -157,15 +157,54 @@ test('catalog refresh cannot overwrite a later model choice in the same conversa
   h.calls[0].resolve({ models: [{ id: 'chosen-a' }, { id: 'later-choice' }] }); await refresh;
   assert.equal(h.elements['#composerModelSelect'].value, 'later-choice');
 });
-test('deleted or unavailable new defaults fall back to the composer snapshot', async () => {
+test('deleted or known invalid new defaults fall back to the composer snapshot', async () => {
   const h = domHarness(); h.state.bootstrap.settings = { new_conversation_model_key: 'online:deleted', new_conversation_model_name: 'deleted' };
   assert.equal((await h.context.resolveNewConversationModel()).model_key, 'online:a'); assert.equal(h.calls.length, 0);
   h.state.bootstrap.settings = { new_conversation_model_key: 'local:b', new_conversation_model_name: 'chosen-b' };
-  delete h.state.providerModelCatalogs['local:b'];
+  h.state.providerModelCatalogs['local:b'] = [];
   const result = h.context.resolveNewConversationModel();
   h.elements['#modelSelect'].value = 'local:b';
-  h.calls[0].reject(new Error('directory offline'));
   const chosen = await result; assert.equal(chosen.model_key, 'online:a'); assert.equal(chosen.model_name, 'chosen-a');
+  assert.equal(h.calls.length, 0);
+});
+
+test('saved new defaults create immediately without a catalog request after reload', async () => {
+  const h = domHarness();
+  h.state.bootstrap.settings = { new_conversation_model_key: 'local:b', new_conversation_model_name: 'chosen-b' };
+  delete h.state.providerModelCatalogs['local:b'];
+  const result = h.context.resolveNewConversationModel();
+  assert.equal(h.calls.length, 0);
+  h.state.bootstrap.settings.new_conversation_model_name = 'later-default';
+  const chosen = await result;
+  assert.equal(chosen.model_key, 'local:b'); assert.equal(chosen.model_name, 'chosen-b');
+  assert.equal(h.state.bootstrap.settings.new_conversation_model_name, 'later-default');
+});
+
+test('new defaults never wait for an in-flight remote catalog or change after its late reply', async () => {
+  const h = domHarness();
+  h.state.bootstrap.settings = { new_conversation_model_key: 'local:b', new_conversation_model_name: 'chosen-b' };
+  delete h.state.providerModelCatalogs['local:b'];
+  const checking = h.context.loadModelCatalog('local:b');
+  const chosen = await h.context.resolveNewConversationModel();
+  assert.equal(chosen.model_key, 'local:b'); assert.equal(chosen.model_name, 'chosen-b');
+  assert.equal(h.calls.length, 1);
+  h.calls[0].resolve({ models: [{ id: 'different-model' }] }); await checking;
+  assert.equal(chosen.model_name, 'chosen-b');
+  assert.equal(h.state.bootstrap.settings.new_conversation_model_name, 'chosen-b');
+  assert.equal((await h.context.resolveNewConversationModel()).model_key, 'online:a');
+  assert.equal((await h.context.resolveNewConversationModel()).model_name, 'chosen-a');
+});
+
+test('default status describes uncached saved defaults and known invalid defaults', async () => {
+  const h = domHarness();
+  h.state.bootstrap.settings = { new_conversation_model_key: 'local:b', new_conversation_model_name: 'chosen-b' };
+  delete h.state.providerModelCatalogs['local:b'];
+  h.context.renderDefaultStatus();
+  assert.match(h.elements['#newConversationDefaultStatus'].textContent, /先使用此选择/);
+  assert.equal(h.calls.length, 0);
+  h.state.providerModelCatalogs['local:b'] = [];
+  h.context.renderDefaultStatus();
+  assert.match(h.elements['#newConversationDefaultStatus'].textContent, /失效/);
 });
 test('default save failure restores the saved pair and leaves common default and history unchanged', async () => {
   const h = domHarness(); h.state.bootstrap.settings = { new_conversation_model_key: 'online:a', new_conversation_model_name: 'chosen-a' };

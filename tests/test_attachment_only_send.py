@@ -5,8 +5,11 @@
 重放逐字节一致；submit_chat 的放行/拒绝边界；纯附件首轮会话标题回退。
 """
 
+import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +18,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from naiba.config import ConfigStore  # noqa: E402
+from naiba import net as net_io  # noqa: E402
+from naiba.app import NaibaChatApp  # noqa: E402
+from naiba.paths import PathContext  # noqa: E402
 from naiba.core.attachments import (  # noqa: E402
     ATTACHMENT_ONLY_NOTICE,
     compose_user_content,
@@ -22,6 +28,7 @@ from naiba.core.attachments import (  # noqa: E402
 )
 from naiba.run.manager import ConversationRunManager  # noqa: E402
 from naiba.storage.store import ChatStorage  # noqa: E402
+from tests.test_llm_runtime_retry import FakeResponse  # noqa: E402
 
 
 class ComposeUserContentTests(unittest.TestCase):
@@ -205,6 +212,30 @@ class SubmitChatAttachmentOnlyTests(unittest.TestCase):
         run = self._submit({"conversation_id": self.conversation["id"], "message": "你好"})
         self.assertTrue(run.get("id"))
 
+    def test_unknown_image_capability_is_deferred_without_freezing_fallback(self):
+        self.manager.app.vision.brain_image_capability = mock.Mock(
+            side_effect=AssertionError("提交阶段不应探测模型")
+        )
+        run = self._submit({
+            "conversation_id": self.conversation["id"], "message": "看看图片",
+            "attachments": [{"path": str(Path(self.tmp.name) / "fixture.png")}],
+        })
+        snapshot = self.storage.get_run_snapshot(run["id"])
+        self.assertIsNone(snapshot["chat_supports_images"])
+        conversation = self.storage.get_conversation(self.conversation["id"], include_messages=False)
+        self.assertEqual(conversation["chat_supports_images"], -1)
+        self.manager.app.vision.brain_image_capability.assert_not_called()
+
+    def test_explicit_image_setting_overrides_previous_frozen_capability(self):
+        self.storage.set_conversation_chat_supports_images(self.conversation["id"], False)
+        self.manager.app.config.upsert_model_profile({
+            "id": "submit-fixture", "kind": "online", "name": "提交夹具",
+            "base_url": "http://127.0.0.1:9/v1", "model": "test-model",
+            "supports_images": True,
+        })
+        run = self._submit({"conversation_id": self.conversation["id"], "message": "你好"})
+        self.assertTrue(self.storage.get_run_snapshot(run["id"])["chat_supports_images"])
+
     def test_attachment_only_first_turn_title_fallback(self):
         self._submit(
             {
@@ -226,6 +257,102 @@ class SubmitChatAttachmentOnlyTests(unittest.TestCase):
         )
         conversation = self.storage.get_conversation(self.conversation["id"])
         self.assertEqual(conversation["title"], "帮我看看这张图")
+
+
+class ImageCapabilityWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name).resolve()
+        paths = PathContext.local(root, root / "config.json")
+        config = ConfigStore(paths.config_path, paths=paths)
+        config.data.update({
+            "workspace_dir": str(root / "work"), "mcp_servers": [],
+            "auto_compaction": {"mode": "off"},
+            "providers": [{
+                "id": "images", "kind": "online", "name": "Images fixture", "api_key": "",
+                "base_url": "http://127.0.0.1:1/v1", "request_format": "openai_chat",
+                "model": "unknown-alias", "context_window": 32000, "max_output_tokens": 2048,
+            }],
+        })
+        config.save()
+        self.enterContext(mock.patch.dict(os.environ, {"NAIBA_ERROR_DUMP_DIR": str(root / "errors")}))
+        self.wire = []
+        self.enterContext(mock.patch.object(net_io, "open", side_effect=self._transport))
+        self.app = NaibaChatApp(paths=paths)
+        self.addCleanup(self.app.stop)
+        self.cid = self.app.storage.create_conversation(
+            model_key="online:images", model_name="unknown-alias", reasoning_effort="off",
+        )["id"]
+        self.app.storage.set_enabled_tool_ids(self.cid, ["vision_analyze"])
+        self.app.storage.update_conversation_settings(self.cid, stream_enabled=False)
+        self.probe = self.enterContext(mock.patch.object(
+            self.app.vision, "_probe_image_capability", return_value=None,
+        ))
+        from PIL import Image
+
+        self.image_path = root / "fixture.png"
+        Image.new("RGB", (32, 32), "blue").save(self.image_path)
+
+    def _transport(self, request, **kwargs):
+        self.assertEqual(request.full_url, "http://127.0.0.1:1/v1/chat/completions")
+        self.wire.append(json.loads(request.data))
+        return FakeResponse({
+            "choices": [{"message": {"role": "assistant", "content": "已处理附件"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        })
+
+    def _send(self, *, image=False):
+        run = self.app.runs.submit_chat({
+            "conversation_id": self.cid, "message": "请看看附件" if image else "你好",
+            "attachments": [{"path": str(self.image_path)}] if image else [],
+        })
+        deadline = time.monotonic() + 10
+        while run["id"] in self.app.runs._threads and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertNotIn(run["id"], self.app.runs._threads)
+        record = self.app.storage.get_background_task(run["id"])
+        self.assertEqual(record["status"], "completed", record.get("error"))
+
+    def _saved_capability(self):
+        return self.app.storage.get_conversation(self.cid, include_messages=False)["chat_supports_images"]
+
+    def test_text_turn_defers_probe_and_unknown_image_result_is_retried(self):
+        self._send()
+        self.probe.assert_not_called()
+        self.assertEqual(self._saved_capability(), -1)
+        self._send(image=True)
+        self.assertEqual(self.probe.call_count, 1)
+        self.assertEqual(self._saved_capability(), -1)
+        self.probe.return_value = True
+        self._send(image=True)
+        self.assertEqual(self.probe.call_count, 2)
+        self.assertEqual(self._saved_capability(), 1)
+        images = [
+            part for message in self.wire[-1]["messages"]
+            if isinstance(message["content"], list)
+            for part in message["content"] if part.get("type") == "image_url"
+        ]
+        self.assertTrue(images)
+
+    def test_explicit_false_does_not_persist_when_setting_returns_to_auto(self):
+        self.app.config.data["providers"][0]["supports_images"] = False
+        self._send(image=True)
+        self.probe.assert_not_called()
+        self.assertEqual(self._saved_capability(), -1)
+        self.app.config.data["providers"][0].pop("supports_images")
+        self.probe.return_value = True
+        self._send(image=True)
+        self.probe.assert_called_once()
+        self.assertEqual(self._saved_capability(), 1)
+
+    def test_capability_cache_write_failure_keeps_chat_usable(self):
+        self.probe.return_value = True
+        with mock.patch.object(
+            self.app.storage, "set_conversation_chat_supports_images", side_effect=OSError("fixture write failure"),
+        ):
+            self._send(image=True)
+        self.assertEqual(self._saved_capability(), -1)
 
 
 if __name__ == "__main__":

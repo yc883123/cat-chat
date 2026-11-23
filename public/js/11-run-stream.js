@@ -548,6 +548,7 @@ export async function resumeConversationRun(conversationId, { openGeneration = c
 }
 
 export async function sendChatMessage(textOverride = '', { skipContextWarning = false } = {}) {
+  if (state.messageEditPendingIds?.has(String(state.conversationId || ''))) return;
   if (guardGoalChat()) return;
   const goalMode = goalDraftEnabled();
   const input = $('#messageInput');
@@ -631,7 +632,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
       return;
     }
   }
-  if (guardGoalChat() || !isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
+  if (state.messageEditPendingIds?.has(selectionConversation)
+      || guardGoalChat() || !isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
   if (goalMode) {
     // 附件预检期间可以切会话或改草稿，迟到的预检不能启动旧目标。
     if (!goalDraftEnabled() || String(input.value || '').trim() !== inputText || state.pendingFiles !== goalDraftFiles

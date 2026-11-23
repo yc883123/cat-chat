@@ -11,6 +11,8 @@ const models = read('07-models-agents.js');
 const runs = read('11-run-stream.js');
 const tasks = read('06-tasks-plans.js');
 const input = read('12-chat-input.js');
+const messages = read('04-messages.js');
+const media = read('03-media.js');
 
 function section(source, start, end) {
   const first = source.indexOf(start);
@@ -44,12 +46,15 @@ function harness() {
     '#composerModelSelect': { value: 'M1' },
     '#agentSelect': { value: 'agent' },
     '#messageInput': { value: '', focus() {} },
+    '#sendButton': { dataset: {}, classList: { toggle() {} }, setAttribute() {} },
   };
   const h = { rows, detailGates, runGates, calls, notices, sent, elements,
-    settingsGate: null, createGate: null, createEntered: deferred(), providerGates: [] };
+    settingsGate: null, createGate: null, createEntered: deferred(), providerGates: [],
+    editGate: null, editEntered: deferred() };
   const state = {
     conversationId: 'A', conversations: [...rows.values()].map(row => ({ ...row })),
     expandedGroups: new Set(), cancelledRunIds: new Set(), providerModelCatalogs: {},
+    pendingFiles: [], messageEditPendingIds: new Set(),
     runGeneration: 1, runReconnectAt: 0, runReconnectTimers: new Set(),
     bootstrap: { agents: [{ id: 'agent' }], default_agent_id: 'agent', settings: {},
       model_profiles: [{ id: 'p', model_key: 'p' }, { id: 'q', model_key: 'q' }] },
@@ -68,6 +73,10 @@ function harness() {
       if (url === '/api/conversations' && options.method === 'POST') {
         h.createEntered.resolve();
         return h.createGate.promise;
+      }
+      if (url === '/api/messages/edit') {
+        h.editEntered.resolve();
+        return h.editGate ? h.editGate.promise : { attachments: [] };
       }
       const save = /^\/api\/conversations\/([^/]+)\/settings$/.exec(url);
       if (save) {
@@ -99,6 +108,9 @@ function harness() {
     fetchRunEvents: () => new Promise(() => {}), createRunRow: () => ({ isConnected: true }),
     loadTasks: async () => {}, sendMessage: text => sent.push(text),
     SKILL_INSTALL_PRESET: 'install preset', SKILL_EDIT_PRESET: 'edit preset',
+    guardGoalChat: () => false, goalBlocksChat: () => false, goalDraftEnabled: () => false,
+    goalIsActive: () => false, goalCanPause: () => false, isCoarsePointer: () => false,
+    folderChipsFromIndexes: items => items.map(item => ({ ...item, folder: true })),
   };
   context.detachRunSubscription = () => {
     state.abortController = null; state.runConversationId = ''; state.chatRunId = '';
@@ -110,6 +122,7 @@ function harness() {
     'closePermissionModeMenu', 'renderComposerWorkspace', 'renderSidebar', 'applyConversationAgent',
     'renderMessages', 'renderPermissionModeSwitch', 'updateDeepReasoningButton', 'closeSidebar',
     'setBusy', 'updateUnloadModelButton', 'renderKvmemControl', 'prefillPresetSkillsInComposer',
+    'renderPendingFiles', 'resizeTextarea', 'renderInputMirror', 'updateSkillPopup', 'notifyComposerChanged',
   ]) context[name] = () => {};
   const source = [
     section(conversations, 'let openGeneration', 'export async function loadConversations'),
@@ -120,6 +133,8 @@ function harness() {
     ...['resumeRun', 'resumeConversationRun', 'finishRunSubscription'].map(name => fn(runs, name)),
     fn(tasks, 'maybeRecoverRunFromPoll'),
     ...['startSkillInstall', 'startSkillEdit'].map(name => fn(input, name)),
+    fn(messages, 'resendFromUserMessage'), fn(runs, 'sendChatMessage'),
+    ...['updateContextComposerLock', 'updateSendButtonState', 'updateInterjectButtonState'].map(name => fn(media, name)),
   ].join('\n').replace(/^export /gm, '');
   vm.createContext(context);
   vm.runInContext(source, context, { filename: 'conversation owning functions' });
@@ -237,6 +252,79 @@ test('superseded catalog request waits for the latest force refresh', async () =
   assert.equal((await first)[0].id, 'M2');
   assert.equal((await latest)[0].id, 'M2');
   assert.equal(h.context.state.providerModelCatalogs.p[0].id, 'M2');
+});
+
+test('pending edit leaves a full-context input writable and blocks duplicate edit or chat sends', async () => {
+  const h = harness();
+  h.editGate = deferred();
+  h.context.state.contextAtCeiling = true;
+  h.elements['#messageInput'].value = 'edited question';
+  h.context.renderMessages = () => { h.context.state.contextAtCeiling = false; };
+  const editing = h.context.resendFromUserMessage('user-A', 'edited question');
+  await h.editEntered.promise;
+  assert.equal(h.elements['#messageInput'].disabled, false);
+  assert.equal(h.elements['#sendButton'].disabled, true);
+  assert.equal(h.elements['#sendButton'].title, '正在应用编辑');
+  assert.equal(await h.context.resendFromUserMessage('user-A', 'second edit'), false);
+  await h.context.sendChatMessage();
+  assert.equal(h.calls.filter(call => call.url === '/api/messages/edit').length, 1);
+  assert.equal(h.sent.length, 0);
+  h.editGate.resolve({ attachments: [] });
+  assert.equal(await editing, true);
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.context.state.messageEditPendingIds.size, 0);
+  assert.equal(h.elements['#messageInput'].disabled, false);
+  assert(!h.calls.some(call => call.url.startsWith('/api/runs?')), 'edit waited for redundant run recovery');
+});
+
+test('new typing during a pending edit is preserved and explains the completed truncation', async () => {
+  const h = harness();
+  h.editGate = deferred();
+  const editing = h.context.resendFromUserMessage('user-A', 'edited question', {
+    attachments: [{ name: 'original.png', path: 'original.png' }],
+  });
+  await h.editEntered.promise;
+  h.elements['#messageInput'].value = 'next draft';
+  h.context.state.pendingFiles = [{ name: 'next.txt', path: 'next.txt' }];
+  h.editGate.resolve({ attachments: [{ name: 'original.png', path: 'original.png' }] });
+  assert.equal(await editing, false);
+  assert.equal(h.sent.length, 0);
+  assert(h.elements['#messageInput'].value.includes('next draft'));
+  assert(h.elements['#messageInput'].value.includes('edited question'));
+  assert.equal(h.context.state.pendingFiles.length, 2);
+  assert(h.notices.some(message => message.includes('历史已截到编辑位置') && message.includes('尚未发送')));
+  assert.equal(h.context.state.messageEditPendingIds.size, 0);
+  assert.equal(h.elements['#sendButton'].disabled, false);
+});
+
+test('failed edit releases its send lock and restores original text and folder references', async () => {
+  const h = harness();
+  h.editGate = deferred();
+  h.elements['#messageInput'].value = 'existing unsent draft';
+  h.context.state.pendingFiles = [{ name: 'existing.txt', path: 'existing.txt' }];
+  const editing = h.context.resendFromUserMessage('user-A', 'edited question', {
+    folderIndexes: [{ path: 'folder-A', name: 'folder-A' }],
+  });
+  await h.editEntered.promise;
+  h.editGate.reject(new Error('fixture edit failed'));
+  assert.equal(await editing, false);
+  assert.equal(h.context.state.messageEditPendingIds.size, 0);
+  assert(h.elements['#messageInput'].value.includes('existing unsent draft'));
+  assert(h.elements['#messageInput'].value.includes('edited question'));
+  assert.equal(h.context.state.pendingFiles[0].path, 'existing.txt');
+  assert.equal(h.context.state.pendingFiles[1].path, 'folder-A');
+  assert.equal(h.elements['#sendButton'].disabled, false);
+  assert(h.notices.some(message => message.includes('fixture edit failed')));
+});
+
+test('an edit pending in another conversation does not lock the current input or send button', async () => {
+  const h = harness();
+  h.context.state.messageEditPendingIds.add('A');
+  h.context.state.conversationId = 'B';
+  h.elements['#messageInput'].value = 'draft B';
+  h.context.updateContextComposerLock(false);
+  assert.equal(h.elements['#messageInput'].disabled, false);
+  assert.equal(h.elements['#sendButton'].disabled, false);
 });
 
 (async () => {

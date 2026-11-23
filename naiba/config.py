@@ -4512,7 +4512,7 @@ def _infer_supports_images(provider: dict[str, Any]) -> bool:
     """推断模型是否支持图片输入（supports_images 能力字段）。
 
     - 配置显式给出布尔值时直接使用；
-    - DeepSeek 官方视觉模型 deepseek-v4-flash-vision-exp 明确为 true；
+    - DeepSeek V4.1 Flash / deepseek-flash 与旧视觉模型按名称推断为 true；
     - DeepSeek 官方其他模型默认 false；
     - 其余按模型名启发式推断（gemini / claude / 含 vl 等关键词）。
     """
@@ -4525,7 +4525,7 @@ def _infer_supports_images(provider: dict[str, Any]) -> bool:
         deepseek_vision_hints = (
             "deepseek-vl", "vision", "multimodal", "omni", "-vl", "_vl", "vl2",
         )
-        return model == "deepseek-v4-flash-vision-exp" or any(
+        return model == "deepseek-flash" or model.startswith("deepseek-v4.1-flash") or any(
             hint in model for hint in deepseek_vision_hints
         )
     try:

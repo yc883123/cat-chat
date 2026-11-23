@@ -410,28 +410,22 @@ class ConversationRunMixin:
                     conversation = {**conversation, **updated, "messages": conversation.get("messages") or []}
             try:
                 chat_profile = _profile_with_model_override(self.app.config, model_key, model_name)
-                resolver = getattr(self.app.vision, "resolve_brain_supports_images", None)
-                # 按会话固化图像能力：首次确定后写入会话，之后复用，不再随“本轮是否带图”
-                # 重复探测（避免结果漂移破坏视觉工具集与前缀缓存）。
+                explicit_capability = chat_profile.get("supports_images_explicit")
                 frozen_capability = None if task_model_override else conversation.get("chat_supports_images")
-                if isinstance(frozen_capability, bool):
+                if isinstance(explicit_capability, bool):
+                    chat_supports_images = explicit_capability
+                elif isinstance(frozen_capability, bool):
                     chat_supports_images = frozen_capability
                 elif int(frozen_capability if frozen_capability is not None else -1) >= 0:
                     chat_supports_images = bool(int(frozen_capability))
                 elif goal_spec is not None:
                     # Goal creation must not send an unbudgeted capability probe.
                     chat_supports_images = bool(chat_profile.get("supports_images", False))
-                    self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
-                elif callable(resolver):
-                    chat_supports_images = bool(resolver(chat_profile, probe_if_unknown=True))
-                    if not task_model_override:
-                        self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
                 else:
-                    chat_supports_images = bool(self.app.vision.brain_supports_images(chat_profile))
-                    if not task_model_override:
-                        self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
+                    # 未确认能力交给执行线程按真实图片历史检测，提交不等待额外模型请求。
+                    chat_supports_images = None
             except Exception:
-                chat_supports_images = False
+                chat_supports_images = False if goal_spec is not None else None
             # 会话启动时固化启用工具集（Agent 工具集/旧会话全选），之后不可改，
             # 作为本轮 allowed_tools 的硬限制，替代 base+system 并集。
             # 辅助对话（conv_kind='aux'）在工具决议里只读锁死（后端唯一判定，§3.2）。
@@ -982,14 +976,40 @@ class ConversationRunMixin:
             vision_config_getter = getattr(self.app.vision, "config", None)
             vision_config = vision_config_getter() if callable(vision_config_getter) else {}
             snapshot_capability = snapshot.get("chat_supports_images")
-            if isinstance(snapshot_capability, bool):
+            explicit_capability = profile.get("supports_images_explicit")
+            capability_confirmed = False
+            if isinstance(explicit_capability, bool):
+                brain_supports_images = explicit_capability
+            elif isinstance(snapshot_capability, bool):
                 brain_supports_images = snapshot_capability
             else:
-                resolver = getattr(self.app.vision, "resolve_brain_supports_images", None)
-                brain_supports_images = (
-                    bool(resolver(profile, probe_if_unknown=True)) if callable(resolver)
-                    else bool(getattr(self.app.vision, "brain_supports_images", lambda _profile: False)(profile))
+                brain_supports_images = bool(
+                    getattr(self.app.vision, "brain_supports_images", lambda _profile: False)(profile)
                 )
+                has_images = any(
+                    isinstance(item.get("content"), list)
+                    and any(isinstance(part, dict) and part.get("type") == "image" for part in item["content"])
+                    for item in history
+                )
+                capability_resolver = getattr(self.app.vision, "brain_image_capability", None)
+                if has_images and not snapshot.get(GOAL_RUN_KEY) and callable(capability_resolver):
+                    if cancel_event.is_set():
+                        raise TaskCancelled("任务已取消")
+                    try:
+                        capability = capability_resolver(profile, probe_if_unknown=True)
+                        brain_supports_images = bool(capability.get("supported"))
+                        capability_confirmed = bool(capability.get("confirmed"))
+                    except Exception as exc:  # noqa: BLE001 - 不确定能力不得落成永久纯文本判断
+                        logger.warning("图片能力检测未确认（%s）", type(exc).__name__)
+                    if cancel_event.is_set():
+                        raise TaskCancelled("任务已取消")
+            if capability_confirmed:
+                try:
+                    self.app.storage.set_conversation_chat_supports_images(
+                        conversation_id, bool(brain_supports_images), model_key=model_key, model_name=model_name,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 能力缓存写入失败不影响本次对话
+                    logger.warning("图片能力缓存未保存（%s）", type(exc).__name__)
             # Keep every downstream routing decision on the same frozen
             # capability value; prepare_history must not re-infer differently.
             profile["supports_images"] = brain_supports_images

@@ -1382,7 +1382,8 @@ export function resetContextWarningResume() {
 
 export function updateContextComposerLock(busy = false) {
   const editing = Boolean(state.editingMessageId);
-  const atCeiling = Boolean(state.contextAtCeiling) && !editing;
+  const editPending = state.messageEditPendingIds?.has(String(state.conversationId || ''));
+  const atCeiling = Boolean(state.contextAtCeiling) && !editing && !editPending;
   const goalLocked = goalBlocksChat();
   const goalDraft = goalDraftEnabled();
   $('#messages')?.classList.toggle('conversation-goal-locked', goalLocked);
@@ -1449,6 +1450,9 @@ export function updateSendButtonState() {
   } else if (busy) {
     disabled = cancelRequested;
     title = cancelRequested ? '正在停止' : '停止当前任务';
+  } else if (state.messageEditPendingIds?.has(String(state.conversationId || ''))) {
+    disabled = true;
+    title = '正在应用编辑';
   } else if (state.contextAtCeiling && !state.editingMessageId) {
     disabled = true;
     title = '上下文已满，请新建对话后继续';

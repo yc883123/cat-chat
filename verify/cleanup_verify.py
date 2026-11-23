@@ -74,6 +74,7 @@ KEEP = {
     "body_draft_offline_test.cjs", "body_draft_workbench_test.cjs", "body_draft_smoke.cjs",
     "conversation_race_offline_test.cjs", "conversation_navigation_inflight_test.cjs",
     "model_selection_race_offline_test.cjs", "conversation_model_smoke.cjs",
+    "conversation_latency_vision_smoke.py", "conversation_latency_vision_smoke.cjs",
     "novel_integrity_smoke.cjs", "_serve_novel_integrity.py",
     # Agent 说明弹层 + 工作区路径/未注册分组提示冒烟（§六 已登记；Python 自编排 + Node 检查）
     "agent_help_popover.py", "agent_help_popover.cjs",

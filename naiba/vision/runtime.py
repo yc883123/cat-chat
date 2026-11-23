@@ -212,7 +212,11 @@ class VisionRouter:
         request_format = str(profile.get("request_format") or "").lower()
         if request_format in {"gemini", "claude"}:
             return True
-        return any(hint in model for hint in VISION_BRAIN_HINTS)
+        return (
+            model == "deepseek-flash"
+            or model.startswith("deepseek-v4.1-flash")
+            or any(hint in model for hint in VISION_BRAIN_HINTS)
+        )
 
     @classmethod
     def brain_supports_images(cls, profile: dict[str, Any]) -> bool:
@@ -340,8 +344,8 @@ class VisionRouter:
         except Exception as exc:  # noqa: BLE001 - distinguish capability rejection from availability
             reason = str(exc).lower()
             unsupported_markers = (
-                "image input is not supported", "does not support images", "unsupported image",
-                "provide the mmproj", "failed to load image", "vision is not supported",
+                "image input is not supported", "does not support images",
+                "provide the mmproj", "vision is not supported",
                 "image input unsupported", "images are not supported", "不支持图片输入",
                 "不支持图像输入", "不支持视觉", "未加载 mmproj",
             )

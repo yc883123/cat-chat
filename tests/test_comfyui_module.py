@@ -2133,10 +2133,15 @@ class ServiceApiTests(unittest.TestCase):
         self.assertIn("/api/comfyui/free", js)
         self.assertIn("#comfyuiOpenOutputs", js)
         self.assertIn("#comfyuiFreeModels", js)
-        # 按钮名按用户拍板用短名；完整含义放在 title 里。
-        self.assertIn(">产物</button>", html)
-        self.assertIn(">清除</button>", html)
-        self.assertIn(">释放模型</button>", html)
+        # 2026-11-25：总产物入口收进顶部「更多操作」菜单，单次 footer 移除了冗余「批量生成」。
+        header_panel = html.split('id="comfyuiMoreTrigger"', 1)[1].split("</div>", 1)[0]
+        tasks_panel = html.split('id="comfyuiTasksSection"', 1)[1].split("</details>", 1)[0]
+        self.assertIn('id="comfyuiOpenOutputs"', header_panel)
+        self.assertIn(">打开总产物文件夹</button>", header_panel)
+        self.assertNotIn('id="comfyuiOpenOutputs"', tasks_panel)
+        self.assertNotIn('id="comfyuiOpenBatch"', html)
+        self.assertIn(">清除</button>", tasks_panel)
+        self.assertIn(">释放模型</button>", tasks_panel)
 
     def test_media_controls_wired_in_ui(self):
         # 计划 §4-§6 前端接线：媒体选择上传、多行/下拉控件、提交带 media_inputs、
@@ -2837,6 +2842,252 @@ assert.equal(saveAsSameValue(30,20),false);
         )
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class OutputDirectoryNamingAndRecoveryTests(unittest.TestCase):
+    """造梦机产物可读目录、混合升级迁移意图、遗留兼容与异常删除保护（2026-11-25 §3-§4）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        from types import SimpleNamespace
+        from naiba.paths import PathContext
+        from naiba.comfyui.runner import ComfyUIRunner
+
+        root_dir = Path(__file__).resolve().parents[1]
+        data_dir = self.root / "data"
+        paths = PathContext(
+            app_dir=self.root, exe_dir=self.root, resource_dir=root_dir,
+            public_dir=root_dir / "public", config_path=self.root / "config.json",
+            data_dir=data_dir, status_path=data_dir / "server.json",
+            lock_path=data_dir / "server.lock",
+        )
+        config = SimpleNamespace(
+            data={"comfyui_url": "http://127.0.0.1:8188"},
+            resolve_data_dir=lambda: self.root / "data",
+            resolve_workspace_dir=lambda: self.root / "ws",
+        )
+        self.app = SimpleNamespace(paths=paths, config=config)
+        self.store = ComfyUIStore(paths.data_dir)
+        self.runner = ComfyUIRunner(self.app, self.store)
+        self.jobs = ComfyUIJobManager(self.app, self.store, self.runner)
+        self.service = ComfyUIService(self.app)
+
+    def tearDown(self):
+        self.runner.shutdown()
+        self._tmp.cleanup()
+
+    def _set_created_at(self, task_id: str, ms: int) -> None:
+        record = self.store.get_task(task_id)
+        record["created_at"] = ms
+        self.store._write_json(self.store.task_record_path(task_id), record)
+
+    def test_readable_dir_names_cover_single_batch_media_kinds_and_created_date(self):
+        from datetime import datetime
+        from naiba.core.contracts import (
+            COMFYUI_OUTPUT_DIR_KEY,
+            COMFYUI_OUTPUT_LAYOUT_MANAGED_VERSION,
+            COMFYUI_OUTPUT_LAYOUT_VERSION_KEY,
+        )
+
+        fixed_ms = int(datetime(2026, 3, 15, 10, 30, 0).timestamp() * 1000)
+        cases = [
+            ("", "ComfyUI_00001_.png", "单次图片_20260315_"),
+            ("", "clip.mp4", "单次视频_20260315_"),
+            ("", "voice.wav", "单次音频_20260315_"),
+            ("", "raw.bin", "单次其他_20260315_"),
+            ("cfb-batch-1", "ComfyUI_00001_.png", "批量图片_20260315_"),
+            ("cfb-batch-2", "clip.mp4", "批量视频_20260315_"),
+        ]
+        for batch_id, filename, prefix in cases:
+            with self.subTest(batch_id=batch_id, filename=filename):
+                task = self.store.create_task({"shots": 1, "batch_id": batch_id, "prompt": {}})
+                self._set_created_at(task["id"], fixed_ms)
+                expected_name = f"{prefix}{task['id']}"
+                with mock.patch("naiba.comfyui.runner.client.download_output", return_value=b"DATA"):
+                    saved = self.runner._save_outputs(
+                        task["id"], 0, "http://127.0.0.1:8188", [{"filename": filename}]
+                    )
+                self.assertEqual(len(saved), 1)
+                updated = self.store.get_task(task["id"])
+                self.assertEqual(updated[COMFYUI_OUTPUT_LAYOUT_VERSION_KEY], COMFYUI_OUTPUT_LAYOUT_MANAGED_VERSION)
+                self.assertEqual(updated[COMFYUI_OUTPUT_DIR_KEY], expected_name)
+                target = self.store.task_output_dir(task["id"])
+                self.assertEqual(target.name, expected_name)
+                self.assertEqual((target / saved[0]).read_bytes(), b"DATA")
+
+    def test_mixed_shots_upgrade_dir_atomically_and_update_all_consumers(self):
+        from datetime import datetime
+        from naiba.core.contracts import COMFYUI_OUTPUT_DIR_KEY, COMFYUI_OUTPUT_DIR_MOVE_KEY
+
+        fixed_ms = int(datetime(2026, 11, 25, 9, 0, 0).timestamp() * 1000)
+        task = self.store.create_task({"shots": 2, "batch_id": "", "prompt": {}})
+        self._set_created_at(task["id"], fixed_ms)
+        with mock.patch("naiba.comfyui.runner.client.download_output", side_effect=[b"IMG", b"VID"]):
+            f0 = self.runner._save_outputs(task["id"], 0, "http://127.0.0.1:8188", [{"filename": "a.png"}])
+            first_dir = self.store.outputs_dir / f"单次图片_20261125_{task['id']}"
+            self.assertTrue((first_dir / f0[0]).is_file())
+            f1 = self.runner._save_outputs(task["id"], 1, "http://127.0.0.1:8188", [{"filename": "b.mp4"}])
+        mixed_dir = self.store.outputs_dir / f"单次混合_20261125_{task['id']}"
+        self.assertFalse(first_dir.exists())
+        self.assertTrue((mixed_dir / f0[0]).is_file())
+        self.assertTrue((mixed_dir / f1[0]).is_file())
+        latest = self.store.get_task(task["id"])
+        self.assertEqual(latest[COMFYUI_OUTPUT_DIR_KEY], mixed_dir.name)
+        self.assertNotIn(COMFYUI_OUTPUT_DIR_MOVE_KEY, latest)
+        self.assertEqual(self.service.task_file(task["id"], f0[0]), mixed_dir / f0[0])
+        self.assertEqual(self.service.task_file(task["id"], f1[0]), mixed_dir / f1[0])
+        import naiba.comfyui.service as service_module
+
+        with mock.patch.object(service_module, "_open_folder") as opener:
+            payload, status = self.service.api_reveal_task_outputs(task["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["path"], str(mixed_dir.resolve()))
+        opener.assert_called_once_with(mixed_dir.resolve())
+
+    def test_legacy_tasks_including_empty_pre_upgrade_tasks_stay_in_flat_task_id_dir(self):
+        legacy_id = "cf-20260101-legacy01"
+        legacy_dir = self.store.outputs_dir / legacy_id
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_dir / "old.png").write_bytes(b"LEGACY")
+        self.store._write_json(self.store.task_record_path(legacy_id), {
+            "id": legacy_id, "status": "completed", "created_at": 1767225600000,
+            "input": {"shots": 1, "batch_id": ""}, "result": {"outputs": ["old.png"]},
+            "checkpoint": {"completed": [{"index": 0, "files": ["old.png"]}], "prompt_ids": [], "errors": [], "resubmits": {}},
+        })
+        empty_legacy_id = "cf-20260101-legacyempty"
+        self.store._write_json(self.store.task_record_path(empty_legacy_id), {
+            "id": empty_legacy_id, "status": "failed", "created_at": 1767225600000,
+            "input": {"shots": 1, "batch_id": ""}, "result": {"completed": [], "outputs": []},
+            "checkpoint": {"completed": [], "prompt_ids": [], "errors": [], "resubmits": {}},
+        })
+        self.assertEqual(self.store.task_output_dir(legacy_id), legacy_dir)
+        self.assertEqual(self.service.task_file(legacy_id, "old.png"), legacy_dir / "old.png")
+        with mock.patch("naiba.comfyui.runner.client.download_output", return_value=b"RETRY"):
+            saved = self.runner._save_outputs(
+                empty_legacy_id, 0, "http://127.0.0.1:8188", [{"filename": "retry.png"}]
+            )
+        self.assertEqual(self.store.task_output_dir(empty_legacy_id), self.store.outputs_dir / empty_legacy_id)
+        self.assertTrue((self.store.outputs_dir / empty_legacy_id / saved[0]).is_file())
+        self.assertNotIn("output_dir", self.store.get_task(empty_legacy_id))
+
+    def test_move_intent_crash_recovery_and_windows_lock_fallback(self):
+        from datetime import datetime
+        from naiba.core.contracts import (
+            COMFYUI_OUTPUT_DIR_CLASSIFY_PENDING_KEY,
+            COMFYUI_OUTPUT_DIR_KEY,
+            COMFYUI_OUTPUT_DIR_MOVE_KEY,
+        )
+
+        fixed_ms = int(datetime(2026, 11, 25, 9, 0, 0).timestamp() * 1000)
+        # 场景 A：文件系统改名已完成、任务指针未写回前崩溃 -> 解析应自动完成收敛。
+        t1 = self.store.create_task({"shots": 2, "prompt": {}})
+        self._set_created_at(t1["id"], fixed_ms)
+        old_name = f"单次图片_20261125_{t1['id']}"
+        new_name = f"单次混合_20261125_{t1['id']}"
+        new_dir = self.store.outputs_dir / new_name
+        new_dir.mkdir(parents=True)
+        (new_dir / "001_00_a.png").write_bytes(b"OK")
+        rec1 = self.store.get_task(t1["id"])
+        rec1[COMFYUI_OUTPUT_DIR_KEY] = old_name
+        rec1[COMFYUI_OUTPUT_DIR_MOVE_KEY] = {"from": old_name, "to": new_name}
+        self.store._write_json(self.store.task_record_path(t1["id"]), rec1)
+        resolved = self.store.task_output_dir(t1["id"])
+        self.assertEqual(resolved, new_dir)
+        repaired = self.store.get_task(t1["id"])
+        self.assertEqual(repaired[COMFYUI_OUTPUT_DIR_KEY], new_name)
+        self.assertNotIn(COMFYUI_OUTPUT_DIR_MOVE_KEY, repaired)
+
+        # 场景 B：Windows 目录被句柄占用报 PermissionError -> 保留旧目录与旧指针并写待重分类状态，不丢后续产物。
+        t2 = self.store.create_task({"shots": 2, "prompt": {}})
+        self._set_created_at(t2["id"], fixed_ms)
+        with mock.patch("naiba.comfyui.runner.client.download_output", return_value=b"IMG"):
+            f0 = self.runner._save_outputs(t2["id"], 0, "http://127.0.0.1:8188", [{"filename": "a.png"}])
+        kept_name = self.store.get_task(t2["id"])[COMFYUI_OUTPUT_DIR_KEY]
+        kept_dir = self.store.outputs_dir / kept_name
+        with mock.patch.object(Path, "rename", side_effect=PermissionError("locked by explorer")), \
+                mock.patch("naiba.comfyui.runner.client.download_output", return_value=b"VID"):
+            f1 = self.runner._save_outputs(t2["id"], 1, "http://127.0.0.1:8188", [{"filename": "b.mp4"}])
+        after_fail = self.store.get_task(t2["id"])
+        self.assertEqual(after_fail[COMFYUI_OUTPUT_DIR_KEY], kept_name)
+        self.assertEqual(after_fail[COMFYUI_OUTPUT_DIR_CLASSIFY_PENDING_KEY], f"单次混合_20261125_{t2['id']}")
+        self.assertNotIn(COMFYUI_OUTPUT_DIR_MOVE_KEY, after_fail)
+        self.assertTrue((kept_dir / f0[0]).is_file())
+        self.assertTrue((kept_dir / f1[0]).is_file())
+
+    def test_security_update_task_isolation_and_delete_failure_retains_record(self):
+        from naiba.core.contracts import COMFYUI_OUTPUT_DIR_KEY
+
+        task = self.store.create_task({"shots": 1, "prompt": {}})
+        self.store.update_task(
+            task["id"], status="completed",
+            output_dir="../escape", output_layout_version=1,
+            output_dir_move={"from": "x", "to": "y"},
+        )
+        fresh = self.store.get_task(task["id"])
+        self.assertEqual(fresh[COMFYUI_OUTPUT_DIR_KEY], "")
+        # 即使磁盘 JSON 被异常篡改，sanitize 仍拒绝对外穿越。
+        fresh[COMFYUI_OUTPUT_DIR_KEY] = "../../outside"
+        self.store._write_json(self.store.task_record_path(task["id"]), fresh)
+        self.assertEqual(self.store.task_output_dir(task["id"]), self.store.outputs_dir / task["id"])
+
+        with mock.patch("naiba.comfyui.runner.client.download_output", return_value=b"IMG"):
+            self.runner._save_outputs(task["id"], 0, "http://127.0.0.1:8188", [{"filename": "a.png"}])
+        readable_dir = self.store.task_output_dir(task["id"])
+        self.assertTrue(readable_dir.is_dir())
+        with mock.patch("naiba.comfyui.store.shutil.rmtree", side_effect=PermissionError("locked")):
+            result = self.jobs.delete_tasks({"task_ids": [task["id"]]})
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertIsNotNone(self.store.get_task(task["id"]), "目录删不掉时任务记录必须保留")
+        result_ok = self.jobs.delete_tasks({"task_ids": [task["id"]]})
+        self.assertEqual(result_ok["deleted"], 1)
+        self.assertFalse(readable_dir.exists())
+
+    def test_active_mutable_task_emits_stable_route_instead_of_volatile_path(self):
+        task = self.store.create_task({"shots": 2, "prompt": {}})
+        with mock.patch("naiba.comfyui.runner.client.download_output", return_value=b"IMG"):
+            saved = self.runner._save_outputs(task["id"], 0, "http://127.0.0.1:8188", [{"filename": "a.png"}])
+        self.store.update_task(task["id"], status="running", result={"completed": [], "outputs": saved})
+        active_slim = self.jobs.task(task["id"])
+        self.assertEqual(
+            active_slim["output_files"],
+            [{"name": saved[0], "url": f"/api/comfyui/tasks/{task['id']}/files/{saved[0]}"}],
+        )
+        self.assertNotIn("path", active_slim["output_files"][0])
+        self.store.update_task(task["id"], status="completed")
+        done_slim = self.jobs.task(task["id"])
+        expected_dir = self.store.task_output_dir(task["id"])
+        self.assertEqual(
+            done_slim["output_files"],
+            [{"name": saved[0], "path": str(expected_dir / saved[0])}],
+        )
+
+    def test_task_file_http_route_serves_readable_dir_and_download_header(self):
+        from naiba.http import AppHTTPServer, RequestHandler
+
+        task = self.store.create_task({"shots": 1, "prompt": {}})
+        with mock.patch("naiba.comfyui.runner.client.download_output", return_value=b"PNG-BYTES"):
+            saved = self.runner._save_outputs(task["id"], 0, "http://127.0.0.1:8188", [{"filename": "shot.png"}])
+        self.app.comfyui = self.service
+        self.app.config.data = {"access_token": ""}
+        server = AppHTTPServer(("127.0.0.1", 0), RequestHandler, self.app)
+        server.daemon_threads = True
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(timeout=5)))
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        file_url = f"{base}/api/comfyui/tasks/{task['id']}/files/{urllib.parse.quote(saved[0])}"
+        with urllib.request.urlopen(file_url, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.read(), b"PNG-BYTES")
+            self.assertIsNone(resp.headers.get("Content-Disposition"))
+        with urllib.request.urlopen(f"{file_url}?download=1", timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.read(), b"PNG-BYTES")
+            self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))
 
 
 if __name__ == "__main__":

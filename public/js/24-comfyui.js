@@ -369,7 +369,6 @@ export function bindComfyuiEvents() {
     if (key) void addSlotToMainForm(key);
   });
   $("#comfyuiImportDialog")?.addEventListener("cancel", () => { const callback = importReturn?.onCancel; importReturn = null; callback?.(); });
-  $("#comfyuiOpenBatch")?.addEventListener("click", () => setComfyuiPane("batch"));
   // 结果页两档切换 + 批次列表（点一批进跑批视图）。
   $("#comfyuiResultsSeg")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-comfyui-results-seg]");
@@ -387,8 +386,9 @@ export function bindComfyuiEvents() {
     if (page === "comfyui" && !detail.closed && isStudioOpen()) {
       void enterPage();
     } else {
-      // 离开造梦机页：再次生成草稿不跨页面保留。
+      // 离开造梦机页：再次生成草稿与临时历史批次编辑都不跨页面滞留。
       if (comfyui.rerun || comfyui.rerunLoading) dropRerunDraft();
+      exitBatchHistoryEdit({ restore: true, invalidateAsync: true });
       // 进度胶囊是共享头里的唯一节点：离开时收起旧状态，别让别的
       // 工作台页看到造梦机残留的生成进度（回到本页再按缓存重算）。
       const meter = document.getElementById("comfyuiStepMeter");
@@ -547,6 +547,11 @@ function setComfyuiPane(pane) {
   const root = $("#studioPageComfyui");
   if (!root) return;
   if (pane !== "tasks") exitClearMode();
+  // 离开批量表单去别的页签时退出临时历史编辑并恢复原草稿；仍在任务等待加载期间切去工作流/单次也使异步失效。
+  if (pane !== "batch") {
+    if (batch.editMode) exitBatchHistoryEdit({ restore: true, invalidateAsync: true });
+    else if (pane !== "tasks") batch.editEpoch += 1;
+  }
   // 离开生成表单就丢弃再次生成草稿；旧任务快照不跨档位复用到别的表单。
   if (pane !== "run" && (comfyui.rerun || comfyui.rerunLoading)) dropRerunDraft();
   root.dataset.comfyuiPane = pane;
@@ -572,6 +577,7 @@ function setComfyuiPane(pane) {
 // CSS 显隐，与 data-comfyui-pane 同一套口径。
 function setComfyuiResultsSegment(seg) {
   comfyui.resultsSegment = seg === "batch" ? "batch" : "single";
+  if (comfyui.resultsSegment !== "batch" && !batch.editMode) batch.editEpoch += 1;
   if (comfyui.resultsSegment === "batch") exitClearMode();
   else exitBatchClearMode();
   const root = $("#studioPageComfyui");
@@ -4382,7 +4388,7 @@ async function renderLatestOutputs() {
     wanted.push({ key, ...item });
   }
   historyViewport("#comfyuiOutputGrid", {
-    key: (item) => item.key, fingerprint: (item) => `${item.key}\u0000${item.path}`,
+    key: (item) => item.key, fingerprint: (item) => `${item.key}\u0000${outputFileUrl(item.taskId, item.name, item.path)}`,
     render: (item) => {
       const card = renderOutputCard(item.taskId, item.name, item.path);
       card.dataset.outputKey = item.key;
@@ -4396,23 +4402,27 @@ async function renderLatestOutputs() {
   renderHistoryEmpty(grid, wanted.length, "还没有生成结果。提交任务后，出好的图会出现在这里。");
 }
 
-// paint 由 CSS 的 .comfyui-output-save svg 单点声明（同 .file-action 口径）。
+// paint 由 CSS 的 .comfyui-output-save svg / .comfyui-output-open-folder svg 单点声明。
 const OUTPUT_SAVE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"></path><path d="M8 11l4 4 4-4"></path><path d="M5 19h14"></path></svg>';
+const OUTPUT_FOLDER_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>';
 
-// 产物地址与聊天媒体卡片同一口径：走 /api/file（URL 自带口令 + 真实路径）。
-// 只拼 /api/comfyui/tasks/<id>/files/<name> 的话，手机/局域网访问一律 401 成破图，
-// 桌面的原生「另存为」也拿不到 path 参数（见 03-media 的 saveLocalFile）。
+// 产物展示一律走稳定路由 `/api/comfyui/tasks/<id>/files/<name>`（加 token 供局域网/手机鉴权），
+// 避免多段任务从 `*图片_*` 重命名为 `*混合_*` 后旧物理路径在预览 DOM 中失效；
+// 桌面端「另存为」在真正点击时再按任务 id 查询当前物理路径。
 function outputFileUrl(taskId, name, path) {
+  const id = String(taskId || "");
+  const file = String(name || "");
+  if (id && file) {
+    const direct = `/api/comfyui/tasks/${encodeURIComponent(id)}/files/${encodeURIComponent(file)}`;
+    return state.token ? `${direct}?token=${encodeURIComponent(state.token)}` : direct;
+  }
   const local = String(path || "");
-  if (local) return localFileUrl(local);
-  const direct = `/api/comfyui/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(name)}`;
-  return state.token ? `${direct}?token=${encodeURIComponent(state.token)}` : direct;
+  return local ? localFileUrl(local) : "";
 }
 
 // 产物卡与聊天媒体卡同一套类型判定与展示语义（计划 §6）：图片缩略+灯箱、
-// 视频/音频就地播放、其他类型文件 chip。mediaKind 走 /api/bootstrap.media_exts
-// 的公共名单，不再各写一份扩展名正则（.bmp/.svg 曾因名单漂移彻底不可见）。
-function renderOutputCard(taskId, name, path) {
+// 视频/音频就地播放、其他类型文件 chip；操作区按视口互斥渲染：桌面「打开文件夹」、手机（narrow）「下载」。
+function renderOutputCard(taskId, name, path, { allowRevealFolder = true } = {}) {
   const url = outputFileUrl(taskId, name, path);
   const card = document.createElement("figure");
   card.className = "comfyui-output";
@@ -4452,6 +4462,7 @@ function renderOutputCard(taskId, name, path) {
     link.href = url;
     link.textContent = name;
     link.download = name;
+    link.dataset.comfyuiOutputTask = String(taskId || "");
     card.append(link);
   }
   const caption = document.createElement("figcaption");
@@ -4459,16 +4470,28 @@ function renderOutputCard(taskId, name, path) {
   label.className = "comfyui-output-name";
   label.textContent = name;
   label.title = name;
-  // 手机上点图只是开大图，保存要另找入口；这里给每张产物一个直接的下载按钮。
+  // 手机端（data-wb-size="narrow" <=760px）显示下载；桌面非窄屏只显示打开这个任务的文件夹。
   const save = document.createElement("button");
   save.type = "button";
   save.className = "comfyui-output-save";
   save.dataset.comfyuiOutputSave = url;
   save.dataset.comfyuiOutputName = name;
+  save.dataset.comfyuiOutputTask = String(taskId || "");
   save.title = `下载 ${name}`;
   save.setAttribute("aria-label", `下载 ${name}`);
   save.innerHTML = OUTPUT_SAVE_ICON;
   caption.append(label, save);
+  if (allowRevealFolder && taskId) {
+    const reveal = document.createElement("button");
+    reveal.type = "button";
+    reveal.className = "comfyui-output-open-folder";
+    reveal.dataset.comfyuiOutputOpenFolder = String(taskId);
+    reveal.dataset.comfyuiOutputName = name;
+    reveal.title = "在运行 Cat Chat 的电脑上打开这个任务的产物文件夹";
+    reveal.setAttribute("aria-label", `打开 ${name} 所在产物文件夹`);
+    reveal.innerHTML = OUTPUT_FOLDER_ICON;
+    caption.append(reveal);
+  }
   card.append(caption);
   if (kind === "video" || kind === "audio") {
     const preview = document.createElement("button");
@@ -4487,19 +4510,63 @@ function renderOutputCard(taskId, name, path) {
   return card;
 }
 
+// 打开单条任务的产物文件夹（与批量条目的「打开文件夹」共用同一接口和提示语义）。
+async function revealTaskOutputsFolder(taskId, button = null) {
+  const id = String(taskId || "");
+  if (!id || button?.disabled) return;
+  if (button) button.disabled = true;
+  try {
+    const payload = await api(`/api/comfyui/tasks/${encodeURIComponent(id)}/outputs/open`, {
+      method: "POST", body: {},
+    });
+    toast(payload?.path ? `已打开产物文件夹：${payload.path}` : "已在电脑上打开这个条目的产物文件夹");
+  } catch (error) {
+    toast(`打开文件夹失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function downloadTaskOutputFile(url, name, taskId) {
+  if (isPywebview() && taskId && name && !/[?&]path=/.test(url)) {
+    try {
+      const payload = await api(`/api/comfyui/tasks/${encodeURIComponent(taskId)}`);
+      const files = (payload?.task?.output_files || []).filter(
+        (file) => String(file?.name || "") === name && typeof file?.path === "string" && file.path.trim()
+      );
+      if (files.length === 1 && saveLocalFile(localFileUrl(files[0].path), name)) return;
+      toast("原文件已不存在或无法确认，请刷新产物列表");
+      return;
+    } catch (error) {
+      toast(`下载失败：${error.message}`);
+      return;
+    }
+  }
+  if (!saveLocalFile(url, name)) toast("这个产物没有可下载的地址");
+}
+
 function onOutputGridClick(event) {
+  const openFolder = event.target.closest("button[data-comfyui-output-open-folder]");
+  if (openFolder) {
+    event.preventDefault();
+    void revealTaskOutputsFolder(openFolder.dataset.comfyuiOutputOpenFolder || "", openFolder);
+    return;
+  }
   const save = event.target.closest("button[data-comfyui-output-save]");
   if (save) {
-    if (!saveLocalFile(save.dataset.comfyuiOutputSave || "", save.dataset.comfyuiOutputName || "")) {
-      toast("这个产物没有可下载的地址");
-    }
+    void downloadTaskOutputFile(
+      save.dataset.comfyuiOutputSave || "",
+      save.dataset.comfyuiOutputName || "",
+      save.dataset.comfyuiOutputTask || "",
+    );
     return;
   }
   // 图片放大走 03-media 的 document 级 data-large-url 委托（与聊天媒体卡同一入口），
   // 这里不再自己开一次灯箱，避免双触发。
   const link = event.target.closest("a[href]");
   if (link && isPywebview()) {
-    void saveLocalFile(link.href, link.textContent || "output.bin");
+    event.preventDefault();
+    void downloadTaskOutputFile(link.href, link.textContent || "output.bin", link.dataset.comfyuiOutputTask || "");
   }
 }
 
@@ -4551,6 +4618,11 @@ const batch = {
   selectionMode: false,
   selectedItems: new Set(),
   editEpoch: 0,             // 编辑历史批次只允许最新请求写回，迟到响应不得覆盖人工输入
+  editMode: false,          // true = 正在临时编辑某个历史批次，保留原正常草稿不被污染
+  editBatchId: "",          // 当前临时编辑的历史批次 id
+  editBatchTitle: "",       // 来源横幅展示的批次标题
+  editBackup: null,         // 退出历史编辑时用于恢复的原有正常草稿与转换配置
+  editReturn: null,         // 点击「取消编辑」返回的结果页/跑批位置
   converting: new Set(),    // 转换中的原条目对象；删行或重排不会把忙碌态移给其他条目
   missingItems: new Set(),  // 自检没过的条目（schemeId:itemIndex），标红拦提交
   blockedMessage: "",
@@ -4583,6 +4655,7 @@ function rememberBatchMapping(fingerprint, mapping) {
 }
 
 function recallBatchMapping(fingerprint) {
+  if (!fingerprint) return null;
   try {
     const raw = localStorage.getItem(batchMappingMemoryKey(fingerprint));
     const parsed = raw ? JSON.parse(raw) : null;
@@ -4799,20 +4872,143 @@ function addBatchScheme(cloneFrom = null) {
   return scheme;
 }
 
+function captureBatchSchemeAssets(scheme) {
+  if (!scheme?.detail || !scheme?.mapping) return null;
+  const checkedPorts = (scheme.mapping.media_ports || []).filter((port) => port.checked);
+  const entries = [];
+  for (const item of scheme.items || []) {
+    const files = [];
+    for (const [portIdxStr, ref] of Object.entries(item.files || {})) {
+      if (!ref?.path) continue;
+      const port = checkedPorts[Number(portIdxStr)];
+      const slot = port ? batchSlotByAddress(scheme.detail, port) : null;
+      if (port && slot) {
+        files.push({
+          address: slotKeyOf(port),
+          media: slot.media || mediaKindOfSlot(slot),
+          class_type: String(slot.class_type || ""),
+          ref,
+        });
+      } else {
+        files.push({ unmappable: true, ref });
+      }
+    }
+    const skips = [];
+    for (const skipKey of Object.keys(item.skips || {})) {
+      if (!item.skips[skipKey]) continue;
+      const slot = batchSlotByAddress(scheme.detail, parseSlotKey(skipKey));
+      if (slot) {
+        skips.push({
+          address: skipKey,
+          media: slot.media || mediaKindOfSlot(slot),
+          class_type: String(slot.class_type || ""),
+        });
+      } else {
+        skips.push({ unmappable: true });
+      }
+    }
+    if (files.length || skips.length) entries.push({ item, files, skips });
+  }
+  return entries.length ? entries : null;
+}
+
+function resetBatchSchemeForWorkflowChange(scheme, workflowId, { preserveFixed = false, clearTransfer = false } = {}) {
+  scheme.workflow_id = String(workflowId || "");
+  scheme.detail = null;
+  scheme.mapping = null;
+  scheme.fixed = preserveFixed ? JSON.parse(JSON.stringify(scheme.fixed || {})) : {};
+  scheme.detailError = "";
+  scheme.loading = false;
+  if (!preserveFixed) {
+    // 切换工作流是一次性完整切换：清掉所有来自旧工作流的恢复警告、漂移标记与端口绑定输入，
+    // 且只限当前修改的这一份方案，绝不影响同批其他方案。
+    scheme.fixedOpen = false;
+    scheme.restoreWarning = "";
+    scheme.switchWarning = "";
+    scheme.fixedIssues = [];
+    scheme.fixedDiscarded = {};
+    scheme.fixedReassigned = {};
+    scheme.oldBaseline = false;
+    for (const item of scheme.items || []) {
+      item.extras = {};
+      item.skips = {};
+      item.files = {};
+    }
+  }
+  if (clearTransfer) delete scheme._pendingMediaTransfer;
+}
+
+function reconcileBatchSchemeAssets(scheme) {
+  const transfer = scheme._pendingMediaTransfer;
+  delete scheme._pendingMediaTransfer;
+  if (!Array.isArray(transfer) || !transfer.length || !scheme.detail || !scheme.mapping) return;
+  const allPorts = scheme.mapping.media_ports || [];
+  const portMatchesEntry = (port, entry) => {
+    if (!port || !entry || entry.unmappable || !entry.address) return false;
+    if (slotKeyOf(port) !== entry.address) return false;
+    const slot = batchSlotByAddress(scheme.detail, port);
+    if (!slot) return false;
+    const slotMedia = slot.media || mediaKindOfSlot(slot);
+    if (entry.media && slotMedia && slotMedia !== entry.media) return false;
+    if (entry.class_type && slot.class_type && String(slot.class_type) !== entry.class_type) return false;
+    return true;
+  };
+  for (const { item, files, skips } of transfer) {
+    if (!(scheme.items || []).includes(item)) continue;
+    for (const entry of [...files, ...skips]) {
+      const target = allPorts.find((port) => portMatchesEntry(port, entry));
+      if (target) target.checked = true;
+    }
+  }
+  const checkedPorts = allPorts.filter((port) => port.checked);
+  const findPortMatch = (entry) => {
+    for (let ordinal = 0; ordinal < checkedPorts.length; ordinal += 1) {
+      const port = checkedPorts[ordinal];
+      if (portMatchesEntry(port, entry)) return { ordinal, address: entry.address };
+    }
+    return null;
+  };
+  let droppedFiles = 0;
+  let droppedSkips = 0;
+  for (const { item, files, skips } of transfer) {
+    if (!(scheme.items || []).includes(item)) continue;
+    for (const fileEntry of files) {
+      const match = findPortMatch(fileEntry);
+      if (match) item.files[String(match.ordinal)] = fileEntry.ref;
+      else droppedFiles += 1;
+    }
+    for (const skipEntry of skips) {
+      const match = findPortMatch(skipEntry);
+      if (match) item.skips[match.address] = true;
+      else droppedSkips += 1;
+    }
+  }
+  if (droppedFiles || droppedSkips) {
+    const parts = [];
+    if (droppedFiles) parts.push(`${droppedFiles} 份旧素材因新工作流节点端口变化无法对应已清理`);
+    if (droppedSkips) parts.push(`${droppedSkips} 项跳过设置已重置`);
+    scheme.switchWarning = `已切换工作流：${parts.join("，")}；请按新工作流在下方重新核对素材口。`;
+  }
+}
+
 async function loadBatchWorkflowDetail(scheme, workflowId) {
-  const id = workflowId ?? scheme.workflow_id;
+  const id = String(workflowId === undefined ? (scheme.workflow_id || "") : (workflowId || ""));
+  const prevId = String(scheme.workflow_id || "");
+  const isWorkflowChange = workflowId !== undefined && id !== prevId;
   const request = {};
   scheme.detailRequest = request;
   const current = () => batchSchemeOf(scheme.id) === scheme && scheme.detailRequest === request
     && scheme.workflow_id === id;
-  // 同一份工作流重读（例如回填时详情没拉到）保留固定参数；真换工作流才清空。
-  const keepFixed = scheme.workflow_id === id ? JSON.parse(JSON.stringify(scheme.fixed || {})) : {};
-  scheme.workflow_id = id;
-  scheme.detail = null;
-  scheme.mapping = null;
-  scheme.fixed = keepFixed;
-  scheme.loading = false;
+  if (isWorkflowChange && id && scheme.detail && scheme.mapping) {
+    const captured = captureBatchSchemeAssets(scheme);
+    if (captured) scheme._pendingMediaTransfer = captured;
+  }
+  resetBatchSchemeForWorkflowChange(scheme, id, {
+    preserveFixed: !isWorkflowChange,
+    clearTransfer: !id,
+  });
   if (!scheme.items.length) scheme.items = [newBatchItem(1)];
+  batch.recheckMissing();
   batch.blockedMessage = "";
   renderBatch();
   if (!id) return;
@@ -4823,6 +5019,7 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
     if (!current()) return;
     scheme.detail = payload.workflow || null;
     scheme.loading = false;
+    scheme.detailError = "";
     const fingerprint = scheme.detail?.workflow_fingerprint || scheme.detail?.fingerprint || "";
     const recalled = recallBatchMapping(fingerprint);
     scheme.mapping = recalled || batchMappingFromWorkflow(scheme.detail);
@@ -4842,11 +5039,14 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
     scheme.mapping.media_ports = (scheme.mapping.media_ports || []).filter((port) =>
       batchMediaCandidates(scheme.detail).some((slot) =>
         String(slot.node_id) === String(port.node_id) && String(slot.field_name) === String(port.field_name)));
+    reconcileBatchSchemeAssets(scheme);
+    batch.recheckMissing();
     renderBatch();
   } catch (error) {
     if (!current()) return;
     scheme.loading = false;
-    batch.blockedMessage = `工作流读取失败：${error.message}`;
+    scheme.detailError = String(error.message || error || "读取失败");
+    batch.blockedMessage = `工作流读取失败：${scheme.detailError}`;
     renderBatch();
   }
 }
@@ -4920,6 +5120,12 @@ function syncResultsBatchDetail() {
 function batchDraftMarkup() {
   const draft = ensureBatchDraft();
   const parts = [];
+  if (batch.editMode) {
+    parts.push(`<div class="cbm-edit-banner" data-batch-history-banner>
+      <span>正在编辑历史批次：<strong>${escapeText(batch.editBatchTitle || batch.editBatchId)}</strong>（暂存副本，重新提交将新建批次；不覆盖原有普通草稿）</span>
+      <button type="button" class="cbm-btn tiny" data-batch-action="cancel-history-edit">取消编辑</button>
+    </div>`);
+  }
   parts.push(`<div class="cbm-batch-head">
     <span class="cbm-field">批次名 <input type="text" data-batch-field="title" maxlength="120" value="${escapeText(draft.title)}" placeholder="例：短剧第1集"></span>
     <label class="cbm-switch"><input type="checkbox" data-batch-field="unload_after" ${draft.unload_after ? "checked" : ""}><span class="cbm-track"></span>每条出完就释放模型</label>
@@ -5006,13 +5212,23 @@ function batchSchemeMarkup(scheme, schemeIndex) {
     const summary = scheme.items.map((item) => escapeText(item.name)).join(" · ");
     return `<div class="${classes.join(" ")}">${head}<div class="cbm-collapsed-row">${scheme.items.length} 条条目：${summary || "还没有条目"}</div></div>`;
   }
-  const warning = scheme.restoreWarning
-    ? `<p class="cbm-alert">${escapeText(scheme.restoreWarning)}</p>` : "";
+  const warningText = [
+    scheme.restoreWarning,
+    scheme.switchWarning,
+    scheme.detailError ? `工作流读取失败：${scheme.detailError}` : "",
+  ].filter(Boolean).join(" ");
+  const warning = warningText
+    ? `<p class="cbm-alert">${escapeText(warningText)}</p>` : "";
   if (!scheme.workflow_id || !scheme.detail || !scheme.mapping) {
     const names = scheme.items.map((item) => escapeText(item.name)).filter(Boolean).join(" · ");
+    const hintText = scheme.loading
+      ? "正在读取这个工作流的参数与节点口，读取完才能提交…"
+      : scheme.detailError
+        ? "这个工作流当前没能读取成功：请重新选择或换一份工作流，否则提交会被阻止。"
+        : "选工作流后在这里指认：正文 / 时长 / 分辨率写进哪个参数、哪些装载槽做素材口。";
     return `<div class="${classes.join(" ")}">${head}<div class="cbm-scheme-body">
       ${warning}
-      <p class="cbm-hint">选工作流后在这里指认：正文 / 时长 / 分辨率写进哪个参数、哪些装载槽做素材口。</p>
+      <p class="cbm-hint">${hintText}</p>
       ${names ? `<p class="cbm-hint">条目：${names}</p>` : ""}
     </div></div>`;
   }
@@ -5756,6 +5972,8 @@ function onBatchClick(event) {
     void batchConvertAll();
   } else if (action === "submit") {
     void submitBatch();
+  } else if (action === "cancel-history-edit") {
+    cancelBatchHistoryEdit();
   } else if (action === "back-to-draft") {
     batch.view = "draft";
     stopBatchPolling();
@@ -6239,6 +6457,10 @@ function splitBatchPromptSegments(text) {
 async function batchConvert(scheme, itemIndex, silent = false, convert = { ...batch.convert }) {
   const item = scheme.items[itemIndex];
   const script = String(item?.script || "").trim();
+  if (!scheme?.detail || !scheme?.mapping || scheme?.loading) {
+    if (!silent) toast("请先选好并等待工作流参数加载完成再转换");
+    return false;
+  }
   const promptExtra = activeExtraPoints(scheme).find((point) => point.kind === "prompt");
   const prompt2Key = promptExtra ? extraKeyOf(promptExtra) : "";
   if (!item || !script
@@ -6259,6 +6481,10 @@ async function batchConvert(scheme, itemIndex, silent = false, convert = { ...ba
       && scheme.items.includes(item) && batchConversionSnapshot(scheme, item) === snapshot;
     const body = buildBatchConvertRequest(scheme.detail, scheme.mapping, item, convert, scheme.fixed);
     const created = await api("/api/studio/generate", { method: "POST", body });
+    if (!current()) {
+      toast("方案或条目已切换，本次转换结果已放弃");
+      return false;
+    }
     const taskId = String(created?.task?.id || "");
     if (!taskId) throw new Error(created?.error || "转换任务创建失败");
     const result = await batchWaitStudioTask(taskId, current);
@@ -6280,8 +6506,10 @@ async function batchConvert(scheme, itemIndex, silent = false, convert = { ...ba
     }
     return true;
   } catch (error) {
-    batch.blockedMessage = "";
-    toast(`这条转换失败：${error.message}`);
+    if (batchSchemeOf(scheme.id) === scheme && scheme.detail === detail) {
+      batch.blockedMessage = "";
+      toast(`这条转换失败：${error.message}`);
+    }
     return false;
   } finally {
     batch.converting.delete(key);
@@ -6295,7 +6523,9 @@ async function batchConvertAll() {
   const settingsSnapshot = JSON.stringify(convert);
   const draft = ensureBatchDraft();
   const targets = [];
+  let unreadyCount = 0;
   draft.schemes.forEach((scheme) => {
+    const ready = Boolean(scheme.detail && scheme.mapping && !scheme.loading);
     const promptExtra = activeExtraPoints(scheme).find((point) => point.kind === "prompt");
     const prompt2Key = promptExtra ? extraKeyOf(promptExtra) : "";
     (scheme.items || []).forEach((item, itemIndex) => {
@@ -6303,11 +6533,15 @@ async function batchConvertAll() {
         && (!promptExtra || itemExtraValue(item, prompt2Key).trim()));
       if (String(item.script || "").trim() && !done
           && !batch.converting.has(batchItemReference(scheme, itemIndex))) {
-        targets.push([scheme, item]);
+        if (!ready) unreadyCount += 1;
+        else targets.push([scheme, item]);
       }
     });
   });
-  if (!targets.length) { toast("没有要转换的条目：先填剧本，或已全部转换过"); return; }
+  if (!targets.length) {
+    toast(unreadyCount ? "工作流还在读取或未选好，就绪后再转换" : "没有要转换的条目：先填剧本，或已全部转换过");
+    return;
+  }
   if (!batch.convert.provider || !batch.convert.model) { toast("先在「剧本 → 提示词」一栏选好供应商和模型"); return; }
   batch.blockedMessage = "";
   batch.convertAllBusy = true;
@@ -6377,6 +6611,21 @@ async function submitBatch() {
     renderBatch();
     toast("有标红的条目还没填完必填素材，补齐或删掉再提交");
     return;
+  }
+  for (let index = 0; index < draft.schemes.length; index += 1) {
+    const scheme = draft.schemes[index];
+    if (scheme.loading) {
+      batch.blockedMessage = `方案 ${index + 1} 正在读取工作流参数，请稍候再提交`;
+      renderBatch();
+      toast("有方案正在读取工作流参数，请稍候再提交");
+      return;
+    }
+    if (scheme.workflow_id && (!scheme.detail || !scheme.mapping || scheme.detailError)) {
+      batch.blockedMessage = `方案 ${index + 1} 的工作流未加载就绪（${scheme.detailError || "工作流不存在或未读取成功"}），请重新选择后再提交`;
+      renderBatch();
+      toast("有方案的工作流未就绪，不能提交");
+      return;
+    }
   }
   // 恢复出来的固定参数如果对不上当前工作流，先给清单让用户处理，
   // 绝不用 `if (!slot) continue` 替用户默默丢掉旧值。
@@ -6498,14 +6747,23 @@ async function submitBatch() {
       method: "POST",
       body: { title: draft.title, unload_after: draft.unload_after, schemes, convert: { ...batch.convert } },
     });
+    const wasEditMode = batch.editMode;
+    if (wasEditMode) {
+      // 历史编辑重提成功后退出历史编辑态并恢复此前保留的正常草稿（或空白草稿），不继续滞留历史状态。
+      exitBatchHistoryEdit({ restore: true, invalidateAsync: true });
+    } else {
+      // 这一批就是当前填单提交出来的：再点「编辑这一批」不用重新拉快照。
+      batch.draftSourceId = String(payload.batch?.id || "");
+      // 回填提示只属于来源批次；内容已经重新提交，别让警告跟着新批次走。
+      for (const scheme of draft.schemes) {
+        delete scheme.restoreWarning;
+        delete scheme.switchWarning;
+      }
+    }
     batch.runId = String(payload.batch?.id || "");
     batch.runFromHistory = false;
     batch.runData = payload.batch || null;
     batch.runSignature = batchRunSignature(batch.runData);
-    // 这一批就是当前填单提交出来的：再点「编辑这一批」不用重新拉快照。
-    batch.draftSourceId = batch.runId;
-    // 回填提示只属于来源批次；内容已经重新提交，别让警告跟着新批次走。
-    for (const scheme of draft.schemes) delete scheme.restoreWarning;
     batch.missingItems.clear();
     // 新一批开始：结果页若还停在旧详情，切回批次列表，避免看到上一批。
     batch.resultsDetailId = "";
@@ -6598,7 +6856,11 @@ function batchRunMarkup() {
   const canClear = batchDeletableItems(data).length > 0;
   const busy = batch.deletingBatches.has(String(batch.runId || data.id || ""));
   const disabled = busy ? "disabled" : "";
+  const inResultsDetail = Boolean(batch.resultsDetailId && comfyuiPaneName() === "tasks");
   const actions = [
+    inResultsDetail
+      ? ""
+      : `<button type="button" class="cbm-btn cbm-manage-btn" data-batch-action="back-to-draft" ${disabled}>返回填单</button>`,
     `<button type="button" class="cbm-btn cbm-manage-btn primary" data-batch-action="edit-batch" ${disabled}>编辑这一批</button>`,
     canClear
       ? `<button type="button" class="cbm-btn cbm-manage-btn danger" data-batch-action="clear-batch-outputs" ${disabled}>删除本批全部产物</button>`
@@ -6611,8 +6873,8 @@ function batchRunMarkup() {
        <button type="button" class="cbm-btn cbm-manage-btn" data-batch-action="cancel-selection" ${disabled}>取消选择</button>
        <button type="button" class="cbm-btn cbm-manage-btn danger" data-batch-action="delete-selected-items" ${disabled || !batch.selectedItems.size ? "disabled" : ""}>${busy ? "删除中…" : `删除所选（${batch.selectedItems.size}）`}</button>`
     : `<button type="button" class="cbm-btn cbm-manage-btn" data-batch-action="select-items" ${disabled || !canClear ? "disabled" : ""}>选择条目</button><span>勾选后可一次删除多个条目的产物</span>`;
-  // 结果页打开的详情要有明确返回入口；批量页的当前跑批视图不需要。
-  const back = batch.resultsDetailId && comfyuiPaneName() === "tasks"
+  // 结果页详情提供返回批次列表；批量页跑批视图已在操作区提供返回填单（含历史编辑重提后回到原草稿）。
+  const back = inResultsDetail
     ? `<button type="button" class="cbm-btn tiny cbm-back-to-list" data-batch-action="back-to-batch-list">← 返回批次列表</button>`
     : "";
   return `<div class="cbm-run-head">
@@ -6750,7 +7012,7 @@ function mountBatchPreview(host) {
     const gallery = outputs.length > 1;
     host.classList.toggle("is-gallery", gallery);
     for (const outputName of outputs) {
-      const figure = renderOutputCard(taskId, outputName, "");
+      const figure = renderOutputCard(taskId, outputName, "", { allowRevealFolder: false });
       host.append(figure);
       const video = figure.querySelector("video");
       if (!video) continue;
@@ -6772,17 +7034,7 @@ function mountBatchPreview(host) {
 
 // 条目「打开文件夹」：定位这一条自己的产物目录（不是产物根目录，也不展开产物列表）。
 async function revealBatchItemFolder(taskId) {
-  const id = String(taskId || "");
-  if (!id) return;
-  try {
-    await api(`/api/comfyui/tasks/${encodeURIComponent(id)}/outputs/open`, {
-      method: "POST", body: {},
-    });
-    toast("已在电脑上打开这个条目的产物文件夹");
-  } catch (error) {
-    // 手机端 / 目录不存在等由服务端给出明确原因，这里照实转达。
-    toast(`打开文件夹失败：${error.message}`);
-  }
+  return revealTaskOutputsFolder(taskId);
 }
 
 async function cancelBatchItem(taskId) {
@@ -6985,6 +7237,7 @@ function batchHistoryRowMarkup(row) {
 // 耗时由服务端任务时间计算（打开详情不重新起算）；详情先置空由轮询拉取。
 function openBatchHistory(id) {
   if (!id) return;
+  if (!batch.editMode) batch.editEpoch += 1;
   exitBatchClearMode();
   batch.runId = String(id);
   batch.runFromHistory = true;
@@ -7348,14 +7601,84 @@ function batchEditSnapshot() {
   });
 }
 
+function exitBatchHistoryEdit({ restore = true, invalidateAsync = true } = {}) {
+  if (invalidateAsync) batch.editEpoch += 1;
+  const wasEditMode = batch.editMode;
+  const backup = batch.editBackup;
+  const returnTarget = batch.editReturn;
+  batch.editMode = false;
+  batch.editBatchId = "";
+  batch.editBatchTitle = "";
+  batch.editBackup = null;
+  batch.editReturn = null;
+  if (wasEditMode) {
+    batch.missingItems.clear();
+    batch.blockedMessage = "";
+    if (restore) {
+      if (backup) {
+        batch.draft = backup.draft;
+        batch.convert = backup.convert
+          ? { ...backup.convert }
+          : { template: "", provider: "", model: "", system_prompt: "" };
+        batch.draftSourceId = String(backup.draftSourceId || "");
+      } else {
+        batch.draft = null;
+        batch.draftSourceId = "";
+      }
+    } else {
+      batch.draftSourceId = "";
+    }
+  }
+  return returnTarget;
+}
+
+function cancelBatchHistoryEdit() {
+  const returnTarget = exitBatchHistoryEdit({ restore: true, invalidateAsync: true });
+  if (returnTarget?.pane === "batch" && returnTarget?.view === "run" && returnTarget?.runId) {
+    batch.runId = returnTarget.runId;
+    batch.view = "run";
+    setComfyuiPane("batch");
+    startBatchPolling();
+    renderBatch();
+    return;
+  }
+  batch.view = "draft";
+  if (returnTarget?.pane === "tasks" || returnTarget?.resultsDetailId !== undefined) {
+    batch.resultsDetailId = String(returnTarget?.resultsDetailId || "");
+    setComfyuiResultsSegment("batch");
+    setComfyuiPane("tasks");
+    syncResultsBatchDetail();
+    if (batch.resultsDetailId) startBatchPolling();
+    else void loadBatchHistories();
+  } else {
+    renderBatch();
+  }
+}
+
 async function editCurrentBatch(batchIdOverride = "") {
   const epoch = ++batch.editEpoch;
   const batchId = String(batchIdOverride || batch.runId || batch.runData?.id || "");
   if (!batchId) return;
-  if (batch.draftSourceId === batchId && batch.draft) {
+  const originPane = comfyuiPaneName();
+  const originReturn = originPane === "tasks"
+    ? { pane: "tasks", resultsSegment: "batch", resultsDetailId: String(batch.resultsDetailId || "") }
+    : originPane === "batch" && batch.view === "run"
+      ? { pane: "batch", view: "run", runId: String(batch.runId || "") }
+      : { pane: "tasks", resultsSegment: "batch", resultsDetailId: "" };
+  if (batch.editMode && batch.editBatchId === batchId && batch.draft) {
     batch.runId = batchId;
     batch.view = "draft";
-    // 进入填单即离开结果详情；再回结果页看到的是批次列表。
+    batch.resultsDetailId = "";
+    syncResultsBatchDetail();
+    stopBatchPolling();
+    setComfyuiPane("batch");
+    renderBatch();
+    return;
+  }
+  if (!batch.editMode && batch.draftSourceId === batchId && batch.draft
+      && originPane === "batch" && batch.view === "run" && !batch.runFromHistory) {
+    batch.runId = batchId;
+    batch.view = "draft";
     batch.resultsDetailId = "";
     syncResultsBatchDetail();
     stopBatchPolling();
@@ -7389,12 +7712,19 @@ async function editCurrentBatch(batchIdOverride = "") {
   if (active && !window.confirm("这一批还有条目在生成。现在编辑并重新提交会另起一批，原来的继续跑。继续吗？")) {
     return;
   }
-  if (batch.draft && batch.draftSourceId !== batchId && batchDraftHasContent(batch.draft)
-      && !window.confirm("填单区已经有内容，编辑这一批会把它替换掉。继续吗？")) {
-    return;
-  }
   const draft = await batchDraftFromDetail(detail);
   if (!current()) { stale(); return; }
+  if (!batch.editMode) {
+    batch.editBackup = {
+      draft: batch.draft,
+      convert: { ...batch.convert },
+      draftSourceId: String(batch.draftSourceId || ""),
+    };
+    batch.editReturn = originReturn;
+  }
+  batch.editMode = true;
+  batch.editBatchId = batchId;
+  batch.editBatchTitle = String(detail.title || detail.id || batchId);
   batch.draft = draft;
   batch.convert = { template: "", provider: "", model: "", system_prompt: "", ...(detail.convert || {}) };
   batch.draftSourceId = batchId;
@@ -7410,8 +7740,8 @@ async function editCurrentBatch(batchIdOverride = "") {
   setComfyuiPane("batch");
   renderBatch();
   toast((detail.schemes || []).length
-    ? "已回到填单：改完重新提交会生成新批次"
-    : "已回到填单：这一批是旧版提交的，内容可能不全，提交前请核对");
+    ? "已载入历史批次到临时编辑区：改完重新提交会生成新批次，原草稿已暂存"
+    : "已载入旧版历史批次：内容可能不全，提交前请核对");
 }
 
 async function openBatchForEdit(id) {
@@ -7550,6 +7880,8 @@ async function deleteCurrentBatch() {
       batch.runSignature = "";
       batch.selectedItems.clear();
       batch.selectionMode = false;
+      if (batch.editMode && batch.editBatchId === batchId) exitBatchHistoryEdit({ restore: true, invalidateAsync: true });
+      if (batch.editBackup?.draftSourceId === batchId) batch.editBackup.draftSourceId = "";
       if (batch.draftSourceId === batchId) batch.draftSourceId = "";
       batch.view = "draft";
       batch.resultsDetailId = "";

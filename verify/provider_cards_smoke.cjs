@@ -521,7 +521,9 @@ async function runProviderCopyViewport(browser, width) {
       JSON.stringify(dialog));
     await page.fill('#providerName', `${PREFIX}新增`);
     await page.fill('#providerBaseUrl', 'http://127.0.0.1:9999/v1');
-    await page.selectOption('#providerModel', '__custom__');
+    await page.click('#providerModelTrigger');
+    await page.waitForSelector('#modelPickerDialog[open]');
+    await page.click('#modelPickerManual');
     await page.fill('#providerModelCustom', 'smoke-model-new');
     // 填好上下文/输出上限 → saveProvider 不再去探测不可达的端点（否则要等重试退避）。
     await page.fill('#providerContextWindow', '32000');

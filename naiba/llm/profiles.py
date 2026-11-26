@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from naiba.config import _infer_supports_images
+from naiba.config import apply_model_override
 from naiba.llm.local_probe import probe_local_context_window
 
 
@@ -27,14 +27,7 @@ def resolve_profile_with_override(config: Any, model_key: str, model_name: str) 
     clean_name = str(model_name or "").strip()
     if not clean_name:
         raise ValueError("请先在会话中选择模型；请先在设置中检查模型")
-    profile["model"] = clean_name
-    explicit_images = profile.get("supports_images_explicit")
-    if isinstance(explicit_images, bool):
-        profile["supports_images"] = explicit_images
-    elif "supports_images_explicit" in profile:
-        # config.profile 的布尔能力来自 API 默认模型；会话选定模型后重新推断。
-        inferred_profile = {**profile, "supports_images": None}
-        profile["supports_images"] = _infer_supports_images(inferred_profile)
+    profile = apply_model_override(profile, clean_name)
     # 本地后端的窗口探测：/v1/models 不返回窗口字段，config._infer_context_window() 因此
     # 恒为 0。不补这一刀，上下文闸门与前端上下文环（含「上下文提醒阈值」）都会按在线的
     # 256k 兜底，等于对本地模型不设上限——超长会话的请求会被放行，本地后端做不完 prefill，

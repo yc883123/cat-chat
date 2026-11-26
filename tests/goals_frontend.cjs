@@ -408,6 +408,53 @@ test('rounds pager accumulates pages and sends the scoped cursor', async () => {
   assert(html.includes('第 2 轮')); assert(!html.includes('更多轮次'));
 });
 
+test('continuous goal hides extend form and denominators; terminal goal supports dismiss', async () => {
+  const h = harness();
+  h.defaultGoal = goal('A', 'running', 3, {
+    execution_policy: 'continuous',
+    deadline_at: 0,
+    limits: { model_requests: 256, tool_actions: 200, rounds: 32 },
+  });
+  await h.navigate('A');
+  let html = h.elements['#goalCard'].innerHTML;
+  assert(html.includes('持续执行'));
+  assert(html.includes('模型请求 3 次'));
+  assert(!html.includes('3/256'));
+  assert(!html.includes('追加额度或时限'));
+  assert.equal(h.context.goalStatusInfo('A').pillText, 'GOAL 执行中');
+  assert.equal(h.context.goalStatusInfo('A').spinning, true);
+
+  h.defaultGoal = goal('A', 'cancelled', 4, { execution_policy: 'continuous', deadline_at: 0 });
+  await h.context.refreshGoal();
+  html = h.elements['#goalCard'].innerHTML;
+  assert(html.includes('关闭显示'));
+  assert.equal(h.context.goalStatusInfo('A').spinning, false);
+  const postsBefore = h.calls.filter(c => c.method === 'POST').length;
+  assert.equal(await h.context.changeGoal('dismiss'), true);
+  assert.equal(h.calls.filter(c => c.method === 'POST').length, postsBefore);
+  assert.equal(h.elements['#goalCard'].hidden, true);
+  assert.equal(h.context.goalStatusInfo('A').visible, false);
+});
+
+test('blocked goal allows resume and configuration drift offers rebaseline resume', async () => {
+  const h = harness();
+  h.defaultGoal = goal('A', 'blocked', 5, { execution_policy: 'continuous', reason: 'paused' });
+  await h.navigate('A');
+  assert(h.elements['#goalCard'].innerHTML.includes('继续目标'));
+  h.postQueue.push({ goal: goal('A', 'queued', 6, { execution_policy: 'continuous' }) });
+  assert.equal(await h.context.changeGoal('resume'), true);
+  await flush();
+
+  h.defaultGoal = goal('A', 'needs_user', 7, { execution_policy: 'continuous', stop_code: 'configuration' });
+  await h.context.refreshGoal();
+  assert(h.elements['#goalCard'].innerHTML.includes('按当前设置继续'));
+  h.postQueue.push({ goal: goal('A', 'queued', 8, { execution_policy: 'continuous' }) });
+  assert.equal(await h.context.changeGoal('rebaseline'), true);
+  const rebaselinePost = h.calls.filter(c => c.method === 'POST').at(-1);
+  assert.equal(rebaselinePost.url, '/api/goals/goal-A/resume');
+  assert.deepEqual(JSON.parse(JSON.stringify(rebaselinePost.body)), { version: 7, rebaseline: true });
+});
+
 (async () => {
   for (const { name, run } of cases) { await run(); console.log(`PASS ${name}`); }
   console.log(`goal frontend: ${cases.length} cases passed`);

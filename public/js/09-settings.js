@@ -3,7 +3,7 @@
 // ============================================================
 
 import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, notifyProvidersChanged, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
-import { applyConversationAgent, invalidateModelCatalogs, KVMEM_FAIL_STATES, KVMEM_POLL_INTERVAL_MS, KVMEM_POLL_LIMITS, kvmemLabel, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
+import { applyConversationAgent, invalidateModelCatalogs, KVMEM_FAIL_STATES, KVMEM_POLL_INTERVAL_MS, KVMEM_POLL_LIMITS, kvmemLabel, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, syncComposerModelPicker, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
 import { playDoneSound } from "./20-sound.js";
@@ -824,6 +824,9 @@ export function copyProvider(providerId) {
   if (!source.context_window_source || ['provider_config', 'local_config'].includes(source.context_window_source)) {
     copy.context_window = source.context_window || source.context_size;
   }
+  if (source.model_overrides && typeof source.model_overrides === 'object') {
+    copy.model_overrides = cloneModelOverrides(source.model_overrides);
+  }
   showProviderForm(copy, { isNew: true });
   // 保存时使用独立身份；即使手改成同名、同 Key，也不会命中原卡的无 id 去重。
   // 远端 HTTP 没有 randomUUID 时沿用项目的时间戳 + 随机串回退。
@@ -869,6 +872,8 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   $('#providerSupportsImages').value = provider.supports_images_explicit === true
     ? 'true'
     : (provider.supports_images_explicit === false ? 'false' : 'auto');
+  providerModelOverridesDraft = cloneModelOverrides(provider.model_overrides);
+  renderProviderModelOverrides();
   setProviderModelOptions([], provider.model || '');
   $('#providerFormat').value = provider.request_format || 'openai_chat';
   $('#providerApiKey').value = '';
@@ -1168,9 +1173,9 @@ export function setProviderEditMode(editing) {
   state.providerEditing = editing;
   [
     '#providerName', '#providerBaseUrl', '#providerApiKey', '#providerFormat',
-    '#providerKind', '#providerModel', '#providerModelCustom', '#providerContextWindow',
+    '#providerKind', '#providerModel', '#providerModelTrigger', '#providerModelCustom', '#providerContextWindow',
     '#providerMaxOutputTokens', '#providerTemperature', '#providerReasoningEffort',
-    '#providerSupportsImages', '#loadProviderModels',
+    '#providerSupportsImages', '#loadProviderModels', '#addProviderModelOverride',
   ].forEach((selector) => {
     const element = $(selector);
     if (element) element.disabled = !editing;
@@ -1205,6 +1210,7 @@ export function setProviderModelOptions(models = [], current = '') {
   select.value = current || (unique.length === 1 ? unique[0].id : '');
   $('#providerModelCustom').hidden = true;
   $('#providerModelCustom').required = false;
+  syncModelSelectTrigger('providerModel', 'providerModelTrigger');
 }
 
 export function applyProviderModelCapabilities() {
@@ -1267,6 +1273,7 @@ export function toggleCustomModel() {
   const custom = $('#providerModel').value === '__custom__';
   $('#providerModelCustom').hidden = !custom;
   $('#providerModelCustom').required = custom;
+  syncModelSelectTrigger('providerModel', 'providerModelTrigger');
   if (custom) $('#providerModelCustom').focus();
 }
 
@@ -1328,6 +1335,7 @@ export function providerFormValue() {
     temperature: numberOrUndefined('#providerTemperature'),
     reasoning_effort: $('#providerReasoningEffort').value,
     supports_images: imageChoice === 'auto' ? null : imageChoice === 'true',
+    model_overrides: cloneModelOverrides(providerModelOverridesDraft),
     // 单价**不在这里提交**：定价已迁到「用量统计 → 右上角 费用单价」（按 base_url 分组 →
     // 模型），走 POST /api/providers/pricing 单点写入。不带价格键时后端不动旧值
     // （config.upsert_model_profile 的向后兼容分支），所以这张表单既不会误清也不会覆盖价格。
@@ -1423,6 +1431,8 @@ export function syncSavedProvider(saved) {
   populateModels();
   // 新卡片默认没有单价 ⇒ 用量页「费用单价」角标要跟着变（不用等切回设置页才发现）。
   refreshUsagePricingBadge();
+  syncComposerModelPicker();
+  document.dispatchEvent(new CustomEvent('cat-chat:model-overrides-updated'));
 }
 
 // 保存进行中的重入闸：`#saveProvider` 禁用只能挡住"点按钮"，**挡不住在输入框里按回车**
@@ -1447,6 +1457,11 @@ export async function saveProvider(event) {
   try {
     const values = providerFormValue();
     if (!isCurrent()) return; // 表单在保存前被关闭或切换，尚未提交的草稿就此取消。
+    if (!values.model) {
+      $('#providerError').textContent = '请先选择或填写模型名称';
+      ($('#providerModel').value === '__custom__' ? $('#providerModelCustom') : $('#providerModelTrigger'))?.focus();
+      return;
+    }
     if (copyId && !values.id) values.id = copyId;
     const saved = await api('/api/providers', { method: 'POST', body: values });
     // 先落"结果"，再刷新：`syncSavedProvider` 的第一步是把卡片并进本地 bootstrap
@@ -1491,6 +1506,9 @@ export function cancelProviderEdit() {
   ++providerModelCheckGeneration;
   clearTimeout(providerModelCheckTimer);
   state.providerEditing = false;
+  providerModelOverridesDraft = {};
+  if ($('#modelPickerDialog')?.open) $('#modelPickerDialog').close('cancel');
+  if ($('#modelOverrideDialog')?.open) $('#modelOverrideDialog').close('cancel');
   const dialog = $('#providerDialog');
   if (dialog?.open) dialog.close();
   renderProviders();
@@ -5678,4 +5696,723 @@ export function scheduleMcpPoll(delay = null) {
     scheduleMcpPoll();
   }, delay ?? interval);
 }
+
+// ============================================================
+// 通用模型选择弹层：首启引导 (#onboardingModel) 与供应商设置 (#providerModel) 共用，
+// 替代原生 <select> 弹出框；底层仍以隐藏 <select> 作为唯一状态源。
+// ============================================================
+let modelPickerSession = null;
+let modelPickerBound = false;
+
+function modelSelectCatalog(select) {
+  if (!select) return [];
+  const items = [];
+  for (const option of [...select.options]) {
+    const id = String(option.value || '').trim();
+    if (!id || id === '__custom__') continue;
+    items.push({ id, label: String(option.textContent || id).trim() || id });
+  }
+  return items;
+}
+
+export function syncModelSelectTrigger(selectId, triggerId) {
+  const select = document.getElementById(selectId);
+  const trigger = document.getElementById(triggerId);
+  if (!select || !trigger) return;
+  const textEl = trigger.querySelector('.model-select-trigger-text');
+  const metaEl = trigger.querySelector('.model-select-trigger-meta');
+  const items = modelSelectCatalog(select);
+  const value = String(select.value || '');
+  const selectedOption = [...select.options].find((opt) => opt.value === value);
+  if (textEl) {
+    if (value === '__custom__') {
+      textEl.textContent = '手动填写模型名称';
+      textEl.className = 'model-select-trigger-text is-custom';
+    } else if (value) {
+      textEl.textContent = selectedOption?.textContent || value;
+      textEl.className = 'model-select-trigger-text';
+    } else {
+      textEl.textContent = selectedOption?.textContent || (items.length ? '请选择模型' : '检测后选择模型');
+      textEl.className = 'model-select-trigger-text is-placeholder';
+    }
+  }
+  if (metaEl) {
+    metaEl.textContent = items.length > 1 ? `${items.length} 个可选` : '';
+  }
+  trigger.disabled = Boolean(select.disabled);
+  if (modelPickerSession && modelPickerSession.selectId === selectId && $('#modelPickerDialog')?.open) {
+    modelPickerSession.items = items;
+    if (!modelPickerSession.pending || !items.some((item) => item.id === modelPickerSession.pending)) {
+      modelPickerSession.pending = (value && value !== '__custom__' && items.some((item) => item.id === value))
+        ? value
+        : (items[0]?.id || '');
+    }
+    renderModelPickerList();
+  }
+}
+
+function modelPickerFilteredItems(session, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return session.items;
+  return session.items.filter((item) => item.id.toLowerCase().includes(q) || item.label.toLowerCase().includes(q));
+}
+
+function applyModelPickerSelection(value, customDraft = '') {
+  const session = modelPickerSession;
+  const dialog = $('#modelPickerDialog');
+  if (!session) return;
+  const select = document.getElementById(session.selectId);
+  if (select) {
+    select.value = value;
+    syncModelSelectTrigger(session.selectId, session.triggerId);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (value === '__custom__' && customDraft && session.customInputId) {
+    const input = document.getElementById(session.customInputId);
+    if (input) {
+      input.value = customDraft;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+  if (dialog?.open) dialog.close('confirm');
+  if (value === '__custom__' && session.customInputId) {
+    document.getElementById(session.customInputId)?.focus();
+  }
+}
+
+function updateModelPickerSelectionUI() {
+  const session = modelPickerSession;
+  const list = $('#modelPickerList');
+  const confirm = $('#modelPickerConfirm');
+  if (!session || !list) return;
+  for (const node of list.querySelectorAll('.model-picker-option')) {
+    const selected = node.dataset.modelId === session.pending;
+    node.classList.toggle('is-selected', selected);
+    node.setAttribute('aria-selected', String(selected));
+  }
+  if (confirm) confirm.disabled = !session.pending;
+}
+
+function renderModelPickerList() {
+  const session = modelPickerSession;
+  const list = $('#modelPickerList');
+  const countEl = $('#modelPickerCount');
+  const confirm = $('#modelPickerConfirm');
+  const search = $('#modelPickerSearch');
+  if (!session || !list) return;
+  const rawQuery = String(search?.value || '').trim();
+  const filtered = modelPickerFilteredItems(session, rawQuery);
+  if (countEl) {
+    if (!session.items.length) countEl.textContent = '';
+    else if (rawQuery) countEl.textContent = `匹配 ${filtered.length} / ${session.items.length} 个模型`;
+    else countEl.textContent = `共 ${session.items.length} 个模型`;
+  }
+  list.replaceChildren();
+  if (!filtered.length) {
+    const empty = document.createElement('div');
+    empty.className = 'model-picker-empty';
+    const message = document.createElement('span');
+    message.textContent = session.items.length
+      ? `没有匹配「${rawQuery}」的模型`
+      : '尚未检测到可用模型，可先检测模型或手动填写模型名称。';
+    empty.append(message);
+    const actions = document.createElement('div');
+    actions.className = 'model-picker-empty-actions';
+    if (!session.items.length && typeof session.onRefresh === 'function') {
+      const refreshBtn = document.createElement('button');
+      refreshBtn.type = 'button';
+      refreshBtn.className = 'model-picker-btn';
+      refreshBtn.textContent = '立即检测模型';
+      refreshBtn.addEventListener('click', () => {
+        const handler = session.onRefresh;
+        $('#modelPickerDialog')?.close('refresh');
+        handler();
+      });
+      actions.append(refreshBtn);
+    }
+    const manualBtn = document.createElement('button');
+    manualBtn.type = 'button';
+    manualBtn.className = 'model-picker-btn';
+    manualBtn.textContent = session.items.length && rawQuery ? `直接使用「${rawQuery}」` : '手动填写模型名称';
+    manualBtn.addEventListener('click', () => {
+      applyModelPickerSelection('__custom__', session.items.length ? rawQuery : '');
+    });
+    actions.append(manualBtn);
+    empty.append(actions);
+    list.append(empty);
+    if (confirm) confirm.disabled = !session.pending;
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const item of filtered) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'model-picker-option';
+    btn.setAttribute('role', 'option');
+    btn.dataset.modelId = item.id;
+    const selected = item.id === session.pending;
+    btn.classList.toggle('is-selected', selected);
+    btn.setAttribute('aria-selected', String(selected));
+    const check = document.createElement('span');
+    check.className = 'model-picker-check';
+    check.setAttribute('aria-hidden', 'true');
+    check.innerHTML = '<svg viewBox="0 0 16 16"><path d="M3.2 8.2 6.5 11.4 12.8 4.8"></path></svg>';
+    const name = document.createElement('span');
+    name.className = 'model-picker-name';
+    name.textContent = item.label;
+    btn.append(check, name);
+    frag.append(btn);
+  }
+  list.append(frag);
+  if (confirm) confirm.disabled = !session.pending;
+}
+
+export function bindModelPickerDialog() {
+  if (modelPickerBound) return;
+  const dialog = $('#modelPickerDialog');
+  if (!dialog) return;
+  modelPickerBound = true;
+  const search = $('#modelPickerSearch');
+  const list = $('#modelPickerList');
+  $('#modelPickerClose')?.addEventListener('click', () => dialog.close('cancel'));
+  $('#modelPickerCancel')?.addEventListener('click', () => dialog.close('cancel'));
+  $('#modelPickerManual')?.addEventListener('click', () => applyModelPickerSelection('__custom__'));
+  $('#modelPickerConfirm')?.addEventListener('click', () => {
+    if (modelPickerSession?.pending) applyModelPickerSelection(modelPickerSession.pending);
+  });
+  search?.addEventListener('input', () => renderModelPickerList());
+  search?.addEventListener('keydown', (event) => {
+    if (event.isComposing) return;
+    if (event.key === 'ArrowDown') {
+      const first = list?.querySelector('.model-picker-option');
+      if (first) {
+        event.preventDefault();
+        first.focus();
+      }
+      return;
+    }
+    if (event.key === 'Enter' && modelPickerSession) {
+      event.preventDefault();
+      const filtered = modelPickerFilteredItems(modelPickerSession, search.value);
+      if (filtered.length === 1) {
+        applyModelPickerSelection(filtered[0].id);
+      } else if (modelPickerSession.pending && filtered.some((item) => item.id === modelPickerSession.pending)) {
+        applyModelPickerSelection(modelPickerSession.pending);
+      } else if (filtered.length > 0) {
+        applyModelPickerSelection(filtered[0].id);
+      }
+    }
+  });
+  list?.addEventListener('click', (event) => {
+    const option = event.target.closest('.model-picker-option');
+    if (!option || !modelPickerSession) return;
+    modelPickerSession.pending = option.dataset.modelId || '';
+    updateModelPickerSelectionUI();
+  });
+  list?.addEventListener('dblclick', (event) => {
+    const option = event.target.closest('.model-picker-option');
+    if (!option || !modelPickerSession) return;
+    const id = option.dataset.modelId || '';
+    if (id) applyModelPickerSelection(id);
+  });
+  list?.addEventListener('keydown', (event) => {
+    if (!modelPickerSession) return;
+    const options = [...list.querySelectorAll('.model-picker-option')];
+    if (!options.length) return;
+    const currentIndex = options.indexOf(document.activeElement);
+    let nextIndex = -1;
+    if (event.key === 'ArrowDown') nextIndex = currentIndex < 0 ? 0 : Math.min(options.length - 1, currentIndex + 1);
+    else if (event.key === 'ArrowUp') nextIndex = currentIndex <= 0 ? 0 : currentIndex - 1;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = options.length - 1;
+    else if (event.key === 'Enter' && currentIndex >= 0) {
+      event.preventDefault();
+      const id = options[currentIndex].dataset.modelId || '';
+      if (id) applyModelPickerSelection(id);
+      return;
+    }
+    if (nextIndex >= 0) {
+      event.preventDefault();
+      const target = options[nextIndex];
+      target.focus();
+      modelPickerSession.pending = target.dataset.modelId || '';
+      updateModelPickerSelectionUI();
+    }
+  });
+  dialog.addEventListener('close', () => {
+    dialog.returnValue = '';
+    modelPickerSession = null;
+  });
+  // Safari 等不支持 closedby="any" 时按指针落点补齐点击遮罩关闭。
+  if (!('closedBy' in HTMLDialogElement.prototype)) {
+    const outside = (event) => {
+      const rect = dialog.getBoundingClientRect();
+      return event.clientX < rect.left || event.clientX > rect.right
+        || event.clientY < rect.top || event.clientY > rect.bottom;
+    };
+    let pressedOutside = false;
+    dialog.addEventListener('pointerdown', (event) => { pressedOutside = outside(event); });
+    dialog.addEventListener('pointerup', (event) => {
+      if (pressedOutside && outside(event) && dialog.open) dialog.close('backdrop');
+      pressedOutside = false;
+    });
+  }
+}
+
+export function openModelPickerDialog({
+  selectId,
+  triggerId,
+  customInputId = '',
+  title = '选择要使用的模型',
+  subtitle = '以下是模型提供商的可用模型，勾选要使用的模型。',
+  confirmLabel = '选择模型',
+  onRefresh = null,
+} = {}) {
+  bindModelPickerDialog();
+  const dialog = $('#modelPickerDialog');
+  const select = document.getElementById(selectId);
+  if (!dialog || !select) return;
+  const items = modelSelectCatalog(select);
+  const current = String(select.value || '');
+  const pending = current && current !== '__custom__' && items.some((item) => item.id === current)
+    ? current
+    : (items[0]?.id || '');
+  modelPickerSession = { selectId, triggerId, customInputId, items, pending, onRefresh };
+  const titleEl = $('#modelPickerTitle');
+  const subEl = $('#modelPickerSubtitle');
+  const confirmEl = $('#modelPickerConfirm');
+  const search = $('#modelPickerSearch');
+  if (titleEl) titleEl.textContent = title;
+  if (subEl) subEl.textContent = subtitle;
+  if (confirmEl) confirmEl.textContent = confirmLabel;
+  if (search) search.value = '';
+  renderModelPickerList();
+  if (!dialog.open) dialog.showModal();
+  const activeOption = $('#modelPickerList')?.querySelector('.model-picker-option.is-selected');
+  activeOption?.scrollIntoView({ block: 'nearest' });
+  if (items.length) search?.focus();
+  else $('#modelPickerList button')?.focus();
+}
+
+export function openProviderModelPicker() {
+  openModelPickerDialog({
+    selectId: 'providerModel',
+    triggerId: 'providerModelTrigger',
+    customInputId: 'providerModelCustom',
+    title: '选择默认模型',
+    subtitle: '以下是模型提供商的可用模型，勾选要使用的默认模型。',
+    confirmLabel: '确认选择',
+    onRefresh: () => { void loadProviderModels({ automatic: false }); },
+  });
+}
+
+// ============================================================
+// 单模型独立参数（上下文、最大输出、温度、思考等级、视觉输入能力）
+// ============================================================
+const MODEL_OVERRIDE_EFFORT_LABELS = {
+  auto: '自动',
+  off: '关闭',
+  low: '低',
+  medium: '中',
+  high: '高',
+};
+
+let providerModelOverridesDraft = {};
+let modelOverrideSession = null;
+let modelOverrideBound = false;
+
+function cloneModelOverrides(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const name = String(key || '').trim();
+    if (!name || !value || typeof value !== 'object') continue;
+    const copy = { ...value };
+    if (Object.keys(copy).length) out[name] = copy;
+  }
+  return out;
+}
+
+function modelOverrideSummaryChips(override) {
+  if (!override || typeof override !== 'object') return [];
+  const chips = [];
+  if (Number(override.context_window) > 0) {
+    chips.push(`上下文 ${Number(override.context_window).toLocaleString()}`);
+  }
+  if (Number(override.max_output_tokens) > 0) {
+    chips.push(`输出 ${Number(override.max_output_tokens).toLocaleString()}`);
+  }
+  if (override.temperature !== undefined && override.temperature !== null && override.temperature !== '') {
+    chips.push(`温度 ${override.temperature}`);
+  }
+  if (override.reasoning_effort && MODEL_OVERRIDE_EFFORT_LABELS[override.reasoning_effort]) {
+    chips.push(`思考 ${MODEL_OVERRIDE_EFFORT_LABELS[override.reasoning_effort]}`);
+  }
+  if (override.supports_images === true) chips.push('视觉 支持图片');
+  else if (override.supports_images === false) chips.push('视觉 纯文本');
+  else if (override.supports_images === 'auto') chips.push('视觉 自动检测');
+  return chips;
+}
+
+export function renderProviderModelOverrides() {
+  const container = $('#providerModelOverrideList');
+  if (!container) return;
+  const entries = Object.entries(providerModelOverridesDraft);
+  if (!entries.length) {
+    container.innerHTML = '<p class="provider-overrides-empty">暂未设置单模型独立参数，全部模型默认继承上方配置。</p>';
+    return;
+  }
+  container.replaceChildren();
+  const frag = document.createDocumentFragment();
+  for (const [modelName, override] of entries) {
+    const row = document.createElement('div');
+    row.className = 'provider-override-item';
+    row.dataset.overrideModel = modelName;
+    const main = document.createElement('div');
+    main.className = 'provider-override-main';
+    const title = document.createElement('div');
+    title.className = 'provider-override-name';
+    title.textContent = modelName;
+    const chipsWrap = document.createElement('div');
+    chipsWrap.className = 'provider-override-chips';
+    for (const text of modelOverrideSummaryChips(override)) {
+      const chip = document.createElement('span');
+      chip.className = 'provider-override-chip';
+      chip.textContent = text;
+      chipsWrap.append(chip);
+    }
+    main.append(title, chipsWrap);
+    const actions = document.createElement('div');
+    actions.className = 'provider-override-actions';
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'control-button tiny';
+    editBtn.dataset.overrideEdit = modelName;
+    editBtn.textContent = '编辑';
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'control-button tiny';
+    delBtn.dataset.overrideDelete = modelName;
+    delBtn.textContent = '删除';
+    actions.append(editBtn, delBtn);
+    row.append(main, actions);
+    frag.append(row);
+  }
+  container.append(frag);
+}
+
+function updateModelOverrideCapabilityHints(modelName) {
+  const clean = String(modelName || '').trim();
+  const cap = (state.providerModelCapabilities && state.providerModelCapabilities[clean]) || {};
+  const syncCap = (value, hintId, btnId) => {
+    const hint = $(hintId);
+    const btn = $(btnId);
+    const num = Number(value);
+    const ok = Number.isFinite(num) && num > 0;
+    if (hint) {
+      hint.hidden = !ok;
+      hint.textContent = ok ? `模型目录建议：${num.toLocaleString()}` : '';
+    }
+    if (btn) {
+      btn.hidden = !ok;
+      btn.dataset.capValue = ok ? String(num) : '';
+    }
+  };
+  syncCap(cap.context_window, '#modelOverrideContextCap', '#applyModelOverrideContextCap');
+  syncCap(cap.max_output_tokens, '#modelOverrideMaxOutCap', '#applyModelOverrideMaxOutCap');
+  const visionHint = $('#modelOverrideVisionHint');
+  if (visionHint) {
+    const val = $('#modelOverrideSupportsImages')?.value || 'inherit';
+    if (val === 'true') visionHint.textContent = '强制将该模型视为支持图片输入。';
+    else if (val === 'false') visionHint.textContent = '强制将该模型视为纯文本，不发送原图。';
+    else if (val === 'auto') visionHint.textContent = '覆盖供应商设定，按模型名与运行时探针自动检测视觉能力。';
+    else if (typeof cap.supports_images === 'boolean') {
+      visionHint.textContent = `模型目录报告：${cap.supports_images ? '支持图片' : '纯文本'}（当前跟随供应商默认）。`;
+    } else {
+      visionHint.textContent = '留作「跟随供应商默认」时，沿用供应商卡片里的视觉设置。';
+    }
+  }
+}
+
+function fillModelOverrideFields(override = {}, modelName = '') {
+  const cw = override?.context_window;
+  const mot = override?.max_output_tokens;
+  const temp = override?.temperature;
+  $('#modelOverrideContextWindow').value = cw ? String(cw) : '';
+  $('#modelOverrideMaxOutputTokens').value = mot ? String(mot) : '';
+  $('#modelOverrideTemperature').value = (temp !== undefined && temp !== null && temp !== '') ? String(temp) : '';
+  $('#modelOverrideReasoningEffort').value = override?.reasoning_effort || 'inherit';
+  if (override?.supports_images === true) $('#modelOverrideSupportsImages').value = 'true';
+  else if (override?.supports_images === false) $('#modelOverrideSupportsImages').value = 'false';
+  else if (override?.supports_images === 'auto') $('#modelOverrideSupportsImages').value = 'auto';
+  else $('#modelOverrideSupportsImages').value = 'inherit';
+  $('#modelOverrideError').textContent = '';
+  const hasExisting = Boolean(override && Object.keys(override).length);
+  const resetBtn = $('#modelOverrideReset');
+  if (resetBtn) resetBtn.hidden = !hasExisting;
+  updateModelOverrideCapabilityHints(modelName);
+}
+
+function collectModelOverrideFormValue() {
+  const modelName = String($('#modelOverrideModel')?.value || '').trim();
+  if (!modelName) throw new Error('请先选择或填写模型名称');
+  if (modelName.length > 200) throw new Error('模型名称不能超过 200 个字符');
+  const override = {};
+  const parseIntField = (selector, label) => {
+    const raw = String($(selector)?.value || '').trim();
+    if (!raw) return;
+    const num = Number(raw);
+    if (!Number.isInteger(num) || num < 1 || num > 1048576) {
+      throw new Error(`${label}必须是 1 到 1048576 之间的整数`);
+    }
+    return num;
+  };
+  const cw = parseIntField('#modelOverrideContextWindow', '上下文窗口 Tokens');
+  if (cw !== undefined) override.context_window = cw;
+  const mot = parseIntField('#modelOverrideMaxOutputTokens', '最大输出 Tokens');
+  if (mot !== undefined) override.max_output_tokens = mot;
+  const rawTemp = String($('#modelOverrideTemperature')?.value || '').trim();
+  if (rawTemp) {
+    const temp = Number(rawTemp);
+    if (!Number.isFinite(temp) || temp < 0 || temp > 2) {
+      throw new Error('温度必须是 0 到 2 之间的数字');
+    }
+    override.temperature = temp;
+  }
+  const effort = String($('#modelOverrideReasoningEffort')?.value || 'inherit');
+  if (effort !== 'inherit') override.reasoning_effort = effort;
+  const img = String($('#modelOverrideSupportsImages')?.value || 'inherit');
+  if (img === 'true') override.supports_images = true;
+  else if (img === 'false') override.supports_images = false;
+  else if (img === 'auto') override.supports_images = 'auto';
+  return { modelName, override };
+}
+
+function populateModelOverrideDatalist(candidates = []) {
+  const list = $('#modelOverrideModelList');
+  if (!list) return;
+  const unique = [...new Set(candidates.map((item) => String(item || '').trim()).filter(Boolean))];
+  list.replaceChildren(...unique.map((id) => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    return opt;
+  }));
+}
+
+function openModelOverrideDialog({
+  mode = 'draft',
+  provider = null,
+  modelName = '',
+  candidates = [],
+  existingOverrides = {},
+  lockModelName = false,
+} = {}) {
+  bindModelOverrideDialog();
+  const dialog = $('#modelOverrideDialog');
+  if (!dialog) return;
+  const cleanModel = String(modelName || '').trim();
+  modelOverrideSession = {
+    mode,
+    provider,
+    originalModelName: cleanModel,
+    existingOverrides: cloneModelOverrides(existingOverrides),
+    lockModelName,
+  };
+  populateModelOverrideDatalist([...candidates, ...Object.keys(existingOverrides || {}), cleanModel]);
+  const modelInput = $('#modelOverrideModel');
+  modelInput.value = cleanModel;
+  modelInput.readOnly = Boolean(lockModelName);
+  const providerName = String(provider?.name || $('#providerName')?.value || '当前供应商').trim();
+  const hint = $('#modelOverrideProviderHint');
+  if (hint) {
+    hint.textContent = lockModelName
+      ? `所属供应商：${providerName}`
+      : `所属供应商：${providerName}；可从下拉候选里选，也可手填任意模型 ID。`;
+  }
+  const existing = cleanModel ? modelOverrideSession.existingOverrides[cleanModel] : null;
+  fillModelOverrideFields(existing || {}, cleanModel);
+  if (!dialog.open) dialog.showModal();
+  if (!cleanModel && !lockModelName) modelInput.focus();
+  else $('#modelOverrideContextWindow')?.focus();
+}
+
+export function openProviderModelOverrideEditor(modelName = '') {
+  const select = $('#providerModel');
+  const catalogIds = select ? modelSelectCatalog(select).map((item) => item.id) : [];
+  const currentSelected = select?.value === '__custom__'
+    ? String($('#providerModelCustom')?.value || '').trim()
+    : String(select?.value || '').trim();
+  const initialModel = String(modelName || '').trim() || (!providerModelOverridesDraft[currentSelected] ? currentSelected : '');
+  openModelOverrideDialog({
+    mode: 'draft',
+    provider: { name: $('#providerName')?.value?.trim() || '当前供应商' },
+    modelName: initialModel,
+    candidates: [currentSelected, ...catalogIds],
+    existingOverrides: providerModelOverridesDraft,
+    lockModelName: Boolean(modelName),
+  });
+}
+
+export function openComposerModelOverrideEditor(modelKey, modelName) {
+  const provider = providerProfiles().find((item) => item.model_key === modelKey);
+  if (!provider) {
+    toast('未找到对应的供应商配置');
+    return;
+  }
+  const select = $('#composerModelSelect');
+  const candidates = select
+    ? [...select.options].map((opt) => opt.value).filter((v) => v && v !== '__refresh_composer_models__')
+    : [];
+  openModelOverrideDialog({
+    mode: 'instant',
+    provider,
+    modelName,
+    candidates,
+    existingOverrides: provider.model_overrides || {},
+    lockModelName: true,
+  });
+}
+
+async function commitModelOverride(resetToDefault = false) {
+  const session = modelOverrideSession;
+  const dialog = $('#modelOverrideDialog');
+  if (!session) return;
+  const errorBox = $('#modelOverrideError');
+  if (errorBox) errorBox.textContent = '';
+  let modelName = '';
+  let override = {};
+  try {
+    if (resetToDefault) {
+      modelName = String($('#modelOverrideModel')?.value || session.originalModelName || '').trim();
+      if (!modelName) throw new Error('模型名称不能为空');
+      override = {};
+    } else {
+      ({ modelName, override } = collectModelOverrideFormValue());
+    }
+  } catch (error) {
+    if (errorBox) errorBox.textContent = error.message;
+    return;
+  }
+  const hasAny = Object.keys(override).length > 0;
+  if (session.mode === 'draft') {
+    if (session.originalModelName && session.originalModelName !== modelName) {
+      delete providerModelOverridesDraft[session.originalModelName];
+    }
+    if (hasAny) providerModelOverridesDraft[modelName] = override;
+    else delete providerModelOverridesDraft[modelName];
+    renderProviderModelOverrides();
+    if (dialog?.open) dialog.close('confirm');
+    return;
+  }
+  // instant 模式（对话输入区模型下拉直接保存）
+  const saveBtn = $('#modelOverrideSave');
+  const resetBtn = $('#modelOverrideReset');
+  const prevText = saveBtn?.textContent || '保存参数';
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '保存中…'; }
+  if (resetBtn) resetBtn.disabled = true;
+  try {
+    const result = await api('/api/providers/model-override', {
+      method: 'POST',
+      body: {
+        id: session.provider.id,
+        kind: session.provider.kind || 'online',
+        model_name: modelName,
+        override: hasAny ? override : null,
+      },
+    });
+    const nextMap = cloneModelOverrides(result.model_overrides);
+    ['providers', 'model_profiles'].forEach((listKey) => {
+      const target = (state.bootstrap?.[listKey] || []).find(
+        (item) => item.id === session.provider.id && (item.kind || 'online') === (session.provider.kind || 'online'),
+      );
+      if (target) target.model_overrides = cloneModelOverrides(nextMap);
+    });
+    if ($('#providerDialog')?.open && $('#providerId')?.value === session.provider.id) {
+      providerModelOverridesDraft = cloneModelOverrides(nextMap);
+      renderProviderModelOverrides();
+    }
+    syncComposerModelPicker();
+    document.dispatchEvent(new CustomEvent('cat-chat:model-overrides-updated'));
+    if (dialog?.open) dialog.close('confirm');
+    toast(hasAny ? `已保存 ${modelName} 的独立参数` : `已恢复 ${modelName} 为供应商默认参数`);
+  } catch (error) {
+    if (errorBox) errorBox.textContent = error.message;
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = prevText; }
+    if (resetBtn) resetBtn.disabled = false;
+  }
+}
+
+export function bindModelOverrideDialog() {
+  if (modelOverrideBound) return;
+  const dialog = $('#modelOverrideDialog');
+  if (!dialog) return;
+  modelOverrideBound = true;
+  $('#modelOverrideClose')?.addEventListener('click', () => dialog.close('cancel'));
+  $('#modelOverrideCancel')?.addEventListener('click', () => dialog.close('cancel'));
+  $('#modelOverrideForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void commitModelOverride(false);
+  });
+  $('#modelOverrideReset')?.addEventListener('click', () => {
+    void commitModelOverride(true);
+  });
+  $('#modelOverrideModel')?.addEventListener('input', () => {
+    if (!modelOverrideSession) return;
+    const name = String($('#modelOverrideModel')?.value || '').trim();
+    const existing = modelOverrideSession.existingOverrides[name];
+    if (existing) fillModelOverrideFields(existing, name);
+    else updateModelOverrideCapabilityHints(name);
+  });
+  $('#modelOverrideSupportsImages')?.addEventListener('change', () => {
+    updateModelOverrideCapabilityHints($('#modelOverrideModel')?.value || '');
+  });
+  $('#applyModelOverrideContextCap')?.addEventListener('click', () => {
+    const val = $('#applyModelOverrideContextCap')?.dataset?.capValue || '';
+    if (val) $('#modelOverrideContextWindow').value = val;
+  });
+  $('#applyModelOverrideMaxOutCap')?.addEventListener('click', () => {
+    const val = $('#applyModelOverrideMaxOutCap')?.dataset?.capValue || '';
+    if (val) $('#modelOverrideMaxOutputTokens').value = val;
+  });
+  $('#providerModelOverrideList')?.addEventListener('click', (event) => {
+    const editBtn = event.target.closest('[data-override-edit]');
+    if (editBtn) {
+      openProviderModelOverrideEditor(editBtn.dataset.overrideEdit || '');
+      return;
+    }
+    const delBtn = event.target.closest('[data-override-delete]');
+    if (delBtn) {
+      const target = delBtn.dataset.overrideDelete || '';
+      if (target && target in providerModelOverridesDraft) {
+        delete providerModelOverridesDraft[target];
+        renderProviderModelOverrides();
+      }
+    }
+  });
+  document.addEventListener('cat-chat:open-model-override', (event) => {
+    const detail = event.detail || {};
+    if (detail.modelKey && detail.modelName) {
+      openComposerModelOverrideEditor(detail.modelKey, detail.modelName);
+    }
+  });
+  dialog.addEventListener('close', () => {
+    dialog.returnValue = '';
+    modelOverrideSession = null;
+  });
+  if (!('closedBy' in HTMLDialogElement.prototype)) {
+    const outside = (event) => {
+      const rect = dialog.getBoundingClientRect();
+      return event.clientX < rect.left || event.clientX > rect.right
+        || event.clientY < rect.top || event.clientY > rect.bottom;
+    };
+    let pressedOutside = false;
+    dialog.addEventListener('pointerdown', (event) => { pressedOutside = outside(event); });
+    dialog.addEventListener('pointerup', (event) => {
+      if (pressedOutside && outside(event) && dialog.open) dialog.close('backdrop');
+      pressedOutside = false;
+    });
+  }
+}
+
 

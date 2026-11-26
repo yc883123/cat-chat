@@ -625,15 +625,21 @@ class ComfyUIRunner:
     def _save_outputs(self, task_id: str, index: int, base: str,
                       items: list[dict[str, str]]) -> list[str]:
         """把一段的产物字节写入受管目录，返回相对文件名列表。"""
-        target_dir = self.store.task_output_dir(task_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        saved: list[str] = []
+        pending: list[tuple[str, bytes]] = []
         for position, item in enumerate(items[:MAX_FILES_PER_SHOT]):
             data = client.download_output(base, item)
             if not data:
                 raise ValueError(f"产物 {item.get('filename')} 内容为空")
             original = item["filename"].replace("\\", "/").split("/")[-1] or "output.bin"
             name = f"{index + 1:03d}_{position:02d}_{original}"
+            pending.append((name, data))
+        if not pending:
+            return []
+        target_dir = self.store.prepare_task_output_dir(
+            task_id, [name for name, _data in pending]
+        )
+        saved: list[str] = []
+        for name, data in pending:
             path = target_dir / name
             tmp = target_dir / f".{name}.tmp"
             tmp.write_bytes(data)

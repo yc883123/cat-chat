@@ -1160,6 +1160,29 @@ export function selectedProvider() {
   return profiles.find((p) => p.model_key === value) || null;
 }
 
+export function modelOverrideFor(provider, modelName = '') {
+  const overrides = provider?.model_overrides;
+  const name = String(modelName || provider?.model || '').trim();
+  if (!overrides || typeof overrides !== 'object' || !name) return null;
+  const entry = overrides[name];
+  return entry && typeof entry === 'object' && Object.keys(entry).length ? entry : null;
+}
+
+export function effectiveModelContextWindow(provider, modelName = '') {
+  const ov = modelOverrideFor(provider, modelName);
+  const ovCw = Number(ov?.context_window || 0);
+  if (Number.isFinite(ovCw) && ovCw > 0) return ovCw;
+  return Number(provider?.context_window || provider?.context_size || 0);
+}
+
+export function effectiveModelReasoningEffort(provider, modelName = '') {
+  const ov = modelOverrideFor(provider, modelName);
+  const ovEff = String(ov?.reasoning_effort || '').trim().toLowerCase();
+  if (['auto', 'off', 'low', 'medium', 'high'].includes(ovEff)) return ovEff;
+  const base = String(provider?.reasoning_effort || 'auto').trim().toLowerCase();
+  return ['auto', 'off', 'low', 'medium', 'high'].includes(base) ? base : 'auto';
+}
+
 // 「重新检测模型」伪选项：它只是下拉框里的一个触发器，**绝不落库、绝不发给模型**。
 const COMPOSER_MODEL_REFRESH = '__refresh_composer_models__';
 // 下拉框最后一次有效选择（'' = 未选择）：刷新前记下，强制重拉目录后还原。
@@ -1462,8 +1485,11 @@ export function filterComposerModelPicker(query = '') {
   composerPickerState.items = items;
   // 400+ 条一次性构建：与原生 select 本就要渲染同样数量的 option 同量级，
   // 用 fragment 只插一次，不做虚拟滚动（过滤是单次线性扫描，无需防抖）。
+  const provider = selectedProvider();
   const fragment = document.createDocumentFragment();
   items.forEach((item, index) => {
+    const row = document.createElement('div');
+    row.className = 'composer-model-row';
     const option = document.createElement('button');
     option.type = 'button';
     option.className = 'composer-model-option';
@@ -1472,7 +1498,19 @@ export function filterComposerModelPicker(query = '') {
     option.dataset.modelIndex = String(index);
     option.title = item.id;
     option.textContent = item.label;
-    fragment.append(option);
+    row.append(option);
+    if (provider) {
+      const hasOverride = Boolean(modelOverrideFor(provider, item.id));
+      const cfgBtn = document.createElement('button');
+      cfgBtn.type = 'button';
+      cfgBtn.className = `composer-model-config-btn${hasOverride ? ' has-override' : ''}`;
+      cfgBtn.dataset.modelConfig = item.id;
+      cfgBtn.title = hasOverride ? `${item.id}：已设置独立参数（点击编辑）` : `为 ${item.id} 单独设置参数`;
+      cfgBtn.setAttribute('aria-label', cfgBtn.title);
+      cfgBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8M4 12h16"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>';
+      row.append(cfgBtn);
+    }
+    fragment.append(row);
   });
   list.replaceChildren(fragment);
   list.hidden = items.length === 0;
@@ -1557,6 +1595,7 @@ export function openComposerModelPicker() {
   const trigger = $('#composerModelTrigger');
   const select = $('#composerModelSelect');
   if (!panel || !trigger || !select || select.disabled) return;
+  document.dispatchEvent(new CustomEvent('naiba:close-chat-status'));
   // 浮层挂到 body 并 fixed 定位：避免被 .composer-wrap 的 overflow 裁剪（教训 §九.27）；
   // 编辑历史消息时整个 composer 会被搬进 .message-row，也只有挂 body 才躲得开。
   if (panel.parentElement !== document.body) document.body.appendChild(panel);
@@ -1614,6 +1653,20 @@ export function handleComposerModelPickerKey(event) {
 }
 
 export function handleComposerModelPickerClick(event) {
+  const configButton = event.target.closest?.('[data-model-config]');
+  if (configButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const modelName = String(configButton.dataset.modelConfig || '').trim();
+    const provider = selectedProvider();
+    closeComposerModelPicker();
+    if (provider && modelName) {
+      document.dispatchEvent(new CustomEvent('cat-chat:open-model-override', {
+        detail: { modelKey: provider.model_key || '', modelName },
+      }));
+    }
+    return;
+  }
   // 「↻ 重新检测模型」走原有伪选项链路（saveComposerModelSelection 里早退到强制重拉）。
   if (event.target.closest?.('#composerModelRefresh')) {
     commitComposerModelPicker(COMPOSER_MODEL_REFRESH, { focusInput: false });

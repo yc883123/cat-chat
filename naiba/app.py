@@ -2013,6 +2013,21 @@ class NaibaChatApp:
             return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
         return result, HTTPStatus.OK
 
+    def api_update_provider_model_override(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """只改一张供应商卡片下单个模型的独立参数（上下文、最大输出、温度、思考等级、视觉能力）。"""
+        try:
+            result = self.config.set_provider_model_override(
+                str(body.get("id") or ""),
+                str(body.get("kind") or "online"),
+                str(body.get("model_name") or ""),
+                body.get("override"),
+            )
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, TypeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+        return result, HTTPStatus.OK
+
     def api_upsert_workspace(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         name = str(body.get("name") or "").strip()
         raw_dir = str(body.get("dir") or "").strip()

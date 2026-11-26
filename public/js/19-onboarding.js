@@ -10,7 +10,7 @@
 // ============================================================
 
 import { $, api, state, toast } from "./01-core.js";
-import { fillProviderPresetGuide, loadProviderPresets, markProviderPresetCards, providerPresetById, providerPresets, providerPresetMoreText, providerTestSummary, renderProviderPresetGrid, syncSavedProvider } from "./09-settings.js";
+import { fillProviderPresetGuide, loadProviderPresets, markProviderPresetCards, openModelPickerDialog, providerPresetById, providerPresets, providerPresetMoreText, providerTestSummary, renderProviderPresetGrid, syncModelSelectTrigger, syncSavedProvider } from "./09-settings.js";
 
 // 跳过状态记 localStorage：冻结版 WebView2 已是持久 profile（launcher.py 里 private_mode=False），
 // 侧栏宽度、外观偏好本来就存在这里，不需要为「看过一次引导」再动服务端配置。
@@ -44,6 +44,19 @@ function setOnboardingModels(models = [], selected = '') {
   select.add(new Option('手动填写模型名称…', '__custom__'));
   select.value = selected === '__custom__' || ids.includes(selected) ? selected : ids[0] || '';
   $('#onboardingModelCustomField').hidden = select.value !== '__custom__';
+  syncModelSelectTrigger('onboardingModel', 'onboardingModelTrigger');
+}
+
+export function openOnboardingModelPicker() {
+  openModelPickerDialog({
+    selectId: 'onboardingModel',
+    triggerId: 'onboardingModelTrigger',
+    customInputId: 'onboardingModelCustom',
+    title: '选择要使用的模型',
+    subtitle: '以下是检测到的可用模型，勾选要使用的模型。',
+    confirmLabel: '确认选择',
+    onRefresh: () => { void loadOnboardingModels(); },
+  });
 }
 
 export function changeOnboardingModel() {
@@ -53,6 +66,7 @@ export function changeOnboardingModel() {
   $('#onboardingError').textContent = '';
   const custom = $('#onboardingModel').value === '__custom__';
   $('#onboardingModelCustomField').hidden = !custom;
+  syncModelSelectTrigger('onboardingModel', 'onboardingModelTrigger');
   if (custom) $('#onboardingModelCustom').focus();
 }
 
@@ -80,6 +94,7 @@ function setOnboardingStep(step) {
 export function resetOnboarding() {
   ++onboardingGeneration;
   invalidateOnboardingChecks();
+  if ($('#modelPickerDialog')?.open) $('#modelPickerDialog').close('reset');
   selectedPresetId = '';
   renderProviderPresetGrid('onboardingPresetGrid');
   $('#onboardingPresetMore').textContent = providerPresetMoreText(ONBOARDING_VISIBLE_PRESETS);

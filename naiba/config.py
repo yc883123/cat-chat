@@ -3525,6 +3525,118 @@ class ConfigStore:
                 "pricing": provider.get("pricing") or {},
             }
 
+    @classmethod
+    def _normalize_single_model_override(cls, raw: Any) -> dict[str, Any]:
+        """校验并规整单个模型的独立参数覆盖（全空/全跟随返回空字典 = 清除覆盖）。"""
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError("单模型参数必须是对象")
+        cleaned: dict[str, Any] = {}
+        raw_cw = raw.get("context_window")
+        if raw_cw in (None, ""):
+            raw_cw = raw.get("context_size")
+        if raw_cw not in (None, ""):
+            cleaned["context_window"] = cls._positive_context_size(raw_cw, "context_window")
+        raw_mot = raw.get("max_output_tokens")
+        if raw_mot not in (None, ""):
+            cleaned["max_output_tokens"] = cls._positive_context_size(raw_mot, "max_output_tokens")
+        raw_temp = raw.get("temperature")
+        if raw_temp not in (None, ""):
+            if isinstance(raw_temp, bool):
+                raise ValueError("temperature 必须是 0 到 2 之间的数字")
+            try:
+                temp = float(raw_temp)
+            except (TypeError, ValueError):
+                raise ValueError("temperature 必须是 0 到 2 之间的数字") from None
+            if temp < 0 or temp > 2:
+                raise ValueError("temperature 必须是 0 到 2 之间的数字")
+            cleaned["temperature"] = temp
+        raw_effort = raw.get("reasoning_effort")
+        if raw_effort not in (None, ""):
+            effort = str(raw_effort).strip().lower()
+            if effort not in {"inherit", ""}:
+                if effort not in VALID_REASONING_EFFORTS:
+                    raise ValueError("思维强度必须是 inherit / auto / off / low / medium / high 之一")
+                cleaned["reasoning_effort"] = effort
+        if "supports_images" in raw:
+            raw_img = raw.get("supports_images")
+            if raw_img in (None, "", "inherit"):
+                pass
+            elif isinstance(raw_img, bool):
+                cleaned["supports_images"] = raw_img
+            elif isinstance(raw_img, str) and raw_img.strip().lower() == "auto":
+                cleaned["supports_images"] = "auto"
+            else:
+                raise ValueError("supports_images 必须是布尔值、auto 或 null")
+        return cleaned
+
+    @classmethod
+    def _normalize_model_overrides(cls, raw: Any) -> dict[str, dict[str, Any]]:
+        """校验并规整供应商下全部单模型独立参数映射（空条目自动裁剪）。"""
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError("model_overrides 必须是模型名到参数对象的映射")
+        if len(raw) > 500:
+            raise ValueError("单供应商下最多配置 500 个独立模型参数")
+        result: dict[str, dict[str, Any]] = {}
+        for raw_name, raw_item in raw.items():
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            if len(name) > 200:
+                raise ValueError("模型名称不能超过 200 个字符")
+            entry = cls._normalize_single_model_override(raw_item)
+            if entry:
+                result[name] = entry
+        return result
+
+    def set_provider_model_override(
+        self,
+        provider_id: str,
+        kind: str,
+        model_name: str,
+        override: Any,
+    ) -> dict[str, Any]:
+        """只改一张供应商卡片下单个模型的独立参数，不动连接信息与 API Key。"""
+        pid = str(provider_id or "").strip()
+        if not pid:
+            raise ValueError("id 不能为空")
+        normalized_kind = str(kind or "online").strip().lower()
+        if normalized_kind not in VALID_MODEL_KINDS:
+            raise ValueError("模型类型必须是 online 或 local")
+        clean_model = str(model_name or "").strip()
+        if not clean_model or len(clean_model) > 200:
+            raise ValueError("模型名称不能为空且不能超过 200 个字符")
+        parsed = self._normalize_single_model_override(override)
+        with self.lock:
+            provider = next(
+                (item for item in self.data.get("providers", []) if item.get("id") == pid),
+                None,
+            )
+            if provider is None or str(provider.get("kind") or "online") != normalized_kind:
+                raise LookupError("该模型卡片不存在")
+            existing_map = dict(provider.get("model_overrides") or {})
+            if parsed:
+                existing_map[clean_model] = parsed
+            else:
+                existing_map.pop(clean_model, None)
+            if existing_map:
+                provider["model_overrides"] = existing_map
+            else:
+                provider.pop("model_overrides", None)
+            self.save()
+            snapshot = {k: dict(v) for k, v in (provider.get("model_overrides") or {}).items()}
+            return {
+                "id": pid,
+                "kind": normalized_kind,
+                "model_key": f"{normalized_kind}:{pid}",
+                "model_name": clean_model,
+                "override": dict(parsed),
+                "model_overrides": snapshot,
+            }
+
     def delete_provider(self, provider_id: str) -> bool:
         """兼容别名：按 id 删除（不区分 online/local）。"""
         with self.lock:
@@ -3631,6 +3743,16 @@ class ConfigStore:
                 except ValueError:
                     pass
             provider.pop("context_size", None)
+            raw_overrides = provider.get("model_overrides")
+            if raw_overrides is not None:
+                try:
+                    cleaned_overrides = self._normalize_model_overrides(raw_overrides)
+                except ValueError:
+                    cleaned_overrides = {}
+                if cleaned_overrides:
+                    provider["model_overrides"] = cleaned_overrides
+                else:
+                    provider.pop("model_overrides", None)
         # 计算 default_model_key：旧 provider_id 指向的条目决定前缀。
         default_key = str(self.data.get("default_model_key") or "").strip()
         if not default_key:
@@ -3705,6 +3827,10 @@ class ConfigStore:
                 entry["supports_images"] = _infer_supports_images(provider)
                 entry["context_window"] = _infer_context_window(provider)
                 entry["context_window_source"] = _context_window_source(provider)
+                entry["model_overrides"] = {
+                    k: dict(v) for k, v in (provider.get("model_overrides") or {}).items()
+                    if isinstance(v, dict)
+                }
                 if provider.get("context_window"):
                     entry["context_size"] = provider.get("context_window")
                 result.append(entry)
@@ -3871,6 +3997,13 @@ class ConfigStore:
                     payload["pricing"] = pricing
                 else:
                     clear_pricing = True
+            clear_model_overrides = False
+            if "model_overrides" in values:
+                overrides = self._normalize_model_overrides(values.get("model_overrides"))
+                if overrides:
+                    payload["model_overrides"] = overrides
+                else:
+                    clear_model_overrides = True
             if kind == "local":
                 payload["local_backend"] = local_backend
             else:
@@ -3890,6 +4023,8 @@ class ConfigStore:
                     existing.pop("supports_images", None)
                 if clear_pricing:
                     existing.pop("pricing", None)
+                if clear_model_overrides:
+                    existing.pop("model_overrides", None)
                 existing.update(payload)
                 stored = existing
             else:
@@ -3935,6 +4070,10 @@ class ConfigStore:
             "supports_images": _infer_supports_images(stored),
             "context_window": _infer_context_window(stored),
             "context_window_source": _context_window_source(stored),
+            "model_overrides": {
+                k: dict(v) for k, v in (stored.get("model_overrides") or {}).items()
+                if isinstance(v, dict)
+            },
         }
         if stored.get("context_window"):
             result["context_size"] = stored["context_window"]
@@ -3998,6 +4137,10 @@ class ConfigStore:
                 "supports_images": _infer_supports_images(provider),
                 "context_window": _infer_context_window(provider),
                 "context_window_source": _context_window_source(provider),
+                "model_overrides": {
+                    k: dict(v) for k, v in (provider.get("model_overrides") or {}).items()
+                    if isinstance(v, dict)
+                },
             }
             if provider.get("context_window"):
                 result["context_size"] = provider.get("context_window")
@@ -4506,6 +4649,72 @@ class ConfigStore:
             return True
 
 
+
+
+VALID_REASONING_EFFORTS = {"auto", "off", "low", "medium", "high"}
+
+
+def apply_model_override(profile: dict[str, Any], model_name: str = "") -> dict[str, Any]:
+    """把供应商下单个模型的独立参数覆盖合并到 profile 副本上。
+
+    只在 ``profile['model_overrides'][model_name]`` 里显式给出的字段才覆盖供应商默认值；
+    未配置的字段一律继承供应商默认设置。
+    """
+    resolved = dict(profile)
+    clean_name = str(model_name or resolved.get("model") or "").strip()
+    if clean_name:
+        resolved["model"] = clean_name
+    overrides = resolved.get("model_overrides")
+    entry: dict[str, Any] = {}
+    if isinstance(overrides, dict) and clean_name:
+        raw_entry = overrides.get(clean_name)
+        if isinstance(raw_entry, dict):
+            entry = raw_entry
+    if entry:
+        raw_cw = entry.get("context_window")
+        if raw_cw not in (None, ""):
+            try:
+                cw_int = int(raw_cw)
+            except (TypeError, ValueError):
+                cw_int = 0
+            if cw_int > 0:
+                resolved["context_window"] = cw_int
+                resolved["context_size"] = cw_int
+                kind = str(resolved.get("kind") or "online").strip().lower()
+                resolved["context_window_source"] = "local_config" if kind == "local" else "provider_config"
+        raw_mot = entry.get("max_output_tokens")
+        if raw_mot not in (None, ""):
+            try:
+                mot_int = int(raw_mot)
+            except (TypeError, ValueError):
+                mot_int = 0
+            if mot_int > 0:
+                resolved["max_output_tokens"] = mot_int
+        if "temperature" in entry and entry.get("temperature") not in (None, ""):
+            raw_temp = entry.get("temperature")
+            if not isinstance(raw_temp, bool):
+                try:
+                    resolved["temperature"] = float(raw_temp)
+                except (TypeError, ValueError):
+                    pass
+        effort = str(entry.get("reasoning_effort") or "").strip().lower()
+        if effort in VALID_REASONING_EFFORTS:
+            resolved["reasoning_effort"] = effort
+        if "supports_images" in entry:
+            raw_img = entry.get("supports_images")
+            if isinstance(raw_img, bool):
+                resolved["supports_images_explicit"] = raw_img
+                resolved["supports_images"] = raw_img
+            elif str(raw_img or "").strip().lower() == "auto":
+                resolved["supports_images_explicit"] = None
+                resolved["supports_images"] = _infer_supports_images({**resolved, "supports_images": None})
+    if "supports_images" not in entry:
+        explicit_images = resolved.get("supports_images_explicit")
+        if isinstance(explicit_images, bool):
+            resolved["supports_images"] = explicit_images
+        elif "supports_images_explicit" in resolved:
+            resolved["supports_images"] = _infer_supports_images({**resolved, "supports_images": None})
+    return resolved
 
 
 def _infer_supports_images(provider: dict[str, Any]) -> bool:

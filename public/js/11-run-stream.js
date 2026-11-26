@@ -302,7 +302,7 @@ export function createStreamingReasoningBlock(answer) {
   block.open = true;
   block.dataset.streaming = 'true';
   block.dataset.active = 'true';
-  block.innerHTML = '<summary>Thinking</summary><div class="reasoning-content"></div>';
+  block.innerHTML = '<summary><span class="reasoning-tag">思考中</span></summary><div class="reasoning-content"></div>';
   answer.before(block);
   return block;
 }
@@ -316,8 +316,13 @@ export function collapseToolReasoningBlock() {
   block.classList.add('tool-reasoning');
   block.dataset.tool = 'true';
   const summary = block.querySelector('summary');
-  const preview = (content?.dataset.raw || '').trim().replace(/\s+/g, ' ').slice(0, 80);
-  if (summary) summary.textContent = preview ? `工具思考：${preview}…` : '工具思考';
+  const clean = (content?.dataset.raw || '').trim();
+  const preview = clean.replace(/\s+/g, ' ').slice(0, 96);
+  if (summary) {
+    summary.innerHTML = preview
+      ? `<span class="reasoning-tag">思考</span><span class="reasoning-preview">${escapeHtml(preview)}${clean.length > preview.length ? '…' : ''}</span>`
+      : '<span class="reasoning-tag">思考</span>';
+  }
   state.streamingReasoningBlock = null;
 }
 

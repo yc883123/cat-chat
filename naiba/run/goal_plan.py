@@ -67,7 +67,7 @@ def _source_specs(sources: Any) -> list[dict[str, str]]:
     return result
 
 
-def _source_path(value: str, root: Path, attachments: Any) -> Path:
+def _source_path(value: str, root: Path, attachments: Any, *, allow_outside: bool = False, data_dir: Any = None) -> Path:
     if not isinstance(attachments, (list, tuple)):
         raise ValueError("attachments must be a list")
     path = Path(value)
@@ -90,7 +90,10 @@ def _source_path(value: str, root: Path, attachments: Any) -> Path:
                 # Authorization is exact, not a parent directory grant.
                 permitted.add(resolved_path_key(raw))
         if resolved_path_key(path) not in permitted:
-            raise ValueError("Outside plan source must be an explicit current attachment")
+            if not allow_outside:
+                raise ValueError("Outside plan source must be an explicit current attachment")
+            if data_dir is not None and path_within(path, Path(data_dir).resolve()):
+                raise ValueError("Outside plan source cannot target application data directory")
     return path
 
 
@@ -185,11 +188,11 @@ def _parse(text: str, origin: str) -> dict[str, list[dict]]:
     return {"criteria": normalize_criteria(criteria), "stages": stages, "manual_items": manual}
 
 
-def _capture(sources: Any, root: Path, attachments: Any) -> list[dict]:
+def _capture(sources: Any, root: Path, attachments: Any, *, allow_outside: bool = False, data_dir: Any = None) -> list[dict]:
     result = []
     seen = set()
     for spec in _source_specs(sources):
-        path = _source_path(spec["path"], root, attachments)
+        path = _source_path(spec["path"], root, attachments, allow_outside=allow_outside, data_dir=data_dir)
         key = resolved_path_key(path)
         if key in seen:
             raise ValueError("Duplicate explicit plan source")
@@ -208,7 +211,8 @@ def _capture(sources: Any, root: Path, attachments: Any) -> list[dict]:
     return result
 
 
-def preview(message: str, sources: Any, workspace: Any, attachments: Any = ()) -> dict[str, Any]:
+def preview(message: str, sources: Any, workspace: Any, attachments: Any = (), *,
+            allow_outside: bool = False, data_dir: Any = None) -> dict[str, Any]:
     """Freeze explicit source bytes and extract a conservative completion policy.
 
     No automatic source discovery is performed, even if message mentions a
@@ -220,7 +224,7 @@ def preview(message: str, sources: Any, workspace: Any, attachments: Any = ()) -
     if len(message.encode("utf-8")) > MAX_FILE_BYTES:
         raise ValueError("GOAL message exceeds 2 MB")
     root = _workspace(workspace)
-    source_rows = _capture(sources, root, attachments)
+    source_rows = _capture(sources, root, attachments, allow_outside=allow_outside, data_dir=data_dir)
     parsed = _parse(message, "message")
     for source in source_rows:
         for key in ("criteria", "stages", "manual_items"):
@@ -253,7 +257,8 @@ def _frozen_sources(plan_or_sources: Any) -> list[dict]:
     return list(rows)
 
 
-def current_sources(plan_or_sources: Any, workspace: Any, attachments: Any = ()) -> list[dict]:
+def current_sources(plan_or_sources: Any, workspace: Any, attachments: Any = (), *,
+                    allow_outside: bool = False, data_dir: Any = None) -> list[dict]:
     """Read and parse only original source paths; errors are explicit ValueError/OSError.
 
     A full preview's fingerprint is checked if supplied; persisted
@@ -267,14 +272,17 @@ def current_sources(plan_or_sources: Any, workspace: Any, attachments: Any = ())
     if isinstance(plan_or_sources, dict) and "workspace" in plan_or_sources:
         if resolved_path_key(plan_or_sources["workspace"]) != resolved_path_key(root):
             raise ValueError("Plan workspace changed")
-    return _capture([{"path": row.get("path"), "name": row.get("name")} for row in rows], root, attachments)
+    return _capture([{"path": row.get("path"), "name": row.get("name")} for row in rows],
+                    root, attachments, allow_outside=allow_outside, data_dir=data_dir)
 
 
-def verify_sources_current(plan_or_sources: Any, workspace: Any, attachments: Any = ()) -> bool:
+def verify_sources_current(plan_or_sources: Any, workspace: Any, attachments: Any = (), *,
+                           allow_outside: bool = False, data_dir: Any = None) -> bool:
     """Return False on changed bytes, vanished/unsafe sources or invalid snapshot."""
     try:
         frozen = _frozen_sources(plan_or_sources)
-        current = current_sources(plan_or_sources, workspace, attachments)
+        current = current_sources(plan_or_sources, workspace, attachments,
+                                  allow_outside=allow_outside, data_dir=data_dir)
         return all(old["sha256"] == new["sha256"] and resolved_path_key(old["path"]) == resolved_path_key(new["path"])
                    for old, new in zip(frozen, current)) and len(frozen) == len(current)
     except (OSError, ValueError, TypeError, RuntimeError):

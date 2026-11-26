@@ -145,9 +145,14 @@ async function checkViewport(browser, vp) {
     assert.equal(await page.locator('[data-comfyui-media-tile="1|image"]').getAttribute('title'), `${workflow.params[0].label}\n未选即跳过`);
     await checkNoScriptError();
 
-    // 首次直接点击快捷入口，不能只有切档、没有初始化填单。
-    await page.locator('#comfyuiRunSection summary[aria-label="更多生成操作"]').click();
-    await page.locator('#comfyuiOpenBatch').click();
+    // 页眉「⋯」菜单内含总产物目录入口；单次页脚不再重复放「批量生成」。
+    assert.equal(await page.locator('#comfyuiOpenBatch').count(), 0);
+    await page.locator('#comfyuiMoreTrigger').click();
+    assert.equal(await page.locator('#comfyuiOpenOutputs').isVisible(), true);
+    assert.equal((await page.locator('#comfyuiOpenOutputs').innerText()).trim(), '打开总产物文件夹');
+    await page.keyboard.press('Escape');
+    // 页签直达批量生成并初始化填单。
+    await paneButton('batch').click();
     await page.locator('#comfyuiBatchBody [data-batch-select="workflow"]').waitFor({ state: 'visible' });
     assert.equal(await paneButton('batch').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.locator('#comfyuiColumns').isVisible(), false);
@@ -265,6 +270,11 @@ async function checkViewport(browser, vp) {
     const mountedVideos = await page.locator('#comfyuiOutputGrid video').count();
     assert.ok(mountedVideos > 0 && mountedVideos <= outputTasks.length, '虚拟窗口只挂载当前结果范围内的有界媒体');
     await checkLazyVideos();
+    // 结果卡按钮按视口互斥：桌面仅显示「打开文件夹」、手机（<=760px）仅显示「下载」。
+    const firstCard = page.locator('#comfyuiOutputGrid figure.comfyui-output').first();
+    const isNarrow = vp.width <= 760;
+    assert.equal(await firstCard.locator('[data-comfyui-output-save]').isVisible(), isNarrow);
+    assert.equal(await firstCard.locator('[data-comfyui-output-open-folder]').isVisible(), !isNarrow);
     const lastVideo = page.locator('#comfyuiOutputGrid video').last();
     if (await lastVideo.getAttribute('preload') === 'none') {
       const outputKey = await lastVideo.evaluate(video => video.closest('[data-output-key]').dataset.outputKey);
@@ -352,14 +362,17 @@ async function checkViewport(browser, vp) {
     await page.locator('#comfyuiBatchBody .cbm-card .cbm-badge.done').waitFor({ state: 'visible', timeout: 5000 });
     assert.ok(batchDetailRequests > beforeReturnRequests, '返回运行批次必须立即重新读取服务端状态');
     await checkNoScriptError();
-    // 显式编辑才用历史快照替换填单，原有回填入口仍可使用。
+    // 显式编辑才用历史快照替换填单；显示来源横幅并支持「取消编辑」恢复此前草稿。
     await openHistory();
     await page.locator('#comfyuiBatchDetail [data-batch-action="edit-batch"]').click();
     await page.waitForFunction(() => document.querySelector('#studioPageComfyui').dataset.comfyuiPane === 'batch'
       && document.querySelector('#comfyuiBatchBody [data-batch-item="prompt"]')?.value === '历史批次里的提示词');
+    assert.equal(await page.locator('#comfyuiBatchBody [data-batch-history-banner]').isVisible(), true);
     assert.equal(await page.locator('#comfyuiBatchBody [data-batch-field="title"]').inputValue(), histories[0].title);
     assert.equal(await page.locator('#comfyuiBatchBody [data-batch-select="port-node"]').first().inputValue(), '1|image');
     assert.deepEqual(historyEditRequests, [histories[0].id], '只有显式编辑才读取回填快照');
+    await page.locator('#comfyuiBatchBody [data-batch-action="cancel-history-edit"]').click();
+    await page.waitForFunction(() => document.querySelector('#studioPageComfyui').dataset.comfyuiPane === 'tasks');
     await checkNoScriptError();
     console.log(`通过 ${vp.width}×${vp.height}：导航、历史结果与填单隔离及迟到回包、显式编辑、下游标签、提交及返回轮询、视频懒载与DOM保留`);
   } catch (error) {

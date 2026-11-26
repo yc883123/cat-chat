@@ -290,6 +290,32 @@
         <span class="chat-bg-surface chat-backdrop-layer"></span>
       </div>
 
+      <!-- 对话顶部状态胶囊栏（左：任务 + GOAL，右：子代理；三者皆无时 hidden 不占位） -->
+      <div class="chat-status-bar" id="chatStatusBar" hidden role="region" aria-label="对话状态">
+        <div class="chat-status-group chat-status-left">
+          <button class="chat-status-pill" id="todoStatusPill" type="button" hidden aria-expanded="false" aria-controls="chatStatusPopover"></button>
+          <button class="chat-status-pill" id="goalStatusPill" type="button" hidden aria-expanded="false" aria-controls="chatStatusPopover"></button>
+        </div>
+        <div class="chat-status-group chat-status-right">
+          <button class="chat-status-pill" id="subagentStatusPill" type="button" hidden aria-expanded="false" aria-controls="chatStatusPopover"></button>
+        </div>
+      </div>
+      <div class="chat-status-backdrop" id="chatStatusBackdrop" hidden aria-hidden="true"></div>
+      <div class="chat-status-popover" id="chatStatusPopover" hidden role="dialog" aria-label="状态详情">
+        <div class="chat-status-sheet-handle" aria-hidden="true"></div>
+        <div class="chat-status-popover-head">
+          <strong id="chatStatusPopoverTitle">状态详情</strong>
+          <button class="icon-button chat-status-popover-close" id="chatStatusPopoverClose" type="button" aria-label="关闭详情" title="关闭">×</button>
+        </div>
+        <div class="chat-status-popover-body">
+          <div class="chat-status-pane" id="todoStatusPane" hidden></div>
+          <div class="chat-status-pane" id="goalStatusPane" hidden>
+            <section class="goal-card" id="goalCard" aria-label="目标状态" hidden></section>
+          </div>
+          <div class="chat-status-pane" id="subagentStatusPane" hidden></div>
+        </div>
+      </div>
+
       <section class="messages" id="messages" aria-live="polite">
         <div class="empty-state" id="emptyState">
           <div class="empty-mark">
@@ -866,6 +892,7 @@
                 <summary id="comfyuiMoreTrigger" aria-label="造梦机更多操作" title="更多操作">⋯</summary>
                 <div class="wb-media-menu-panel">
                   <button class="control-button" type="button" data-resource-details data-resource-opener="comfyuiMoreTrigger">资源监控</button>
+                  <button class="control-button" id="comfyuiOpenOutputs" type="button" title="在运行 Cat Chat 的电脑上打开产物总目录">打开总产物文件夹</button>
                   <button class="control-button" type="button" data-studio-refresh title="重新读取当前功能页的数据">刷新工作台</button>
                   <button class="control-button tiny" id="comfyuiEditUrl" type="button">改地址</button>
                   <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
@@ -903,7 +930,6 @@
                     <summary aria-label="更多生成操作" title="更多生成操作">⋯</summary>
                     <div class="wb-media-menu-panel is-up">
                       <button class="control-button" id="comfyuiSaveCurrentAs" type="button">用当前配置另存工作流</button>
-                      <button class="control-button" id="comfyuiOpenBatch" type="button">批量生成</button>
                     </div>
                   </details>
                 </div>
@@ -922,7 +948,6 @@
                     <summary aria-label="结果管理" title="结果管理">⋯</summary>
                     <div class="wb-media-menu-panel">
                     <button class="control-button tiny" id="comfyuiFreeModels" type="button" title="让 ComfyUI 卸载已加载的模型，释放显存与内存；正在执行的任务不受影响，会在任务结束后卸载">释放模型</button>
-                    <button class="control-button tiny" id="comfyuiOpenOutputs" type="button" title="在运行 Cat Chat 的电脑上打开产物文件夹">产物</button>
                     <button class="control-button tiny" id="comfyuiClearTasks" type="button" title="勾选已结束的单次任务后删除">清除</button>
                     </div>
                   </details>
@@ -2349,7 +2374,6 @@
       </dialog>
 
       <section class="composer-wrap">
-        <section class="goal-card" id="goalCard" aria-label="目标状态" hidden></section>
         <div class="active-task-bar" id="activeTaskBar" hidden></div>
         <div class="pending-files" id="pendingFiles" hidden></div>
         <!-- 插话队列（运行中排队的新指令）：紧贴输入框上方，与「选择」面板同层但互斥——
@@ -3453,8 +3477,14 @@
         <section data-settings-panel="datamigration" hidden>
           <div class="settings-panel-head"><h3>数据与迁移</h3><p>数据库、上传文件与 Skills 目录的存放位置与健康状态。</p></div>
           <div class="settings-card">
-          <label class="field-wide data-dir-field">数据库与上传数据目录
-            <input id="dataDir" type="text" placeholder="例如 D:\\CatChatData">
+          <label class="field-wide data-dir-field" for="dataDir">数据库与上传数据目录
+            <span class="data-dir-input-row">
+              <input id="dataDir" type="text" placeholder="例如 D:\\CatChatData" spellcheck="false">
+              <button class="control-button data-dir-pick-btn" id="pickDataDir" type="button" data-local-picker title="在本机资源管理器里选择目标数据目录（只在跑服务的这台电脑上可用）">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.7l2 2.2h8.3A1.5 1.5 0 0 1 21 8.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5V6.5z"></path></svg>
+                <span>选择文件夹</span>
+              </button>
+            </span>
             <small class="hint">点击「应用并迁移」后，数据库、上传文件与 Skills 目录会一并复制到目标位置，并完成数据库结构迁移。迁移后需完全退出并重启 Cat Chat 生效。</small>
           </label>
           <div class="form-actions">
@@ -3760,14 +3790,20 @@
             <small class="hint">JSON 结构 {schema_version: 1, parameters: {...}}；上方填写的模型路径、后端、GPU、视觉驻留保存时优先。API Key 不保存在这里，启动时自动使用本供应商的 API Key。</small>
           </details>
         </div>
-        <label class="provider-field">模型名称
+        <div class="provider-field provider-model-field">
+          <label for="providerModelTrigger">模型名称</label>
           <span class="model-picker">
-            <select id="providerModel" required aria-label="模型名称"></select>
+            <select id="providerModel" hidden aria-hidden="true" tabindex="-1"></select>
+            <button class="model-select-trigger" id="providerModelTrigger" type="button" aria-haspopup="dialog" aria-controls="modelPickerDialog">
+              <span class="model-select-trigger-text is-placeholder">填写连接信息后自动检查</span>
+              <span class="model-select-trigger-meta"></span>
+              <svg class="model-select-trigger-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 6.2 8 10l3.8-3.8"></path></svg>
+            </button>
             <button class="control-button" id="loadProviderModels" type="button">检查模型</button>
           </span>
-          <input id="providerModelCustom" hidden placeholder="输入模型名称，例如 gpt-5-mini">
+          <input id="providerModelCustom" hidden placeholder="输入模型名称，例如 gpt-5-mini" autocomplete="off" spellcheck="false">
           <small class="hint">档案自身的默认模型，供未单独指定模型的功能使用。新建对话的默认请在 API 供应商页单独设置。</small>
-        </label>
+        </div>
         <label class="provider-field" id="providerContextField">上下文窗口 Tokens（可选）
           <input id="providerContextWindow" type="number" min="1" max="1048576" step="1" placeholder="留空则使用供应商默认值">
           <span id="providerContextSize" hidden aria-hidden="true"></span>
@@ -3802,6 +3838,16 @@
           </select>
           <small class="hint" id="providerVisionHint">自动检测会优先读取运行端能力；上传图片时才会执行最小图片探针。</small>
         </label>
+        <div class="provider-field provider-model-overrides" id="providerModelOverridesSection">
+          <div class="provider-overrides-head">
+            <div>
+              <strong>单模型独立参数（可选）</strong>
+              <small class="hint">为同一供应商下的不同模型单独覆盖上下文、输出上限、温度、思考等级或视觉能力；未设项继承上方默认。</small>
+            </div>
+            <button type="button" class="control-button tiny" id="addProviderModelOverride">+ 添加模型参数</button>
+          </div>
+          <div class="provider-overrides-list" id="providerModelOverrideList"></div>
+        </div>
       </div>
       <div class="provider-form-footer">
         <p class="form-error provider-field" id="providerError"></p>
@@ -3840,11 +3886,16 @@
         <label class="provider-field" id="onboardingUrlField" hidden>API URL<input id="onboardingBaseUrl" placeholder="https://api.openai.com/v1"></label>
         <label class="provider-field" id="onboardingKeyField">API Key<input id="onboardingApiKey" type="password" autocomplete="new-password" placeholder="粘贴 sk- 开头的 Key"></label>
         <div id="onboardingModelField" class="onboarding-model-field" hidden>
-          <div class="onboarding-model-heading"><label for="onboardingModel">选择模型</label><button type="button" class="control-button" id="onboardingLoadModels">检测模型</button></div>
-          <select id="onboardingModel" aria-describedby="onboardingModelStatus"><option value="">检测后选择模型</option><option value="__custom__">手动填写模型名称…</option></select>
+          <div class="onboarding-model-heading"><label for="onboardingModelTrigger">选择模型</label><button type="button" class="control-button" id="onboardingLoadModels">检测模型</button></div>
+          <select id="onboardingModel" hidden aria-hidden="true" tabindex="-1" aria-describedby="onboardingModelStatus"><option value="">检测后选择模型</option><option value="__custom__">手动填写模型名称…</option></select>
+          <button type="button" class="model-select-trigger" id="onboardingModelTrigger" aria-haspopup="dialog" aria-controls="modelPickerDialog" aria-describedby="onboardingModelStatus">
+            <span class="model-select-trigger-text is-placeholder">检测后选择模型</span>
+            <span class="model-select-trigger-meta"></span>
+            <svg class="model-select-trigger-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 6.2 8 10l3.8-3.8"></path></svg>
+          </button>
           <p class="hint" id="onboardingModelStatus" role="status" aria-live="polite"></p>
         </div>
-        <label class="provider-field" id="onboardingModelCustomField" hidden>模型名称<input id="onboardingModelCustom" placeholder="输入供应商提供的模型名称" autocomplete="off"></label>
+        <label class="provider-field" id="onboardingModelCustomField" hidden>模型名称<input id="onboardingModelCustom" placeholder="输入供应商提供的模型名称" autocomplete="off" spellcheck="false"></label>
       </div>
       <p class="form-error" id="onboardingError"></p>
       <div class="form-actions onboarding-actions">
@@ -3854,6 +3905,91 @@
         <button type="button" class="primary-button" id="onboardingSave" hidden>保存并开始</button>
       </div>
     </div>
+  </dialog>
+
+  <!-- 通用模型选择弹层：首启引导与供应商设置共用，替代原生 <select> 弹出框。 -->
+  <dialog id="modelPickerDialog" class="model-picker-dialog" closedby="any" aria-labelledby="modelPickerTitle">
+    <div class="model-picker-shell">
+      <div class="model-picker-head">
+        <h2 id="modelPickerTitle" class="model-picker-title">选择要使用的模型</h2>
+        <button type="button" class="model-picker-close" id="modelPickerClose" title="关闭" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+      </div>
+      <p id="modelPickerSubtitle" class="model-picker-subtitle">以下是模型提供商的可用模型，勾选要使用的模型。</p>
+      <search class="model-picker-search-row">
+        <input id="modelPickerSearch" class="model-picker-search" type="search" placeholder="搜索模型" aria-label="搜索模型" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
+        <button type="button" id="modelPickerManual" class="model-picker-text-action">手动填写</button>
+      </search>
+      <div id="modelPickerList" class="model-picker-list" role="listbox" aria-labelledby="modelPickerTitle"></div>
+      <div class="model-picker-footer">
+        <span id="modelPickerCount" class="model-picker-count" role="status" aria-live="polite"></span>
+        <button type="button" id="modelPickerCancel" class="model-picker-btn">取消</button>
+        <button type="button" id="modelPickerConfirm" class="model-picker-btn is-confirm">选择模型</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 单模型独立参数弹层：设置页供应商表单与输入区模型下拉共用 -->
+  <dialog id="modelOverrideDialog" class="model-override-dialog" closedby="any" aria-labelledby="modelOverrideTitle">
+    <form class="model-override-shell" id="modelOverrideForm" novalidate>
+      <div class="model-picker-head">
+        <h2 class="model-picker-title" id="modelOverrideTitle">单模型独立参数</h2>
+        <button class="model-picker-close" id="modelOverrideClose" type="button" title="关闭" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+      </div>
+      <p class="model-picker-subtitle" id="modelOverrideSubtitle">只对当前模型生效；留空或选「跟随供应商默认」则沿用供应商默认设置。</p>
+      <div class="model-override-body">
+        <label class="model-override-field">模型名称
+          <input id="modelOverrideModel" type="text" list="modelOverrideModelList" placeholder="选择或输入模型 ID，例如 deepseek-v4.1-flash" autocomplete="off" spellcheck="false" required>
+          <datalist id="modelOverrideModelList"></datalist>
+          <small class="hint" id="modelOverrideProviderHint"></small>
+        </label>
+        <div class="model-override-grid">
+          <label class="model-override-field">上下文窗口 Tokens
+            <input id="modelOverrideContextWindow" type="number" min="1" max="1048576" step="1" placeholder="留空 = 跟随默认">
+            <small class="hint provider-capability-hint" id="modelOverrideContextCap" hidden></small>
+            <button class="control-button tiny provider-capability-apply" id="applyModelOverrideContextCap" type="button" hidden>采用目录建议</button>
+          </label>
+          <label class="model-override-field">最大输出 Tokens
+            <input id="modelOverrideMaxOutputTokens" type="number" min="1" max="1048576" step="1" placeholder="留空 = 跟随默认">
+            <small class="hint provider-capability-hint" id="modelOverrideMaxOutCap" hidden></small>
+            <button class="control-button tiny provider-capability-apply" id="applyModelOverrideMaxOutCap" type="button" hidden>采用目录建议</button>
+          </label>
+          <label class="model-override-field">温度（0–2）
+            <input id="modelOverrideTemperature" type="number" min="0" max="2" step="0.1" placeholder="留空 = 跟随默认">
+          </label>
+          <label class="model-override-field">思考等级
+            <select id="modelOverrideReasoningEffort">
+              <option value="inherit">跟随供应商默认</option>
+              <option value="auto">自动</option>
+              <option value="off">关闭</option>
+              <option value="low">低</option>
+              <option value="medium">中</option>
+              <option value="high">高</option>
+            </select>
+          </label>
+        </div>
+        <label class="model-override-field">视觉输入能力
+          <select id="modelOverrideSupportsImages">
+            <option value="inherit">跟随供应商默认</option>
+            <option value="auto">自动检测</option>
+            <option value="true">支持图片</option>
+            <option value="false">纯文本</option>
+          </select>
+          <small class="hint" id="modelOverrideVisionHint"></small>
+        </label>
+        <p class="form-error" id="modelOverrideError"></p>
+      </div>
+      <div class="model-override-footer">
+        <button class="control-button model-override-reset" id="modelOverrideReset" type="button" hidden>恢复默认</button>
+        <div class="model-override-footer-actions">
+          <button class="model-picker-btn" id="modelOverrideCancel" type="button">取消</button>
+          <button class="model-picker-btn is-confirm" id="modelOverrideSave" type="submit">保存参数</button>
+        </div>
+      </div>
+    </form>
   </dialog>
 
   <!-- Agent 设置：卡片点开后才弹出，字段与工具/Skill 选择器保持原样 -->

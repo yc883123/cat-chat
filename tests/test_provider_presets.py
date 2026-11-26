@@ -391,11 +391,19 @@ class FrontendWiringTests(unittest.TestCase):
             "onboardingStepPreset", "onboardingStepKey", "onboardingPresetGrid", "onboardingPresetMore",
             "onboardingRecap", "onboardingGuide", "onboardingGuideText", "onboardingKeyUrl",
             "onboardingUrlField", "onboardingBaseUrl", "onboardingApiKey", "onboardingModel",
-            "onboardingLoadModels", "onboardingModelStatus", "onboardingModelCustom", "onboardingModelCustomField",
+            "onboardingModelTrigger", "onboardingLoadModels", "onboardingModelStatus",
+            "onboardingModelCustom", "onboardingModelCustomField",
             "onboardingBack", "onboardingSkip", "onboardingTest", "onboardingSave", "onboardingError",
         ):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', header)
+        # 通用模型选择弹层与触发按钮就绪，替代原生 <select> 下拉框。
+        for element_id in (
+            "providerModelTrigger", "modelPickerDialog", "modelPickerTitle", "modelPickerSubtitle",
+            "modelPickerSearch", "modelPickerManual", "modelPickerList", "modelPickerCancel", "modelPickerConfirm",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', index)
         # 模板网格在 Key 行之前：先选供应商，再粘 Key。
         self.assertLess(header.index('id="onboardingPresetGrid"'), header.index('id="onboardingKeyRow"'))
 
@@ -412,6 +420,10 @@ class FrontendWiringTests(unittest.TestCase):
             "export function applyProviderPreset(",
             "export async function openProviderPresetKeyUrl(",
             "export function providerPresetMoreText(",
+            "export function syncModelSelectTrigger(",
+            "export function bindModelPickerDialog(",
+            "export function openModelPickerDialog(",
+            "export function openProviderModelPicker(",
         ):
             with self.subTest(symbol=symbol):
                 self.assertIn(symbol, settings)
@@ -481,6 +493,9 @@ class FrontendWiringTests(unittest.TestCase):
             ".onboarding-preset-grid {",
             ".onboarding-step.is-active",
             "#onboardingKeyRow[hidden]",
+            ".model-select-trigger {",
+            ".model-picker-dialog {",
+            ".model-picker-option {",
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, css)

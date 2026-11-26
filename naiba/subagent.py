@@ -121,10 +121,14 @@ def run_subagent_agent(
     if not model_key:
         provider_id = str(conversation.get("provider_id") or "")
         model_key = f"online:{provider_id}" if provider_id else ""
+    from naiba.config import apply_model_override
+
     profile = dict(app.config.profile(model_key))
     if frozen.get("model_name"):
-        profile["model"] = str(frozen["model_name"])
+        profile = apply_model_override(profile, str(frozen["model_name"]))
         profile["model_name"] = str(frozen["model_name"])
+    else:
+        profile = apply_model_override(profile, str(profile.get("model") or ""))
     # 工具集先定稿再构建历史：历史是本轮请求前缀的来源，先建历史再定稿工具集会让
     # PDF/视频处理指引按未过滤的默认全集展开，同一会话出现两种回放字节（前缀缓存断）。
     requested = [str(t) for t in (params.get("allowed_tools") or [])]
@@ -269,6 +273,7 @@ def run_subagent_agent(
         "conversation_id": conversation_id,
         "owner_session_id": spec.owner_session_id or conversation_id,
         "parent_job_id": spec.parent_job_id or "",
+        "goal_id": str(spec.goal_id or ""),
         "depth": 1,
         "allowed_tools": list(allowed_tools),
         "skill_policy": dict(skill_policy),
@@ -406,6 +411,7 @@ def subagent_handler_factory(
             label=label,
             parent_job_id=parent_job_id or None,
             owner_session_id=owner,
+            goal_id=str(ctx.get("goal_id") or ""),
         )
         job_id = app.jobs.start(spec, owner=owner)
         return True, f"子 Agent 已启动，Job ID：{job_id}（可用 job_wait 等待结果）"
@@ -508,6 +514,7 @@ def job_tool_handler_factory(app: AppContext) -> dict[str, Callable[..., tuple[b
             owner_session_id=owner,
             resumable=bool(spec_dict.get("resumable", False)),
             checkpoint=spec_dict.get("checkpoint"),
+            goal_id=str(ctx.get("goal_id") or ""),
         )
         job_id = jobs.start(spec, owner=owner)
         return True, f"Job 已提交，Job ID：{job_id}（可用 job_wait 等待结果）"

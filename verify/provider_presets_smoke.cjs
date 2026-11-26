@@ -117,6 +117,19 @@ async function waitModel(page, value) {
   checkNoScriptError();
 }
 
+async function pickOnboardingModel(page, value) {
+  await page.click('#onboardingModelTrigger');
+  await page.waitForSelector('#modelPickerDialog[open]');
+  if (value === '__custom__') {
+    await page.click('#modelPickerManual');
+  } else {
+    await page.locator(`#modelPickerList .model-picker-option[data-model-id="${value}"]`).click();
+    await page.click('#modelPickerConfirm');
+  }
+  await page.waitForSelector('#modelPickerDialog[open]', { state: 'hidden' });
+  checkNoScriptError();
+}
+
 async function waitPending(page, key) {
   const deadline = Date.now() + 5000;
   while (!pending.has(key) && Date.now() < deadline) await page.waitForTimeout(30);
@@ -140,8 +153,8 @@ async function assertFits(page, label) {
       .filter(item => item.rect.left < -1 || item.rect.right > innerWidth + 1);
   });
   check(label, overflow.length === 0, JSON.stringify(overflow));
-  const selectHeight = await page.locator('#onboardingModel').evaluate(element => element.getBoundingClientRect().height);
-  check(`${label}，模型下拉高度为 40px`, selectHeight === 40, String(selectHeight));
+  const triggerHeight = await page.locator('#onboardingModelTrigger').evaluate(element => element.getBoundingClientRect().height);
+  check(`${label}，模型选择触发器高度为 40px`, triggerHeight === 40, String(triggerHeight));
   checkNoScriptError();
 }
 
@@ -166,7 +179,7 @@ async function runDesktop(browser, presets) {
   view = await snapshot(page);
   check('粘贴 Key 后自动检测并填入接口实际返回的首个模型', view.options.includes('detected-chosen') && view.model === 'detected-first', JSON.stringify(view));
   check('预设推荐模型不会混入实际模型列表', !view.options.includes(presets.find(item => item.id === 'te').model), JSON.stringify(view.options));
-  await page.selectOption('#onboardingModel', 'detected-chosen');
+  await pickOnboardingModel(page, 'detected-chosen');
   await page.click('#onboardingTest');
   await page.waitForFunction(() => document.getElementById('onboardingError').textContent.includes('连接成功'));
   check('测试连接使用当前选中的模型', tests.at(-1)?.model === 'detected-chosen', JSON.stringify(tests.at(-1)));
@@ -177,7 +190,7 @@ async function runDesktop(browser, presets) {
   catalogOverrides.delete('sk-smoke-list');
   await page.click('#onboardingLoadModels');
   await waitModel(page, 'detected-first');
-  await page.selectOption('#onboardingModel', 'detected-chosen');
+  await pickOnboardingModel(page, 'detected-chosen');
   checkNoScriptError();
   await assertFits(page, '桌面引导控件位于视口内');
   await page.screenshot({ path: path.join(ASSERT_DIR, 'provider_presets_onboarding.png') });
@@ -213,7 +226,7 @@ async function runDesktop(browser, presets) {
   view = await snapshot(page);
   check('修改连接立即清理旧模型目录', !view.options.includes('fresh-first'), JSON.stringify(view));
   await waitPending(page, 'sk-pending-manual');
-  await page.selectOption('#onboardingModel', '__custom__');
+  await pickOnboardingModel(page, '__custom__');
   await page.fill('#onboardingModelCustom', 'manual-during-detection');
   await releasePending('sk-pending-manual', [{ id: 'late-listed-model' }]);
   await page.waitForTimeout(120);
@@ -282,17 +295,17 @@ async function runMobile(browser, presets) {
   await page.click('#onboardingPresetGrid [data-provider-preset="te"]');
   await page.fill('#onboardingApiKey', 'sk-smoke-mobile');
   await waitModel(page, 'detected-first');
-  await page.selectOption('#onboardingModel', 'detected-chosen');
+  await pickOnboardingModel(page, 'detected-chosen');
   check('375px 可切换检测模型', (await snapshot(page)).model === 'detected-chosen');
   await assertFits(page, '375px 引导、模型选择和操作按钮无横向溢出');
   await page.screenshot({ path: path.join(ASSERT_DIR, 'provider_presets_onboarding_375.png') });
   const themeStyles = await page.evaluate(() => {
     const root = document.documentElement;
     const original = root.dataset.theme;
-    const select = document.getElementById('onboardingModel');
+    const trigger = document.getElementById('onboardingModelTrigger');
     const style = () => ({
-      color: getComputedStyle(select).color,
-      background: getComputedStyle(select).backgroundColor,
+      color: getComputedStyle(trigger).color,
+      background: getComputedStyle(trigger).backgroundColor,
       dialogBackground: getComputedStyle(document.getElementById('onboardingDialog')).backgroundColor,
     });
     root.dataset.theme = 'light';
@@ -311,7 +324,7 @@ async function runMobile(browser, presets) {
   check('空模型列表不再回退到模板固定模型', view.model === '' && !view.options.includes(presets.find(item => item.id === 'te').model), JSON.stringify(view));
   await page.fill('#onboardingApiKey', 'sk-failed');
   await page.waitForFunction(() => document.getElementById('onboardingModelStatus').textContent.includes('离线替身'));
-  await page.selectOption('#onboardingModel', '__custom__');
+  await pickOnboardingModel(page, '__custom__');
   await page.fill('#onboardingModelCustom', 'mobile-manual-model');
   await page.click('#onboardingTest');
   await page.waitForFunction(() => document.getElementById('onboardingError').textContent.includes('连接成功'));

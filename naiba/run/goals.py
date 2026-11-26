@@ -77,9 +77,15 @@ class GoalCycle:
         self.checkpoint["round_summary_attempts"] = 0
         self.checkpoint["summary_attempt_signature"] = ""
         self.checkpoint["writes"] = 0
+        self.checkpoint["progress_count"] = 0
+        self.checkpoint["last_error_sig"] = ""
+        self.checkpoint["needs_user_stop"] = False
         self.resume_view = self.checkpoint.get("messages") or []
         self.actions = 0
         self.writes = 0
+        self.tool_successes = 0
+        self.error_signatures: list[str] = []
+        self.needs_user_stop = False
         self.model_calls = 0
         self.stop_reason = ""
         self.stop_code = ""
@@ -93,7 +99,7 @@ class GoalCycle:
         row = self.service.store.get(self.row["id"])
         if not row or row["run_id"] != self.row["run_id"] or row["status"] != "running" or self.service._stop.is_set():
             return "目标已暂停或取消"
-        if row["deadline_at"] <= goal_now():
+        if row["deadline_at"] > 0 and row["deadline_at"] <= goal_now():
             self.stop_code = "deadline"
             return "目标已到截止时间"
         baseline = self.snapshot.get(GOAL_RUN_KEY, {}).get("baseline")
@@ -109,8 +115,11 @@ class GoalCycle:
             return "目标工作区已不存在"
         if row.get("sources"):
             from naiba.run.goal_plan import verify_sources_current
+            allow_outside = str(self.snapshot.get("permission_mode") or "") == "full"
             if not verify_sources_current({"sources": row["sources"]}, self.snapshot["workspace_dir"],
-                                          self.snapshot.get("attachments") or []):
+                                          self.snapshot.get("attachments") or [],
+                                          allow_outside=allow_outside,
+                                          data_dir=self.service.app.paths.data_dir):
                 self.stop_code = "source_changed"
                 return "引用计划已变化或无法读取，请结束目标后按新版本重新创建"
         return ""
@@ -127,9 +136,15 @@ class GoalCycle:
             return not self.stop_reason
 
     def save(self, messages: list[dict[str, Any]], *, outcome: str = "", reason: str = "") -> None:
-        self.checkpoint.update({"messages": list(messages), "outcome": outcome, "reason": reason,
-                                "step": self.step, "writes": self.writes, "owner_run_id": self.row["run_id"],
-                                "stop_code": self.stop_code})
+        self.checkpoint.update({
+            "messages": list(messages), "outcome": outcome, "reason": reason,
+            "step": self.step, "writes": self.writes,
+            "progress_count": self.writes + self.tool_successes,
+            "last_error_sig": self.error_signatures[-1] if self.error_signatures else "",
+            "needs_user_stop": self.needs_user_stop,
+            "owner_run_id": self.row["run_id"],
+            "stop_code": self.stop_code,
+        })
         self.service.store.checkpoint(self.row["id"], self.row["run_id"], self.checkpoint)
 
     def boundary(self, messages: list[dict[str, Any]], step: int, step_limit: int) -> bool:
@@ -255,19 +270,20 @@ class GoalCycle:
         candidate = candidate.resolve()
         if any(part.casefold() in _SENSITIVE_DIRS or part.casefold().startswith(".env") for part in candidate.parts):
             raise GoalConflict("GOAL 不自动访问配置或密钥路径")
-        outside_attachment = False
-        if not candidate.is_relative_to(workspace):
-            uploads = {Path(str(item.get("path") or "")).resolve() for item in self.snapshot.get("attachments", [])
-                       if isinstance(item, dict) and str(item.get("path") or "")}
-            if writing or candidate not in uploads or not candidate.is_file():
-                raise GoalConflict("GOAL 不自动访问工作区外路径；只读附件必须来自本次目标")
-            outside_attachment = True
-        rel = candidate.relative_to(workspace) if not outside_attachment else Path(candidate.name)
-        if any(part.casefold() in _SENSITIVE_DIRS or part.casefold().startswith(".env") for part in rel.parts):
-            raise GoalConflict("GOAL 不自动访问配置或密钥路径")
+        uploads = {Path(str(item.get("path") or "")).resolve() for item in self.snapshot.get("attachments", [])
+                   if isinstance(item, dict) and str(item.get("path") or "")}
+        outside_attachment = (not candidate.is_relative_to(workspace)
+                              and not writing and candidate in uploads and candidate.is_file())
         data_dir = Path(self.service.app.paths.data_dir).resolve()
         if candidate.is_relative_to(data_dir) and not outside_attachment:
             raise GoalConflict("GOAL 不能访问应用数据目录")
+        if not candidate.is_relative_to(workspace) and not outside_attachment:
+            if str(self.snapshot.get("permission_mode") or "") != "full":
+                raise GoalConflict("GOAL 不自动访问工作区外路径；只读附件必须来自本次目标")
+        if candidate.is_relative_to(workspace):
+            rel = candidate.relative_to(workspace)
+            if any(part.casefold() in _SENSITIVE_DIRS or part.casefold().startswith(".env") for part in rel.parts):
+                raise GoalConflict("GOAL 不自动访问配置或密钥路径")
         if writing and candidate == workspace:
             raise GoalConflict("不能写入工作区根目录")
         frozen_sources = {Path(item["path"]).resolve() for item in self.row.get("sources", [])}
@@ -283,8 +299,13 @@ class GoalCycle:
         binding = (self.service.store.get(self.row["id"]) or {}).get("wait_binding") or {}
         if binding.get("target_id"):
             allowed.add(binding["target_id"])
+        list_goal_tasks = getattr(self.service.app.storage, "list_goal_tasks", None)
+        if callable(list_goal_tasks):
+            for task in list_goal_tasks(self.row["id"]):
+                if task.get("id"):
+                    allowed.add(str(task["id"]))
         if job_id not in allowed:
-            return False, "只能查询本目标已绑定或启动时明确指定的后台任务"
+            return False, "只能查询本目标已绑定、派生或启动时明确指定的后台任务"
         job = self.service.app.jobs.get(job_id, owner=self.row["conversation_id"])
         if not job or job.get("conversation_id") != self.row["conversation_id"]:
             self.stop_reason = "目标绑定的后台任务不存在或归属不符"
@@ -292,12 +313,23 @@ class GoalCycle:
         if tool == "job_wait" and job["status"] in {"queued", "running", "waiting", "stopping", "cancelling"}:
             self.checkpoint["wait_binding"] = {"kind": "job", "target_id": job_id, "goal_id": self.row["id"],
                 "run_id": self.row["run_id"], "state": "waiting"}
+            self.tool_successes += 1
             return True, "已登记目标等待，后台任务未结束；不会重复提交或发送模型请求。"
         if tool == "job_output":
+            self.tool_successes += 1
             return True, json.dumps(self.service.app.jobs.read(job_id, owner=self.row["conversation_id"]),
                                     ensure_ascii=False)[:6000]
         text, _ = summarize_job_result(job)
+        self.tool_successes += 1
         return True, text
+
+    def _record_outcome(self, tool: str, success: bool, result: str) -> None:
+        if success:
+            self.tool_successes += 1
+            self.error_signatures.clear()
+        else:
+            snippet = " ".join(str(result or "").split())[:160]
+            self.error_signatures.append(f"{tool}:{snippet}")
 
     def exercise(self, tool: str, arguments: dict[str, Any], active: list[dict[str, Any]],
                  executor: Any, context: dict[str, Any], source: str,
@@ -308,45 +340,87 @@ class GoalCycle:
             return False, denial
         if source == "fenced":
             self.stop_reason = "代码块里的工具动作需要人工确认，GOAL 未执行"
+            self.needs_user_stop = True
             return False, self.stop_reason
-        if tool not in GOAL_TOOLS:
-            return False, "这项工具不能由 GOAL 自动执行"
         if tool in {"job_status", "job_output", "job_wait"}:
             return self._job(tool, arguments)
         if tool == "reset_context":
             if executor._confirmation_reason(tool, arguments, active, context):
                 self.stop_reason = "重置上下文需要人工确认，GOAL 未执行"
+                self.needs_user_stop = True
                 return False, self.stop_reason
             self.checkpoint["rotate"] = True
             return True, "已请求在本组结束后换轮，原始记录保留。"
-        if tool in {"list_directory", "search_files"} and arguments.get("recursive"):
-            return False, "GOAL 首版不递归扫描工作区，请先定位到具体目录"
-        try:
-            path = self.path(arguments.get("path"), writing=tool in {"write_file", "edit_file"})
-        except (GoalConflict, ValueError, OSError) as exc:
-            self.stop_reason = str(exc) if isinstance(exc, GoalConflict) else "无法安全定位工具路径"
-            return False, self.stop_reason
-        arguments["path"] = str(path)
-        if tool == "search_files" and not path.is_file():
-            return False, "GOAL 首版只搜索明确指定的文件，不递归搜索目录"
-        if tool == "list_directory" and ("**" in str(arguments.get("pattern") or "") or ".." in str(arguments.get("pattern") or "")):
-            return False, "GOAL 列目录不接受递归或上级路径通配符"
         if tool in {"read_file", "search_files", "list_directory"}:
+            try:
+                path = self.path(arguments.get("path"), writing=False)
+            except (GoalConflict, ValueError, OSError) as exc:
+                self.stop_reason = str(exc) if isinstance(exc, GoalConflict) else "无法安全定位工具路径"
+                return False, self.stop_reason
+            arguments["path"] = str(path)
+            if tool == "list_directory" and ".." in str(arguments.get("pattern") or ""):
+                return False, "GOAL 列目录不接受上级路径通配符"
             success, result = dispatch()
             if str(result).startswith("NEED_CONFIRM:"):
                 executor.reject_execute(str(result).split(":", 3)[1])
                 self.stop_reason = "读取需要人工确认，GOAL 未执行"
+                self.needs_user_stop = True
                 return False, self.stop_reason
+            self._record_outcome(tool, success, result)
             return success, result
-        if getattr(executor, "permission_mode", "confirm") == "deny":
-            self.stop_reason = "当前对话禁止写文件，GOAL 未执行"
+        if tool in {"write_file", "edit_file"}:
+            try:
+                path = self.path(arguments.get("path"), writing=True)
+            except (GoalConflict, ValueError, OSError) as exc:
+                self.stop_reason = str(exc) if isinstance(exc, GoalConflict) else "无法安全定位工具路径"
+                return False, self.stop_reason
+            arguments["path"] = str(path)
+            if getattr(executor, "permission_mode", "confirm") == "deny":
+                self.stop_reason = "当前对话禁止写文件，GOAL 未执行"
+                return False, self.stop_reason
+            confirm_reason = (
+                executor._confirmation_reason(tool, arguments, active, context)
+                if callable(getattr(executor, "_confirmation_reason", None))
+                else ""
+            )
+            if confirm_reason:
+                self.stop_reason = f"工具 {tool} 需要人工确认（{confirm_reason}），GOAL 已暂停等待处理"
+                self.needs_user_stop = True
+                return False, self.stop_reason
+            try:
+                success, result = self._write(tool, path, arguments, context)
+                self._record_outcome(tool, success, result)
+                return success, result
+            except (OSError, ValueError) as exc:
+                if self.service.store.pending_actions(self.row["id"]):
+                    self.stop_reason = "文件写入结果需要核对，已停止后续动作"
+                return False, str(exc) if isinstance(exc, ValueError) else "文件写入失败，将核对落盘状态"
+        # 统一会话权限：除文件写入走幂等落盘回执外，其余会话已授权工具按当前会话权限直接调度。
+        allowed_tools = set(str(item) for item in (context.get("allowed_tools") or []))
+        if tool not in allowed_tools:
+            return False, "这项工具未在当前会话授权，GOAL 未执行"
+        tool_registry = getattr(self.service.app, "tool_registry", None)
+        has_side_effect = bool(tool_registry and tool_registry.side_effect(tool)) and tool != "todo_write"
+        action_key = ""
+        if has_side_effect:
+            action_key = uuid.uuid4().hex
+            self.service.store.start_action(
+                self.row["id"], self.row["run_id"], action_key,
+                {"kind": "generic_tool", "tool": tool},
+            )
+        success, result = dispatch()
+        if str(result).startswith("NEED_CONFIRM:"):
+            executor.reject_execute(str(result).split(":", 3)[1])
+            if action_key:
+                # 尚未执行即被确认门拦截：丢弃未发出的 pending 回执，不能标成已执行。
+                self.service.store.discard_action(self.row["id"], action_key)
+            self.stop_reason = f"工具 {tool} 需要人工确认，GOAL 已暂停等待处理"
+            self.needs_user_stop = True
             return False, self.stop_reason
-        try:
-            return self._write(tool, path, arguments, context)
-        except (OSError, ValueError) as exc:
-            if self.service.store.pending_actions(self.row["id"]):
-                self.stop_reason = "文件写入结果需要核对，已停止后续动作"
-            return False, str(exc) if isinstance(exc, ValueError) else "文件写入失败，将核对落盘状态"
+        if action_key:
+            self.service.store.finish_action(self.row["id"], action_key)
+        self._record_outcome(tool, success, result)
+        return success, result
 
     def _write(self, tool: str, path: Path, args: dict[str, Any], context: dict[str, Any]) -> tuple[bool, str]:
         key = uuid.uuid4().hex
@@ -419,6 +493,7 @@ class GoalService:
             "generation", "run_id", "created_at", "deadline_at", "model_requests", "tool_actions", "evidence")}
         result.update({
             "limits": dict(row.get("limits") or GOAL_DEFAULT_LIMITS),
+            "execution_policy": str(row.get("execution_policy") or "bounded"),
             "stop_code": str(row.get("stop_code") or ""),
             "completion_policy": str(row.get("completion_policy") or "manual"),
             "stages": list(row.get("stages") or []),
@@ -448,7 +523,9 @@ class GoalService:
         workspace = (self.app.config.resolve_workspace_dir(str(conversation.get("workspace_dir") or ""))
                      if str(conversation.get("workspace_dir") or "").strip()
                      else self.app.config.resolve_workspace_dir())
-        plan = preview(message, body.get("sources"), workspace, body.get("attachments") or [])
+        allow_outside = str(conversation.get("permission_mode") or "") == "full"
+        plan = preview(message, body.get("sources"), workspace, body.get("attachments") or [],
+                       allow_outside=allow_outside, data_dir=self.app.paths.data_dir)
         # 原文不回传前端：提交时以 sha256 复核，正文一致性用 plan.message 校验。
         for row in plan.get("sources") or []:
             if isinstance(row, dict):
@@ -499,7 +576,9 @@ class GoalService:
                 workspace = (self.app.config.resolve_workspace_dir(str(conversation.get("workspace_dir") or ""))
                              if str(conversation.get("workspace_dir") or "").strip()
                              else self.app.config.resolve_workspace_dir())
-                if not verify_sources_current(plan, workspace, body.get("attachments") or []):
+                allow_outside = str(conversation.get("permission_mode") or "") == "full"
+                if not verify_sources_current(plan, workspace, body.get("attachments") or [],
+                                              allow_outside=allow_outside, data_dir=self.app.paths.data_dir):
                     raise GoalConflict("引用计划已变化或无法读取，请重新预览后再发送")
                 criteria = normalize_criteria(plan.get("criteria"))
                 sources = list(plan.get("sources") or [])
@@ -514,11 +593,13 @@ class GoalService:
                 policy = "machine_all" if criteria else ("mixed" if manual_items else "manual")
             if manual_items and policy == "machine_all":
                 policy = "mixed"
+            execution_policy = "bounded" if str(body.get("execution_policy") or "") == "bounded" else "continuous"
             spec = {"id": uuid.uuid4().hex, "request_id": request_id, "request_hash": digest,
                     "message": message, "duration_ms": _DURATION_MS, "criteria": criteria,
                     "job_ids": job_ids, "sources": sources, "stages": stages,
-                    "manual_items": manual_items, "completion_policy": policy}
-            self.app.runs.submit_chat(body, goal_spec=spec, allowed_tools_limit=list(GOAL_TOOLS))
+                    "manual_items": manual_items, "completion_policy": policy,
+                    "execution_policy": execution_policy}
+            self.app.runs.submit_chat(body, goal_spec=spec)
             row = self.store.get(spec["id"])
             self.start()
             return self.public(row)
@@ -588,11 +669,13 @@ class GoalService:
             if run_status in self.app.runs.ACTIVE:
                 self.app.storage.update_background_task(run_id, status="cancelled", finished=True,
                                                         cancel_requested=True, detail={"message": "目标已停止"})
+            if status == "cancelling":
+                self._cancel_goal_jobs(row)
             self.store.transition(row, "paused" if status == "pausing" else "cancelled", row["reason"], settle=True)
             return False
         if status == "running":
             if live:
-                if row["deadline_at"] <= goal_now():
+                if row["deadline_at"] > 0 and row["deadline_at"] <= goal_now():
                     if self.store.transition(row, "pausing", "目标已到截止时间"):
                         self.app.runs.cancel(run_id, goal_control=True)
                 return True
@@ -604,13 +687,20 @@ class GoalService:
         if status != "queued" or row["ready_at"] > goal_now():
             return False
         limits = row.get("limits") or GOAL_DEFAULT_LIMITS
-        rounds_limit = (limits["rounds"] if _MAX_ROUNDS == GOAL_DEFAULT_LIMITS["rounds"]
-                        else min(limits["rounds"], _MAX_ROUNDS))
-        if row["deadline_at"] <= goal_now() or row["generation"] >= rounds_limit and run_status != "queued":
+        is_continuous = str(row.get("execution_policy") or "bounded") == "continuous"
+        deadline_hit = row["deadline_at"] > 0 and row["deadline_at"] <= goal_now()
+        rounds_hit = (
+            (not is_continuous and row["generation"] >= limits["rounds"])
+            or (_MAX_ROUNDS != GOAL_DEFAULT_LIMITS["rounds"] and row["generation"] >= _MAX_ROUNDS)
+        )
+        if deadline_hit or (rounds_hit and run_status != "queued"):
             if run_status == "queued":
                 self.app.runs.cancel(run_id, goal_control=True)
+                if not live:
+                    self.app.storage.update_background_task(run_id, status="cancelled", finished=True,
+                                                            cancel_requested=True, detail={"message": "目标已停止"})
             self.store.transition(row, "blocked", "目标时间或续跑轮次额度已用完", settle=True,
-                                  stop_code="deadline" if row["deadline_at"] <= goal_now() else "budget_rounds")
+                                  stop_code="deadline" if deadline_hit else "budget_rounds")
             return False
         if not run or not snapshot.get(GOAL_RUN_KEY):
             self.store.transition(row, "blocked", "找不到目标关联的运行记录", settle=True)
@@ -621,12 +711,15 @@ class GoalService:
         if denial:
             if run_status == "queued":
                 self.app.runs.cancel(run_id, goal_control=True)
-            self.store.transition(row, "needs_user", denial, settle=True)
+                if not live:
+                    self.app.storage.update_background_task(run_id, status="cancelled", finished=True,
+                                                            cancel_requested=True, detail={"message": denial})
+            self.store.transition(row, "needs_user", denial, settle=True, stop_code="configuration")
             return False
         if run_status != "queued":
             snapshot["is_first_turn"] = False
             new_run = self.app.storage.create_run(cid, str(run["message"]), snapshot["agent"], snapshot,
-                input_message_id=row["input_message_id"], origin_run_id=run_id,
+                input_message_id=row["input_message_id"], origin_run_id=run_id, goal_id=goal_id,
                 goal_bind=lambda db, new_id: self.store.bind_next(db, goal_id, new_id, row["version"]))
             run_id = new_run["id"]
             run = new_run
@@ -740,7 +833,7 @@ class GoalService:
             job = self.app.storage.create_run(row["conversation_id"], "GOAL 本地验收",
                 {"id": "", "name": "GOAL", "system_prompt": "", "skill_ids": []},
                 {"goal_check": {"criteria": check_items}}, kind=GOAL_LOCAL_CHECK_KIND, detached=True,
-                owner_session_id=row["conversation_id"], job_bind=job_bind,
+                owner_session_id=row["conversation_id"], goal_id=row["id"], job_bind=job_bind,
                 initial_checkpoint={"goal_check": params})
         except GoalConflict:
             return  # 状态已变化：本轮放弃登记，下一次核对重新评估。
@@ -764,10 +857,88 @@ class GoalService:
             raise GoalConflict("目标的原始消息已不在对话中")
         return GoalCycle(self, row, snapshot)
 
+    def _cancel_goal_jobs(self, row: dict[str, Any]) -> None:
+        """取消目标绑定的等待任务及本目标派生的所有活跃后台任务/子代理。"""
+        cid = str(row.get("conversation_id") or "")
+        seen: set[str] = set()
+        binding = row.get("wait_binding") if isinstance(row.get("wait_binding"), dict) else {}
+        target_id = str(binding.get("target_id") or "")
+        if target_id:
+            seen.add(target_id)
+            try:
+                self.app.jobs.cancel(target_id, owner=cid, reason="目标已取消")
+            except Exception:  # noqa: BLE001 - 外部不可取消任务不阻断目标取消
+                logger.debug("目标绑定任务取消失败：%s", target_id, exc_info=True)
+        list_goal_tasks = getattr(self.app.storage, "list_goal_tasks", None)
+        if callable(list_goal_tasks):
+            for task in list_goal_tasks(row["id"], active_only=True):
+                tid = str(task.get("id") or "")
+                if not tid or tid in seen or tid == str(row.get("run_id") or ""):
+                    continue
+                seen.add(tid)
+                try:
+                    self.app.jobs.cancel(tid, owner=cid, reason="目标已取消")
+                except Exception:  # noqa: BLE001
+                    logger.debug("目标关联任务取消失败：%s", tid, exc_info=True)
+
+    def _rebaseline_snapshot(self, row: dict[str, Any]) -> None:
+        """按当前会话设置刷新 GOAL 执行基线（仅在用户显式请求“按当前设置继续”时调用）。"""
+        cid = str(row.get("conversation_id") or "")
+        run_id = str(row.get("run_id") or "")
+        conversation = self.app.storage.get_conversation(cid, include_messages=False)
+        snapshot = self.app.storage.get_run_snapshot(run_id) or {}
+        if not conversation or not snapshot:
+            raise GoalConflict("无法读取当前会话配置，请先检查会话状态")
+        agent_id = str(conversation.get("agent_id") or "")
+        agent = self.app.config.get_agent(agent_id) or self.app.config.get_agent(self.app.config.default_agent_id()) or snapshot.get("agent") or {}
+        model_key = self.app.config.resolve_conversation_model_key(
+            str(conversation.get("model_key") or ""), str(conversation.get("provider_id") or ""),
+        )
+        model_name = str(conversation.get("model_name") or "").strip()
+        if not model_name:
+            model_name = str((self.app.config.profile(model_key) or {}).get("model") or "")
+        workspace_dir = str(
+            self.app.config.resolve_workspace_dir(str(conversation.get("workspace_dir") or ""))
+            if str(conversation.get("workspace_dir") or "").strip()
+            else self.app.config.resolve_workspace_dir()
+        )
+        from naiba.run.session import resolve_allowed_tools, resolve_session_tool_ids
+
+        web_search_enabled = bool(int(conversation.get("web_search_enabled") or 0))
+        conv_kind = str(conversation.get("conv_kind") or "main")
+        enabled_tool_ids = resolve_session_tool_ids(self.app, conversation, agent)
+        allowed_tools = resolve_allowed_tools(
+            self.app, str(snapshot.get("interaction_mode") or "craft"),
+            agent, web_search_enabled, model_key, enabled_tool_ids, conv_kind,
+        )
+        stored_skill_policy = conversation.get("skill_policy")
+        goal_meta = dict(snapshot.get(GOAL_RUN_KEY) or {})
+        goal_meta["baseline"] = self.baseline(cid)
+        updates = {
+            "agent": agent,
+            "model_key": model_key,
+            "model_name": model_name,
+            "workspace_dir": workspace_dir,
+            "permission_mode": str(conversation.get("permission_mode") or "confirm"),
+            "reasoning_effort": str(conversation.get("reasoning_effort") or "auto"),
+            "web_search_enabled": web_search_enabled,
+            "allowed_tools": allowed_tools,
+            **({"skill_policy": dict(stored_skill_policy)} if isinstance(stored_skill_policy, dict) and stored_skill_policy else {}),
+            GOAL_RUN_KEY: goal_meta,
+        }
+        self.app.storage.update_run_snapshot(run_id, updates)
+
     def _settle(self, row: dict[str, Any], run_status: str | None, snapshot: dict[str, Any]) -> None:
         cycle = GoalCycle(self, row, snapshot)
         recovered_write = False
         for action_id, receipt in self.store.pending_actions(row["id"]):
+            if receipt.get("kind") == "generic_tool":
+                self.store.transition(
+                    row, "needs_user",
+                    f"副作用工具 {receipt.get('tool') or ''} 在中断前未确认结果，未自动重试",
+                    settle=True, stop_code="unknown_write",
+                )
+                return
             try:
                 actual = _file_digest(cycle.path(receipt["path"], writing=True))
                 confirmed = actual == receipt["after"]
@@ -800,10 +971,11 @@ class GoalService:
                 return
             else:
                 self.store.transition(row, "queued", "正在从最近检查点恢复", settle=True,
-                    checkpoint={**cp, "outcome": "", "writes": 0}, retry_count=row["retry_count"] + 1)
+                    checkpoint={**cp, "outcome": "", "writes": 0, "progress_count": 0}, retry_count=row["retry_count"] + 1)
                 return
         if decision in {"blocked", "needs_user"}:
-            self.store.transition(row, decision, str(cp.get("reason") or "目标暂时无法继续"), settle=True,
+            target_status = "needs_user" if (decision == "needs_user" or cp.get("needs_user_stop")) else "blocked"
+            self.store.transition(row, target_status, str(cp.get("reason") or "目标暂时无法继续"), settle=True,
                                   stop_code=str(cp.get("stop_code") or ""))
             return
         if run_status != "completed":
@@ -813,11 +985,28 @@ class GoalService:
         evidence = self._verify(cycle, row["criteria"])
         check_items = [item for item in row["criteria"] if str(item.get("kind") or "file") != "file"]
         if decision not in {"completed", "review"}:
-            no_progress = 0 if current_round and cp.get("writes") else row["no_progress"] + 1
-            if no_progress >= 2:
-                self.store.transition(row, "blocked", "续跑多轮仍未取得可确认进展", evidence=evidence, settle=True)
+            last_err = str(cp.get("last_error_sig") or "") if current_round else ""
+            prev_err = str(cp.get("prev_error_sig") or "")
+            repeat_err_count = (int(cp.get("repeat_error_count") or 0) + 1) if (last_err and last_err == prev_err) else (1 if last_err else 0)
+            next_cp = {**cp, "prev_error_sig": last_err, "repeat_error_count": repeat_err_count}
+            if repeat_err_count >= 3:
+                self.store.transition(
+                    row, "paused", "检测到连续相同错误循环，已自动暂停，请查看后点击继续目标",
+                    checkpoint=next_cp, evidence=evidence, settle=True, stop_code="loop_detected",
+                )
                 return
-            self.store.transition(row, "queued", "准备继续目标", checkpoint=cp, evidence=evidence,
+            has_progress = bool(current_round and (cp.get("writes") or int(cp.get("progress_count") or 0) > 0))
+            no_progress = 0 if has_progress else row["no_progress"] + 1
+            is_continuous = str(row.get("execution_policy") or "bounded") == "continuous"
+            max_no_progress = 3 if is_continuous else 2
+            if no_progress >= max_no_progress:
+                self.store.transition(
+                    row, "paused" if is_continuous else "blocked",
+                    "续跑多轮仍未取得可确认进展", checkpoint=next_cp, evidence=evidence,
+                    settle=True, stop_code="no_progress",
+                )
+                return
+            self.store.transition(row, "queued", "准备继续目标", checkpoint=next_cp, evidence=evidence,
                 settle=True, no_progress=no_progress, retry_count=0)
             return
         if check_items and not cp.get("check_evidence"):
@@ -884,24 +1073,34 @@ class GoalService:
                 if not self.store.transition(row, "cancelling"):
                     raise GoalConflict("目标已更新，请重试")
                 self.app.runs.cancel(row["run_id"], goal_control=True)
+                self._cancel_goal_jobs(row)
             elif action == "resume" and status in {"paused", "blocked", "needs_user"}:
                 if self.store.pending_actions(goal_id):
                     raise GoalConflict("上次写入尚未核对，请检查文件后结束目标")
                 limits = row.get("limits") or GOAL_DEFAULT_LIMITS
-                # 旧夹具通过收紧模块常量模拟小额度；默认值时以持久限额为准。
-                model_limit = (limits["model_requests"] if _MAX_MODEL_REQUESTS == GOAL_DEFAULT_LIMITS["model_requests"]
-                               else min(limits["model_requests"], _MAX_MODEL_REQUESTS))
-                tool_limit = (limits["tool_actions"] if _MAX_TOOL_ACTIONS == GOAL_DEFAULT_LIMITS["tool_actions"]
-                              else min(limits["tool_actions"], _MAX_TOOL_ACTIONS))
-                if row["deadline_at"] <= goal_now() or row["model_requests"] >= model_limit \
-                        or row["tool_actions"] >= tool_limit:
+                is_continuous = str(row.get("execution_policy") or "bounded") == "continuous"
+                # 旧夹具通过收紧模块常量模拟小额度；continuous 模式下不因默认限额阻塞续跑。
+                deadline_hit = row["deadline_at"] > 0 and row["deadline_at"] <= goal_now()
+                model_hit = (
+                    (not is_continuous and row["model_requests"] >= limits["model_requests"])
+                    or (_MAX_MODEL_REQUESTS != GOAL_DEFAULT_LIMITS["model_requests"]
+                        and row["model_requests"] >= _MAX_MODEL_REQUESTS)
+                )
+                tool_hit = (
+                    (not is_continuous and row["tool_actions"] >= limits["tool_actions"])
+                    or (_MAX_TOOL_ACTIONS != GOAL_DEFAULT_LIMITS["tool_actions"]
+                        and row["tool_actions"] >= _MAX_TOOL_ACTIONS)
+                )
+                if deadline_hit or model_hit or tool_hit:
                     raise GoalConflict("目标额度已用完，请先追加额度或时限")
+                if bool((extras or {}).get("rebaseline")):
+                    self._rebaseline_snapshot(row)
                 # 行级 wait_binding 由本调用清空；检查点里的旧交接标记一并清掉，
                 # 续办轮的组闭合不得把它当成本轮的新等待。
-                checkpoint = {**row["checkpoint"], "outcome": ""}
+                checkpoint = {**row["checkpoint"], "outcome": "", "repeat_error_count": 0, "prev_error_sig": "", "needs_user_stop": False}
                 checkpoint.pop("wait_binding", None)
                 self.store.transition(row, "queued", checkpoint=checkpoint,
-                                      no_progress=0, wait_binding={})
+                                      no_progress=0, wait_binding={}, stop_code="")
             elif action == "accept" and status == "awaiting_review":
                 self.store.transition(row, "completed", "你已确认完成", settle=True)
             else:

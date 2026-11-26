@@ -549,7 +549,7 @@ async function itemSnapshot(page, title) {
       const collapsedLayout = await layout();
       await page.click('#expandSidebar');
       await page.waitForTimeout(700);
-      check('收起侧栏后对话列宽仍为 880px', collapsedLayout.chatMax === '880px', collapsedLayout.chatMax);
+      check('收起侧栏后对话列宽保持恒定', collapsedLayout.chatMax === expanded.chatMax, `${expanded.chatMax} -> ${collapsedLayout.chatMax}`);
       check('收起侧栏后助手/用户相对布局不变（只重新居中）',
         expanded.assistantWidth !== null
         && Math.abs(collapsedLayout.assistantWidth - expanded.assistantWidth) <= 2

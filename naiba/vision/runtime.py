@@ -162,13 +162,14 @@ class VisionRouter:
         user_key = str(selected_key or "").strip()
         if user_key:
             try:
+                from naiba.config import apply_model_override
+
                 profile = self.app.config.profile(user_key)
-                profile = {**profile, "name": str(profile.get("name") or "用户视觉供应商")}
                 override = str(
                     model_override if model_override is not None else cfg.get("model") or ""
                 ).strip()
-                if override:
-                    profile["model"] = override
+                profile = apply_model_override(profile, override or str(profile.get("model") or ""))
+                profile = {**profile, "name": str(profile.get("name") or "用户视觉供应商")}
                 backends.append(profile)
             except (ValueError, KeyError):
                 logger.warning("vision: 配置的视觉供应商不可用：%s", user_key)

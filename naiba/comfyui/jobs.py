@@ -18,6 +18,7 @@ checkpoint（已完成段不重复提交），清掉 errors 后把任务放回�
 from __future__ import annotations
 
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -640,8 +641,14 @@ class ComfyUIJobManager:
                         "reason": "已发出取消，但任务迟迟没有停下来，先保留这条任务，稍后再删",
                     })
                     continue
-            if self.store.delete_task(task_id):
-                deleted += 1
+            try:
+                if self.store.delete_task(task_id):
+                    deleted += 1
+            except (OSError, ComfyUIStoreError) as exc:
+                failed.append({
+                    "id": task_id,
+                    "reason": f"产物目录删除失败，保留任务记录：{exc}",
+                })
         return {"deleted": deleted, "skipped": skipped, "failed": failed}
 
     def _wait_terminal(self, task_id: str, *, timeout: float, interval: float = 0.15) -> bool:
@@ -684,7 +691,7 @@ class ComfyUIJobManager:
             "retry_count": int(task.get("retry_count") or 0),
             "progress": task.get("progress") or {},
             "result": result,
-            "output_files": self._output_files(task.get("id"), result),
+            "output_files": self._output_files(task, result),
             "error": task.get("error") or "",
             "source_task_id": task.get("source_task_id") or "",
             "workflow_id": input_data.get("workflow_id") or "",
@@ -695,20 +702,27 @@ class ComfyUIJobManager:
             "step": _running_step(task, checkpoint),
         }
 
-    def _output_files(self, task_id: Any, result: dict[str, Any]) -> list[dict[str, str]]:
-        """产物清单：文件名 + 本地绝对路径。
+    def _output_files(self, task: dict[str, Any], result: dict[str, Any]) -> list[dict[str, str]]:
+        """产物清单：文件名 + 稳定地址（多段可变目录在定型前不物化易失物理路径）。
 
-        只有「任务 id + 文件名」不够用：前端要拿这条路径去走 `/api/file`——手机/局域网
-        靠 URL 上的口令才取得到字节，桌面端靠 `path` 参数才能弹原生「另存为」
-        （`<a download>` 在 WebView2 里点了没反应，见 03-media 的 saveLocalFile）。
-        这里只拼接、不校验存在性：文件被清理时交给请求侧 404，与图片 404 同一条链。
+        - 托管目录且仍在执行/迁移未收敛时：只返回 `/api/comfyui/tasks/<id>/files/<name>`，
+          避免后续段混出把 `*图片_*` 重命名为 `*混合_*` 后造成下游缓存失效；
+        - 已到终态或老任务：返回当前真实物理路径 `path`（桌面原生「另存为」与采集用）。
         """
-        tid = str(task_id or "")
+        tid = str(task.get("id") or "")
         if not tid:
             return []
-        base = self.store.task_output_dir(tid)
+        names = [str(name) for name in (result.get("outputs") or []) if str(name or "")]
+        if not names:
+            return []
+        if self.store.is_output_dir_mutable(task):
+            quoted_id = urllib.parse.quote(tid, safe="")
+            return [
+                {"name": name, "url": f"/api/comfyui/tasks/{quoted_id}/files/{urllib.parse.quote(name, safe='')}"}
+                for name in names
+            ]
+        base = self.store.task_output_dir(task)
         return [
-            {"name": str(name), "path": str(base / str(name))}
-            for name in (result.get("outputs") or [])
-            if str(name or "")
+            {"name": name, "path": str(base / name)}
+            for name in names
         ]

@@ -24,7 +24,9 @@ from naiba.core.contracts import (
 from naiba.core.exceptions import ActiveRunError
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
-from naiba.storage.goals import insert_goal, migrate_goal_extensions, migrate_goals, require_no_goal
+from naiba.storage.goals import (
+    insert_goal, migrate_goal_continuous, migrate_goal_extensions, migrate_goals, require_no_goal,
+)
 
 logger = logging.getLogger("naiba.storage.store")
 
@@ -34,7 +36,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 35
+CURRENT_SCHEMA_VERSION = 36
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -1099,6 +1101,30 @@ def _migrate_to_v35(db: sqlite3.Connection) -> None:
     db.execute("UPDATE conversations SET chat_supports_images = -1 WHERE chat_supports_images = 0")
 
 
+def _table_exists(db: sqlite3.Connection, table: str) -> bool:
+    return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
+
+
+def _migrate_to_v36(db: sqlite3.Connection) -> None:
+    """v36：独立的会话任务快照表、后台任务与 GOAL 关联表、GOAL 持续执行策略列。"""
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS conversation_todos (
+            conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+            todos_json TEXT NOT NULL DEFAULT '[]',
+            updated_at INTEGER NOT NULL DEFAULT 0
+        )"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS task_goal_links (
+            task_id TEXT PRIMARY KEY REFERENCES background_tasks(id) ON DELETE CASCADE,
+            goal_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT 0
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_task_goal_links_goal ON task_goal_links(goal_id, created_at DESC)")
+    migrate_goal_continuous(db)
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -1136,6 +1162,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     33: migrate_goals,
     34: migrate_goal_extensions,
     35: _migrate_to_v35,
+    36: _migrate_to_v36,
 }
 
 
@@ -2414,6 +2441,18 @@ class ChatStorage:
             if not row:
                 return None
             result = self._conversation_dict(row)
+            if _table_exists(db, "conversation_todos"):
+                todo_row = db.execute(
+                    "SELECT todos_json FROM conversation_todos WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()
+                if todo_row and todo_row[0]:
+                    try:
+                        parsed_todos = json.loads(todo_row[0])
+                        if isinstance(parsed_todos, list):
+                            result["todos"] = parsed_todos
+                    except (json.JSONDecodeError, TypeError):
+                        pass
             # 详情也要带分支字段：分支链面板点开后要立刻显示「源是谁」，不该再打一次列表接口。
             source_id = str(result.get("branched_from_id") or "")
             result["branch_count"] = self._branch_counts(db, [conversation_id]).get(conversation_id, 0)
@@ -2443,6 +2482,31 @@ class ChatStorage:
             db.execute(
                 "UPDATE conversations SET skill_policy = ? WHERE id = ?",
                 (json.dumps(policy or {}, ensure_ascii=False), conversation_id),
+            )
+
+    @_retry_transient_write
+    def set_conversation_todos(
+        self, conversation_id: str, todos: list[dict[str, str]]
+    ) -> None:
+        """持久化会话最新的 todo_write 任务清单快照，供前端顶部状态胶囊可靠恢复。"""
+        if not conversation_id:
+            return
+        normalized: list[dict[str, str]] = []
+        for idx, item in enumerate(todos or [], 1):
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            status = str(item.get("status") or "pending")
+            if not content or status not in {"pending", "in_progress", "completed"}:
+                continue
+            normalized.append({"id": str(item.get("id") or idx), "content": content[:1000], "status": status})
+        with self._connect() as db:
+            if not _table_exists(db, "conversation_todos"):
+                return
+            db.execute(
+                "INSERT INTO conversation_todos(conversation_id, todos_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(conversation_id) DO UPDATE SET todos_json=excluded.todos_json, updated_at=excluded.updated_at",
+                (conversation_id, json.dumps(normalized, ensure_ascii=False), int(time.time() * 1000)),
             )
 
     @_retry_transient_write
@@ -3348,6 +3412,8 @@ class ChatStorage:
             db.execute("BEGIN IMMEDIATE")
             require_no_goal(db, conversation_id)
             cursor = db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+            if _table_exists(db, "conversation_todos"):
+                db.execute("DELETE FROM conversation_todos WHERE conversation_id = ?", (conversation_id,))
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (int(time.time() * 1000), conversation_id),
@@ -4155,6 +4221,12 @@ class ChatStorage:
                     owner_session_id or conversation_id,
                 ),
             )
+            goal_row_id = str((goal_spec or {}).get("id") or "")
+            if goal_row_id and _table_exists(db, "task_goal_links"):
+                db.execute(
+                    "INSERT OR REPLACE INTO task_goal_links(task_id, goal_id, created_at) VALUES (?, ?, ?)",
+                    (run_id, goal_row_id, now),
+                )
             db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
             if supervised_context is not None:
                 # Keep durable execution identity even if the caller crashes
@@ -4196,6 +4268,7 @@ class ChatStorage:
         owner_session_id: str = "",
         detached: bool = False,
         origin_run_id: str = "",
+        goal_id: str = "",
         submission_guard: Callable[[sqlite3.Connection], None] | None = None,
         goal_bind: Callable[[sqlite3.Connection, str], None] | None = None,
         job_bind: Callable[[sqlite3.Connection, str], None] | None = None,
@@ -4245,6 +4318,11 @@ class ChatStorage:
                     origin_run_id,
                 ),
             )
+            if str(goal_id or "").strip() and _table_exists(db, "task_goal_links"):
+                db.execute(
+                    "INSERT OR REPLACE INTO task_goal_links(task_id, goal_id, created_at) VALUES (?, ?, ?)",
+                    (task_id, str(goal_id).strip(), now),
+                )
             if initial_checkpoint is not None:
                 db.execute("UPDATE background_tasks SET checkpoint=? WHERE id=?",
                            (json.dumps(initial_checkpoint, ensure_ascii=False), task_id))
@@ -4349,6 +4427,13 @@ class ChatStorage:
                  json.dumps(frozen, ensure_ascii=False), now, now, parent_id, owner,
                  source["detached"], source["origin_run_id"], json.dumps(checkpoint, ensure_ascii=False)),
             )
+            if _table_exists(db, "task_goal_links"):
+                link = db.execute("SELECT goal_id FROM task_goal_links WHERE task_id = ?", (source_id,)).fetchone()
+                if link and link[0]:
+                    db.execute(
+                        "INSERT OR REPLACE INTO task_goal_links(task_id, goal_id, created_at) VALUES (?, ?, ?)",
+                        (task_id, str(link[0]), now),
+                    )
             result[JOB_RESUMED_INTO_KEY] = task_id
             db.execute("UPDATE background_tasks SET result = ?, updated_at = ? WHERE id = ?",
                        (json.dumps(result, ensure_ascii=False), now, source_id))
@@ -4901,13 +4986,16 @@ class ChatStorage:
 
     def get_background_task(self, task_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
+            has_links = _table_exists(db, "task_goal_links")
+            goal_select = ", COALESCE(tgl.goal_id, '') AS goal_id" if has_links else ""
+            goal_join = " LEFT JOIN task_goal_links tgl ON tgl.task_id = bt.id" if has_links else ""
             row = db.execute(
-                "SELECT id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "
-"agent_id, agent_name, status, message, detail, error, "
-"cancel_requested, created_at, started_at, updated_at, finished_at, "
-"parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result, "
-"detached, origin_run_id "
-                "FROM background_tasks WHERE id = ?",
+                "SELECT bt.id, bt.conversation_id, bt.kind, bt.interaction_mode, bt.input_message_id, bt.plan_id, "
+                "bt.agent_id, bt.agent_name, bt.status, bt.message, bt.detail, bt.error, "
+                "bt.cancel_requested, bt.created_at, bt.started_at, bt.updated_at, bt.finished_at, "
+                "bt.parent_job_id, bt.owner_session_id, bt.progress, bt.current_step, bt.attempt, bt.checkpoint, bt.result, "
+                f"bt.detached, bt.origin_run_id{goal_select} "
+                f"FROM background_tasks bt{goal_join} WHERE bt.id = ?",
                 (task_id,),
             ).fetchone()
         return self._task_dict(row) if row else None
@@ -4922,25 +5010,62 @@ class ChatStorage:
         conditions = []
         parameters: list[Any] = []
         if conversation_id:
-            conditions.append("conversation_id = ?")
+            conditions.append("bt.conversation_id = ?")
             parameters.append(conversation_id)
         if active_only:
-            conditions.append(f"status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}")
+            conditions.append(f"bt.status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}")
         if exclude_kinds:
             # 任务面板只要后台作业。过滤必须在 SQL 层：默认 limit 是 50，而 chat 行
             # 占绝大多数，先捞出来再筛会把较早的作业挤出窗口（面板只显示最近几条）。
-            conditions.append(f"kind NOT IN {_kinds_not_in_clause(tuple(exclude_kinds))}")
+            conditions.append(f"bt.kind NOT IN {_kinds_not_in_clause(tuple(exclude_kinds))}")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         parameters.append(max(1, min(int(limit), 200)))
         with self._connect() as db:
+            has_links = _table_exists(db, "task_goal_links")
+            goal_select = ", COALESCE(tgl.goal_id, '') AS goal_id" if has_links else ""
+            goal_join = " LEFT JOIN task_goal_links tgl ON tgl.task_id = bt.id" if has_links else ""
             rows = db.execute(
-                "SELECT id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "
-"agent_id, agent_name, status, message, detail, error, "
-"cancel_requested, created_at, started_at, updated_at, finished_at, "
-"parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result, "
-"detached, origin_run_id "
-                f"FROM background_tasks {where} ORDER BY created_at DESC LIMIT ?",
+                "SELECT bt.id, bt.conversation_id, bt.kind, bt.interaction_mode, bt.input_message_id, bt.plan_id, "
+                "bt.agent_id, bt.agent_name, bt.status, bt.message, bt.detail, bt.error, "
+                "bt.cancel_requested, bt.created_at, bt.started_at, bt.updated_at, bt.finished_at, "
+                "bt.parent_job_id, bt.owner_session_id, bt.progress, bt.current_step, bt.attempt, bt.checkpoint, bt.result, "
+                f"bt.detached, bt.origin_run_id{goal_select} "
+                f"FROM background_tasks bt{goal_join} {where} ORDER BY bt.created_at DESC LIMIT ?",
                 parameters,
+            ).fetchall()
+        return [self._task_dict(row) for row in rows]
+
+    def list_goal_tasks(self, goal_id: str, active_only: bool = False) -> list[dict[str, Any]]:
+        """列出归属同一 GOAL 的全部后台作业（含直接打标 goal_id 或挂在任意轮次 run_id 下的子任务）。"""
+        gid = str(goal_id or "").strip()
+        if not gid:
+            return []
+        with self._connect() as db:
+            has_links = _table_exists(db, "task_goal_links")
+            has_rounds = _table_exists(db, "chat_goal_rounds")
+            goal_select = ", COALESCE(tgl.goal_id, '') AS goal_id" if has_links else ""
+            goal_join = " LEFT JOIN task_goal_links tgl ON tgl.task_id = bt.id" if has_links else ""
+            clauses = []
+            params: list[Any] = []
+            if has_links:
+                clauses.append("tgl.goal_id = ?")
+                params.append(gid)
+            if has_rounds:
+                clauses.append("bt.parent_job_id IN (SELECT run_id FROM chat_goal_rounds WHERE goal_id = ?)")
+                params.append(gid)
+            if not clauses:
+                return []
+            where = f"({' OR '.join(clauses)}) AND bt.kind != 'chat'"
+            if active_only:
+                where += f" AND bt.status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}"
+            rows = db.execute(
+                "SELECT bt.id, bt.conversation_id, bt.kind, bt.interaction_mode, bt.input_message_id, bt.plan_id, "
+                "bt.agent_id, bt.agent_name, bt.status, bt.message, bt.detail, bt.error, "
+                "bt.cancel_requested, bt.created_at, bt.started_at, bt.updated_at, bt.finished_at, "
+                "bt.parent_job_id, bt.owner_session_id, bt.progress, bt.current_step, bt.attempt, bt.checkpoint, bt.result, "
+                f"bt.detached, bt.origin_run_id{goal_select} "
+                f"FROM background_tasks bt{goal_join} WHERE {where} ORDER BY bt.created_at ASC",
+                params,
             ).fetchall()
         return [self._task_dict(row) for row in rows]
 
@@ -5396,6 +5521,7 @@ class ChatStorage:
             )
         except (json.JSONDecodeError, TypeError):
             result["skill_policy"] = {}
+        result.setdefault("todos", [])
         return result
 
     @staticmethod
@@ -5469,4 +5595,5 @@ class ChatStorage:
         # 统一转成 bool，避免前端拿到 0/1 时把两种情况写成两套判断。
         result["detached"] = bool(result.get("detached"))
         result["origin_run_id"] = str(result.get("origin_run_id") or "")
+        result["goal_id"] = str(result.get("goal_id") or "")
         return result

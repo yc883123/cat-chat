@@ -1404,6 +1404,227 @@ assert.ok(requests.some(row=>row.path==='/api/comfyui/tasks/done/rerun'&&row.met
         result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
+    def test_output_card_actions_and_viewport_mutual_exclusion(self):
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+        self.assertIn('#studioPageComfyui:not([data-wb-size="narrow"]) .comfyui-output-save { display: none; }', css)
+        self.assertIn('#studioPageComfyui[data-wb-size="narrow"] .comfyui-output-open-folder { display: none; }', css)
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const requests=[],toasts=[],saved=[];
+function makeEl(tag='div'){
+  const el={tagName:tag.toUpperCase(),className:'',dataset:{},attributes:{},children:[],disabled:false,hidden:false,
+    title:'',textContent:'',innerHTML:'',src:'',href:'',download:'',loading:'',controls:false,playsInline:false,preload:'',
+    classList:{add(...c){},remove(...c){},toggle(){}},
+    setAttribute(k,v){this.attributes[k]=String(v);},getAttribute(k){return this.attributes[k];},
+    append(...items){this.children.push(...items);},
+    querySelector(sel){
+      for(const c of this.children){
+        if(sel==='video'&&c.tagName==='VIDEO')return c;
+        if(c.querySelector){const found=c.querySelector(sel);if(found)return found;}
+      }
+      return null;
+    },
+    closest(){return null;}};
+  return el;
+}
+const nodes=new Map();
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeEl());return nodes.get(key)};
+const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,CSS:{escape:v=>String(v)},
+  document:{createElement:tag=>makeEl(tag),getElementById:()=>null,querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}}},
+  window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null}});
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:m=>toasts.push(String(m)),
+  state:{token:'tok1'},localFileUrl:p=>'/api/file?path='+encodeURIComponent(p),attachmentThumbUrl:r=>r.path,
+  mediaKind:(_u,n)=>/\.mp4$/.test(n)?'video':/\.wav$/.test(n)?'audio':'image',
+  isPywebview:()=>false,
+  saveLocalFile:(u,n)=>{saved.push({u,n});return 'download';},
+  api:async(path,opts)=>{requests.push({path,opts});if(path.includes('cf-missing'))throw new Error('这个条目还没有产物文件夹');return {ok:true,path:'D:\\outputs\\单次图片_20261125_cf-1'};}};
+const byMod=new Map();
+for(const match of source.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm))byMod.set(match[2],match[1].split(',').map(n=>n.trim()).filter(Boolean));
+const mod=new vm.SourceTextModule(source+'\nexport {renderOutputCard,onOutputGridClick,outputFileUrl};',{context});
+await mod.link(async spec=>{const names=byMod.get(spec)||[];return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});});
+await mod.evaluate();
+const {renderOutputCard,onOutputGridClick,outputFileUrl}=mod.namespace;
+assert.equal(outputFileUrl('cf-1','a.png','/old/单次图片_20261125_cf-1/a.png'),'/api/comfyui/tasks/cf-1/files/a.png?token=tok1');
+const card=renderOutputCard('cf-1','a.png','/old/a.png');
+const caption=card.children.find(c=>c.tagName==='FIGCAPTION');
+const buttons=caption.children.filter(c=>c.tagName==='BUTTON');
+assert.equal(buttons.length,2,'单次产物卡必须带语义分离的下载与打开文件夹两个按钮');
+const saveBtn=buttons.find(b=>b.dataset.comfyuiOutputSave!==undefined);
+const folderBtn=buttons.find(b=>b.dataset.comfyuiOutputOpenFolder!==undefined);
+assert.ok(saveBtn&&folderBtn);
+assert.equal(folderBtn.dataset.comfyuiOutputOpenFolder,'cf-1');
+assert.equal(saveBtn.dataset.comfyuiOutputSave,'/api/comfyui/tasks/cf-1/files/a.png?token=tok1');
+// 批量条目预览禁用卡片级文件夹按钮，避免与条目足部「打开文件夹」重复。
+const batchCard=renderOutputCard('cf-1','a.png','',{allowRevealFolder:false});
+const batchCap=batchCard.children.find(c=>c.tagName==='FIGCAPTION');
+assert.equal(batchCap.children.filter(c=>c.tagName==='BUTTON').length,1);
+// 点击文件夹按钮只打 POST /outputs/open，不走下载。
+let prevented=false;
+onOutputGridClick({target:{closest:sel=>sel.includes('data-comfyui-output-open-folder')?folderBtn:null},preventDefault(){prevented=true;}});
+await new Promise(r=>setTimeout(r,10));
+assert.equal(prevented,true);assert.equal(requests.length,1);assert.equal(requests[0].path,'/api/comfyui/tasks/cf-1/outputs/open');
+assert.equal(saved.length,0);
+// 点击下载按钮只走下载，不打开文件夹。
+onOutputGridClick({target:{closest:sel=>sel.includes('data-comfyui-output-save')?saveBtn:null},preventDefault(){}});
+assert.equal(saved.length,1);assert.equal(requests.length,1);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
+    def test_batch_history_edit_lifecycle_and_workflow_switch_cleanup(self):
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const requests=[],toasts=[];
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],
+  className:'',classList:{add(){},remove(){},toggle(){}},setAttribute(){},getAttribute(){return '';},removeAttribute(){},
+  addEventListener(){},append(...items){this.children.push(...items);},closest(){return null;},querySelector(){return null;},querySelectorAll(){return [];}});
+const nodes=new Map();
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key);};
+let pageListener=null,studioOpen=true,studioPage='comfyui';
+const defer=()=>{let resolve,reject;const promise=new Promise((res,rej)=>{resolve=res;reject=rej;});return {promise,resolve,reject};};
+const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,CSS:{escape:v=>String(v)},
+  document:{createElement:()=>makeNode(),getElementById:()=>null,querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}}},
+  window:{confirm:()=>true,addEventListener(){}},localStorage:{setItem(){},getItem:()=>null}});
+const wfA={id:'cw-a',name:'流 A',workflow_fingerprint:'fp-a',params_fingerprint:'pf-a',
+  prompt:{'5':{inputs:{text:'A'}},'8':{inputs:{image:'a.png'}},'10':{inputs:{image:'extra.png'}}},
+  params:[{node_id:'5',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',label:'正文'},
+          {node_id:'8',field_name:'image',field_type:'image',class_type:'LoadImage',label:'主图'},
+          {node_id:'10',field_name:'image',field_type:'image',class_type:'LoadImage',label:'副图'},
+          {node_id:'9',field_name:'lora',field_type:'text',label:'LoRA'}]};
+const wfB={id:'cw-b',name:'流 B',workflow_fingerprint:'fp-b',params_fingerprint:'pf-b',
+  prompt:{'5':{inputs:{text:'B'}},'8':{inputs:{image:'b.png'}},'10':{inputs:{audio:'voice.wav'}}},
+  params:[{node_id:'5',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',label:'新正文'},
+          {node_id:'8',field_name:'image',field_type:'image',class_type:'LoadImage',label:'保留主图'},
+          {node_id:'10',field_name:'audio',field_type:'audio',class_type:'LoadAudio',label:'改为音频'}]};
+const historyBatch={id:'cfb-old',title:'去年第1集',unload_after:false,
+  convert:{template:'h3',provider:'p1',model:'m1',system_prompt:'sys'},
+  schemes:[{workflow_id:'cw-a',workflow_name:'流 A',workflow_fingerprint:'fp-old',params_fingerprint:'pf-old',
+    fixed_baseline:{'9|lora':{node_id:'9',field_name:'lora',field_type:'number'}},
+    overrides:[{node_id:'9',field_name:'lora',value:'x.safetensors'}],
+    mapping:{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:null,resolution_slot:null,extra_points:[],
+      media_ports:[{node_id:'8',field_name:'image',checked:true},{node_id:'10',field_name:'image',checked:true}]},
+    items:[{name:'历史镜头 1',script:'历史剧本',prompt:'历史提示词',duration_seconds:8,resolution:'848x480',shots:2,extras:{},
+      media_inputs:[{node_id:'8',field_name:'image',path:'/managed/keep.png',media:'image',name:'keep.png'},
+                    {node_id:'10',field_name:'image',path:'/managed/drop.png',media:'image',name:'drop.png'}],
+      media_skip:[{node_id:'10',field_name:'image'}]}]}],
+  items:[]};
+let apiImpl=async(path,opts)=>{
+  requests.push({path,opts});
+  if(path.startsWith('/api/comfyui/workflows/cw-a'))return {workflow:wfA};
+  if(path.startsWith('/api/comfyui/workflows/cw-b'))return {workflow:wfB};
+  if(path.startsWith('/api/comfyui/batches/cfb-old'))return {batch:historyBatch};
+  if(path==='/api/comfyui/batches'&&opts?.method==='POST')return {batch:{id:'cfb-new',title:'新批',items:[]}};
+  return {workflows:[wfA,wfB],batches:[]};
+};
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:m=>toasts.push(String(m)),
+  state:{conversations:[],activeConversationId:'',providerModelCatalogs:{},bootstrap:{model_profiles:[],media_exts:{exts:{image:['.png'],audio:['.wav'],video:['.mp4']}}}},
+  localFileUrl:p=>p,attachmentThumbUrl:r=>r.path,mediaKind:()=> 'image',isPywebview:()=>false,saveLocalFile:()=>false,
+  currentStudioPage:()=>studioPage,isStudioOpen:()=>studioOpen,
+  onStudioPageChange:cb=>{pageListener=cb;return ()=>{};},
+  api:(p,o)=>apiImpl(p,o)};
+const byMod=new Map();
+for(const match of source.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm))byMod.set(match[2],match[1].split(',').map(n=>n.trim()).filter(Boolean));
+const mod=new vm.SourceTextModule(source+'\nexport {batch,ensureBatchDraft,batchDraftMarkup,openBatchForEdit,cancelBatchHistoryEdit,loadBatchWorkflowDetail,setComfyuiPane,submitBatch,batchConvert};',{context});
+await mod.link(async spec=>{const names=byMod.get(spec)||[];return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});});
+await mod.evaluate();
+const {bindComfyuiEvents,batch,ensureBatchDraft,batchDraftMarkup,openBatchForEdit,cancelBatchHistoryEdit,loadBatchWorkflowDetail,setComfyuiPane,submitBatch,batchConvert}=mod.namespace;
+bindComfyuiEvents();
+// 1. 准备原有普通草稿
+ensureBatchDraft();
+batch.draft.title='正常草稿标题';
+batch.draft.schemes[0].items=[{name:'条目 1',script:'',prompt:'不要丢的正常提示词',duration:'',resolution:'',shots:1,extras:{},files:{},skips:{}}];
+// 从结果列表点击历史编辑
+$('#studioPageComfyui').dataset.comfyuiPane='tasks';
+batch.resultsDetailId='cfb-old';
+await openBatchForEdit('cfb-old');
+assert.equal(batch.editMode,true);assert.equal(batch.editBatchId,'cfb-old');
+assert.equal(batch.draft.title,'去年第1集');
+const banner=batchDraftMarkup();
+assert.ok(banner.includes('data-batch-history-banner')&&banner.includes('去年第1集')&&banner.includes('data-batch-action="cancel-history-edit"'));
+// 2. 点击「取消编辑」应恢复普通草稿并回到此前结果详情
+cancelBatchHistoryEdit();
+assert.equal(batch.editMode,false);
+assert.equal(batch.draft.title,'正常草稿标题');
+assert.equal(batch.draft.schemes[0].items[0].prompt,'不要丢的正常提示词');
+assert.equal($('#studioPageComfyui').dataset.comfyuiPane,'tasks');
+assert.equal(batch.resultsDetailId,'cfb-old');
+assert.equal(batchDraftMarkup().includes('data-batch-history-banner'),false);
+// 3. 重新进入历史编辑后，离开批量页签或离开造梦机页都必须退出历史编辑态
+await openBatchForEdit('cfb-old');
+assert.equal(batch.editMode,true);
+setComfyuiPane('workflows');
+assert.equal(batch.editMode,false);
+assert.equal(batch.draft.title,'正常草稿标题');
+await openBatchForEdit('cfb-old');
+assert.equal(batch.editMode,true);
+studioPage='novel';pageListener('novel',{closed:false});
+assert.equal(batch.editMode,false);assert.equal(batch.draft.title,'正常草稿标题');
+// 4. 在途编辑加载期间切离后，迟到回包不得复活历史编辑态
+studioPage='comfyui';
+const slowEdit=defer();
+const prevApi=apiImpl;
+apiImpl=async(p,o)=>p.startsWith('/api/comfyui/batches/cfb-old')?slowEdit.promise:prevApi(p,o);
+const pendingEdit=openBatchForEdit('cfb-old');
+setComfyuiPane('run');
+slowEdit.resolve({batch:historyBatch});await pendingEdit;
+assert.equal(batch.editMode,false);assert.equal(batch.draft.title,'正常草稿标题');
+apiImpl=prevApi;
+// 5. 历史编辑切换工作流：清理恢复告警/fixedIssues/旧端口资产，保住文本和同身份端口，不影响方案2，阻塞loading/failure，提交成功退出历史态
+await openBatchForEdit('cfb-old');
+assert.ok(batch.draft.schemes[0].restoreWarning);
+assert.ok(batch.draft.schemes[0].fixedIssues.length>0);
+// 添加第2方案检验隔离性
+batch.draft.schemes.push({id:'bs-keep',workflow_id:'cw-a',detail:wfA,mapping:{prompt_slot:null,duration_slot:null,resolution_slot:null,extra_points:[],media_ports:[]},
+  fixed:{'9|lora':'keep2'},fixedIssues:[{key:'9|lora',kind:'missing',label:'k',reason:'r'}],restoreWarning:'方案2提示',items:[{name:'2',script:'',prompt:'p2',shots:1,extras:{},files:{},skips:{}}]});
+const s1=batch.draft.schemes[0];
+const loadB=defer();
+apiImpl=async(p,o)=>p.startsWith('/api/comfyui/workflows/cw-b')?loadB.promise:prevApi(p,o);
+const switchPromise=loadBatchWorkflowDetail(s1,'cw-b');
+assert.equal(s1.restoreWarning,'','切换工作流后立刻清 restoreWarning');
+assert.equal(s1.fixedIssues.length,0,'切换工作流后立刻清 fixedIssues');
+assert.equal(s1.loading,true);
+// 方案2完全不受影响
+assert.equal(batch.draft.schemes[1].restoreWarning,'方案2提示');
+assert.equal(batch.draft.schemes[1].fixedIssues.length,1);
+// loading 期间阻止提交
+requests.length=0;await submitBatch();
+assert.equal(requests.some(r=>r.path==='/api/comfyui/batches'&&r.opts?.method==='POST'),false);
+assert.match(batch.blockedMessage,/正在读取工作流参数/);
+loadB.resolve({workflow:wfB});await switchPromise;
+assert.equal(s1.detail.id,'cw-b');
+assert.equal(s1.items[0].name,'历史镜头 1');assert.equal(s1.items[0].script,'历史剧本');
+assert.equal(s1.items[0].prompt,'历史提示词');assert.equal(s1.items[0].duration,'8');assert.equal(s1.items[0].shots,2);
+assert.equal(s1.items[0].files['0']?.path,'/managed/keep.png','同节点同类型端口素材保留');
+assert.equal(s1.items[0].files['1'],undefined,'不兼容节点口旧素材禁止错填');
+assert.equal(s1.items[0].skips['10|image'],undefined,'不兼容跳过地址已清');
+assert.match(s1.switchWarning,/已切换工作流/);
+// 读取失败同样阻止提交，提交失败保留历史编辑内容
+batch.draft.schemes.pop();
+apiImpl=async(p,o)=>{if(p.startsWith('/api/comfyui/workflows/cw-a'))throw new Error('网络超时');return prevApi(p,o);};
+await loadBatchWorkflowDetail(s1,'cw-a');
+requests.length=0;await submitBatch();
+assert.equal(requests.some(r=>r.path==='/api/comfyui/batches'&&r.opts?.method==='POST'),false);
+assert.match(batch.blockedMessage,/未加载就绪|网络超时/);
+assert.equal(batch.editMode,true,'提交阻止时保留历史编辑内容');
+// 切回正常流并提交成功 -> 退出历史编辑并恢复正常草稿
+apiImpl=prevApi;
+await loadBatchWorkflowDetail(s1,'cw-b');
+await submitBatch();
+assert.equal(batch.editMode,false,'重提成功后退出历史编辑态');
+assert.equal(batch.draft.title,'正常草稿标题','重提成功后回到此前正常草稿');
+assert.equal(batch.view,'run');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

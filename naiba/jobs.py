@@ -127,6 +127,7 @@ class JobSpec:
     # **不建立**父子取消关系——聊天取消不级联取消它。
     detached: bool = False
     origin_run_id: str = ""
+    goal_id: str = ""
 
 
 @dataclass
@@ -304,6 +305,7 @@ class JobRegistry:
             "conversation_id": job.get("conversation_id"),
             "parent_job_id": job.get("parent_job_id") or "",
             "owner_session_id": job.get("owner_session_id") or "",
+            "goal_id": job.get("goal_id") or "",
             "status": job.get("status"),
             "progress": float(job.get("progress") or 0),
             "current_step": str(job.get("current_step") or ""),
@@ -436,6 +438,7 @@ class JobRegistry:
                 owner_session_id=owner,
                 detached=bool(spec.detached),
                 origin_run_id=str(spec.origin_run_id or ""),
+                goal_id=str(spec.goal_id or ""),
                 **({"submission_guard": submission_guard} if submission_guard is not None else {}),
             )
         job_id = str(run["id"])

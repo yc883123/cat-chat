@@ -3,21 +3,21 @@
 // ============================================================
 
 import { $, $$, api, applyAppearance, applyModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, setAppView, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setAppViewLeaveChat, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
-import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateContextComposerLock, updateSendButtonState } from "./03-media.js";
+import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, renderContextUsage, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateContextComposerLock, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelCompaction, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, jobWaitAction, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { bindKvmemControls, checkUpdate, closeAgentAbilityPopover, closeAgentHelpPopover, closeComposerModelPicker, composerModelChoice, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentAbilityPopover, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentAbilityPopover, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, exitSidebarBatchMode, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, runSidebarBatchArchive, runSidebarBatchDelete, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarBatchActive, sidebarBatchRunning, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, toggleSidebarBatchMode, toggleSidebarBatchSelectAll, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
-import { addProvider, addSearchProfile, appearanceFormValues, applyProviderCapability, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, captureProviderKvmem, hideLocalPickers, pickKvmemPath, providerKvmemServiceAction, refreshProviderKvmemService, cleanImageCache, compactDatabase, copyProvider, deleteAgent, deleteProvider, deleteSearchProfile, hideAgentForm, handleMcpListClick, closeMcpForm, openMcpForm, setMcpFormMode, submitMcpForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetSelectChange, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, duplicateAgent, openProviderCard, openProviderPresetKeyUrl, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderMcp, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, skillDisplayName, skillMatchesQuery, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderKvmemFields, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup, populateVisionModels } from "./09-settings.js";
+import { addProvider, addSearchProfile, appearanceFormValues, applyProviderCapability, applyProviderModelCapabilities, applyProviderPreset, bindModelOverrideDialog, bindModelPickerDialog, cancelProviderEdit, captureProviderKvmem, hideLocalPickers, pickKvmemPath, providerKvmemServiceAction, refreshProviderKvmemService, cleanImageCache, compactDatabase, copyProvider, deleteAgent, deleteProvider, deleteSearchProfile, hideAgentForm, handleMcpListClick, closeMcpForm, openMcpForm, setMcpFormMode, submitMcpForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetSelectChange, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, duplicateAgent, openProviderCard, openProviderModelOverrideEditor, openProviderModelPicker, openProviderPresetKeyUrl, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderMcp, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, skillDisplayName, skillMatchesQuery, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderKvmemFields, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup, populateVisionModels } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
-import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
+import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState, updateDeepReasoningButton } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, loadFileTab, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, hideFilePopup, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
 import { guideAllInterjections, sendRunInterjection } from "./18-interjections.js";
 import { changeGoal, clearGoalPlan, goalBlocksChat, loadGoalRounds, previewGoalPlan, refreshGoal, setGoalDraftMode, submitGoalExtend, syncGoalConversation } from "./31-goals.js";
-import { changeOnboardingModel, dismissOnboarding, loadOnboardingModels, resetOnboarding, saveOnboardingProvider, scheduleOnboardingModelCheck, selectOnboardingPreset, testOnboardingConnection } from "./19-onboarding.js";
+import { changeOnboardingModel, dismissOnboarding, loadOnboardingModels, openOnboardingModelPicker, resetOnboarding, saveOnboardingProvider, scheduleOnboardingModelCheck, selectOnboardingPreset, testOnboardingConnection } from "./19-onboarding.js";
 // 辅助对话 import 追加在 import 块末尾：守门测试（test_turn_rail / test_context_menu）
 // 按 import 区的**行号**断言 01-core / 04-messages 的位置，插在前面会把它们推后而报红。
 import { bindAuxChatEvents, restoreAuxChats, restoreDockGroup } from "./21-aux-chat.js";
@@ -36,6 +36,7 @@ import { bindNovelEvents } from "./25-novel.js";
 import { bindWriterEvents } from "./27-writer.js";
 import { bindSuperAgentEvents, closeSuperAgentView, openSuperAgentView } from "./28-super-agent.js";
 import { bindOnebotSettingsEvents, openOnebotSettings, closeOnebotSettings } from "./30-onebot-settings.js";
+import { bindChatStatusEvents, closeChatStatusPopover } from "./32-chat-status.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
@@ -891,6 +892,7 @@ function hideAttachMenu() {
 
 // 动作条贴着附件键**向上**展开：附件键在屏幕最下方，向下弹一定被键盘/屏幕边切掉。
 function showAttachMenu(trigger) {
+  document.dispatchEvent(new CustomEvent('naiba:close-chat-status'));
   const menu = ensureAttachMenu();
   menu.innerHTML = (isCoarsePointer()
     ? '<button type="button" role="menuitem" data-attach-kind="media">照片 / 视频</button><button type="button" role="menuitem" data-attach-kind="file">文件（PDF / Word / 文本…）</button>'
@@ -991,6 +993,42 @@ export function bindEvents() {
   $('#goalPlanButton')?.addEventListener('click', () => { void previewGoalPlan(); });
   $('#goalPlanSummary')?.addEventListener('click', (event) => {
     if (event.target.closest?.('[data-plan-action="clear"]')) clearGoalPlan();
+  });
+  bindChatStatusEvents({
+    onOpenTask: (taskId) => {
+      const dialog = $('#tasksDialog');
+      if (dialog && !dialog.open) dialog.showModal();
+      if (taskId) {
+        const reveal = () => {
+          const item = $(`#taskList [data-task-id="${CSS.escape(String(taskId))}"]`);
+          if (item) {
+            const panel = item.querySelector('.task-detail');
+            const log = item.querySelector('.task-log');
+            const btn = item.querySelector('[data-task-detail]');
+            if (panel) panel.hidden = false;
+            if (log) log.hidden = false;
+            if (btn) {
+              btn.setAttribute('aria-expanded', 'true');
+              btn.textContent = '收起';
+            }
+            item.scrollIntoView?.({ block: 'nearest' });
+          }
+          setTaskLogOpen(taskId, true);
+        };
+        reveal();
+        window.requestAnimationFrame(reveal);
+      }
+    },
+    onCancelTask: (taskId) => cancelTask(taskId),
+    onCloseOtherMenus: () => {
+      hideAttachMenu();
+      closeComposerModelPicker();
+      closePermissionModeMenu();
+      closeReasoningMenu();
+      closeQuickMessagePanel();
+      hideSkillPopup();
+      hideFilePopup();
+    },
   });
   bindOnebotSettingsEvents();
   // 顶层应用入口唯一绑定点：Chat / Studio / 任务总管。
@@ -1155,9 +1193,21 @@ export function bindEvents() {
     }
   });
   $('#modelSelect').addEventListener('change', saveModelSelection);
+  $('#modelSelect').addEventListener('change', () => {
+    updateDeepReasoningButton();
+    if (state.contextUsage) renderContextUsage();
+  });
   $('#composerModelSelect').addEventListener('change', saveComposerModelSelection);
   // 自动化脚本 / 程序化改值（page.selectOption）不经过浮层：change 后把触发按钮文案对齐一次。
-  $('#composerModelSelect').addEventListener('change', () => syncComposerModelPicker());
+  $('#composerModelSelect').addEventListener('change', () => {
+    syncComposerModelPicker();
+    updateDeepReasoningButton();
+    if (state.contextUsage) renderContextUsage();
+  });
+  document.addEventListener('cat-chat:model-overrides-updated', () => {
+    updateDeepReasoningButton();
+    if (state.contextUsage) renderContextUsage();
+  });
   $('#agentSelect').addEventListener('change', saveAgentSelection);
   bindKvmemControls();
   $('#openSkills').addEventListener('click', () => {
@@ -1652,6 +1702,7 @@ export function bindEvents() {
   // composer-meta「快捷消息」面板：按钮开合 + 点击委托（插入/编辑/删除/新建）+ 点外部关闭
   $('#quickMessageButton')?.addEventListener('click', (event) => {
     event.stopPropagation();
+    closeChatStatusPopover();
     toggleQuickMessagePanel();
   });
   $('#quickMessagePanel')?.addEventListener('click', handleQuickMessagePanelClick);
@@ -2281,6 +2332,10 @@ export function bindEvents() {
     updateProviderKvmemFields();
     updateProviderContextField();
   });
+  bindModelPickerDialog();
+  bindModelOverrideDialog();
+  $('#providerModelTrigger')?.addEventListener('click', openProviderModelPicker);
+  $('#addProviderModelOverride')?.addEventListener('click', () => openProviderModelOverrideEditor());
   $('#providerModel').addEventListener('change', () => {
     toggleCustomModel();
     applyProviderModelCapabilities();
@@ -2324,6 +2379,7 @@ export function bindEvents() {
   $('#onboardingBaseUrl').addEventListener('input', scheduleOnboardingModelCheck);
   $('#onboardingApiKey').addEventListener('input', scheduleOnboardingModelCheck);
   $('#onboardingLoadModels').addEventListener('click', () => { loadOnboardingModels(); });
+  $('#onboardingModelTrigger')?.addEventListener('click', openOnboardingModelPicker);
   $('#onboardingModel').addEventListener('change', changeOnboardingModel);
   $('#onboardingModelCustom').addEventListener('input', changeOnboardingModel);
   $('#onboardingSkip').addEventListener('click', () => $('#onboardingDialog').close());
@@ -2573,6 +2629,7 @@ export function bindEvents() {
   }
   $('#backupData').addEventListener('click', backupData);
   $('#applyDataDir').addEventListener('click', applyAndMigrateDataDir);
+  $('#pickDataDir')?.addEventListener('click', pickDataDir);
 }
 
 export function setSkillImportStatus(message, kind) {
@@ -3232,10 +3289,10 @@ export async function unhideSkill(skillId) {
   }
 }
 
-export function renderDataMigration() {
+export function renderDataMigration({ preserveInput = false } = {}) {
   const m = state.bootstrap?.data_migration || {};
   const configured = m.configured_data_dir || state.bootstrap?.settings?.resolved_data_dir || m.data_dir || '';
-  if ($('#dataDir') && document.activeElement !== $('#dataDir')) $('#dataDir').value = configured;
+  if (!preserveInput && $('#dataDir') && document.activeElement !== $('#dataDir')) $('#dataDir').value = configured;
   $('#migrationDbVersion').textContent = m.db_version != null ? String(m.db_version) : '-';
   $('#migrationDataDir').textContent = m.restart_required
     ? `${m.data_dir || '-'}（重启后切换到 ${configured}）`
@@ -3247,6 +3304,41 @@ export function renderDataMigration() {
     ? (m.applied_versions.length ? m.applied_versions.join(', ') : '无')
     : '-';
   $('#migrationBackup').textContent = m.backup_location || '-';
+}
+
+export async function pickDataDir() {
+  const input = $('#dataDir');
+  const btn = $('#pickDataDir');
+  if (!input) return;
+  const label = btn?.querySelector('span');
+  const prevLabel = label ? label.textContent : '';
+  if (btn) btn.disabled = true;
+  if (label) label.textContent = '选择中…';
+  try {
+    const result = await api('/api/fs/pick', {
+      method: 'POST',
+      body: {
+        mode: 'dir',
+        initial: input.value.trim(),
+        title: '选择目标数据目录',
+      },
+    });
+    if (result.cancelled || !result.path) return;
+    input.value = result.path;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    if ($('#migrationMessage')) {
+      $('#migrationMessage').textContent = '已选择目标目录，点击「应用并迁移」开始迁移。';
+    }
+  } catch (error) {
+    if ($('#migrationMessage')) {
+      $('#migrationMessage').textContent = `选择文件夹失败：${error.message}`;
+    } else {
+      toast(`选择文件夹失败：${error.message}`);
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+    if (label) label.textContent = prevLabel;
+  }
 }
 
 export async function applyAndMigrateDataDir() {
@@ -3294,7 +3386,7 @@ export async function backupData() {
     const files = Array.isArray(r.files) ? `（${r.files.length} 个文件）` : '';
     $('#migrationMessage').textContent = `已备份到：${r.backup_dir || ''}${files}`;
     if (r.backup_location) { state.bootstrap.data_migration = state.bootstrap.data_migration || {}; state.bootstrap.data_migration.backup_location = r.backup_location; }
-    renderDataMigration();
+    renderDataMigration({ preserveInput: true });
   } catch (error) {
     $('#migrationMessage').textContent = '备份失败：' + error.message;
   }

@@ -32,6 +32,23 @@ function currentAgent() {
   return agent;
 }
 
+function currentAgentName() {
+  const name = String(currentAgent()?.name || '').trim();
+  return name || 'AI 助手';
+}
+
+function formatMessageHeaderTime(ms) {
+  const date = new Date(Number(ms) || 0);
+  if (!date.getTime()) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  const hm = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return sameDay ? hm : `${date.getMonth() + 1}/${date.getDate()} ${hm}`;
+}
+
 // 内置默认种子模板（设置页留空时回退用它）；占位符：{handoff_path} / {task_count} / {task_list}
 export const DEFAULT_CONTEXT_RESET_SEED = [
   '上一段会话已交接，交接文档：{handoff_path}',
@@ -240,7 +257,7 @@ export function messageElement(message, temporary = false) {
         + '<button data-delete-message title="删除这条提问（可只删这一条，或连同 AI 回复整轮删除；10 秒内可撤销）">删除</button>'
         + '</div>'
       : '';
-    row.innerHTML = `<div class="message-body">${supervisedLabel}${waitSourceLabel}${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${folderIndexMarkup(metadata.folder_indexes)}${actions}</div>`;
+    row.innerHTML = `<div class="message-body">${supervisedLabel}${waitSourceLabel}${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${folderIndexMarkup(metadata.folder_indexes)}</div>${actions}`;
   } else {
     const abortedBadge = metadata.aborted
       ? '<span class="aborted-badge">已中止</span>'
@@ -264,6 +281,8 @@ export function messageElement(message, temporary = false) {
       : (avatarEmoji
         ? `<div class="message-avatar message-avatar-emoji">${escapeHtml(avatarEmoji)}</div>`
         : '<div class="message-avatar">AI</div>');
+    const agentName = currentAgentName();
+    const headerTime = temporary ? '' : formatMessageHeaderTime(message.created_at);
     // 「新会话」分割线入口：紧挨「复制」右侧（只有已落库的完整回复才有 id，流式临时气泡不给）。
     const sessionButton = (!temporary && message.id)
       ? `<button data-session-start-after="${escapeHtml(message.id)}" title="在这条回复之后划一条分割线：此线以上的消息不再进入模型上下文（下方消息仍在上下文中，聊天记录全部保留）">新会话</button>`
@@ -278,15 +297,22 @@ export function messageElement(message, temporary = false) {
     const deleteButton = (!temporary && message.id)
       ? `<button data-delete-message title="删除这条回复（保留提问；10 秒内可撤销）">删除</button>`
       : '';
+    const usageHtml = temporary ? '' : usageMarkup({ ...(metadata.usage || {}), performance: metadata.performance || metadata.usage?.performance }, message.created_at);
+    const footerHtml = temporary
+      ? ''
+      : `<div class="message-footer">${usageHtml}<div class="message-actions"><button data-copy-message>复制</button>${regenerateButton}${deleteButton}${sessionButton}</div></div>`;
     row.innerHTML = `
-      ${avatarHtml}
       <div class="message-card">
+        <div class="message-header">
+          ${avatarHtml}
+          <span class="message-author">${escapeHtml(agentName)}</span>
+          ${abortedBadge}
+          ${temporary ? '<div class="run-activity activity">正在准备</div>' : (headerTime ? `<time class="message-time">${escapeHtml(headerTime)}</time>` : '')}
+        </div>
         <div class="message-body">
           ${skillMarkup(metadata.skills)}
-          ${hideBottomContent ? abortedBadge : ''}
           ${reasoningToolHtml}
-          ${temporary ? '<div class="run-activity activity">正在准备</div>' : ''}
-          <div class="answer-content" data-raw="" ${hideBottomContent ? 'style="display:none"' : ''}>${temporary ? '' : abortedBadge + markdown(message.content)}</div>
+          <div class="answer-content" data-raw="" ${hideBottomContent ? 'style="display:none"' : ''}>${temporary ? '' : markdown(message.content)}</div>
           ${temporary ? '' : truncationNotice(metadata.truncated)}
           ${temporary ? '' : jobWaitMarkup(metadata.job_wait)}
           ${temporary ? '' : sourcesMarkup(metadata.sources)}
@@ -294,8 +320,7 @@ export function messageElement(message, temporary = false) {
           ${bottomAttachments.length ? mediaTruncatedNotice(metadata.attachments_truncated) : ''}
           ${temporary ? '' : mediaProductsMarkup(metadata)}
           ${temporary ? '' : fileChangesSummaryMarkup(metadata.files)}
-          ${temporary ? '' : usageMarkup({ ...(metadata.usage || {}), performance: metadata.performance || metadata.usage?.performance }, message.created_at)}
-          ${temporary ? '' : `<div class="message-actions"><button data-copy-message>复制</button>${regenerateButton}${deleteButton}${sessionButton}</div>`}
+          ${footerHtml}
         </div>
       </div>`;
   }

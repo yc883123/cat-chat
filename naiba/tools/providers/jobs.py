@@ -41,6 +41,10 @@ def _todo_write_handler(
         todos.append({"id": str(item.get("id") or index), "content": content[:1000], "status": status})
     if active > 1:
         return False, "同时最多只能有一个 in_progress 任务"
+    conversation_id = str((run_context or {}).get("conversation_id") or "")
+    setter = getattr(getattr(app, "storage", None), "set_conversation_todos", None)
+    if conversation_id and callable(setter):
+        setter(conversation_id, todos)
     return True, json.dumps({"saved": True, "todos": todos}, ensure_ascii=False)
 
 

@@ -8,7 +8,7 @@ import sqlite3
 import time
 from typing import Any
 
-from naiba.core.contracts import (GOAL_COMPLETION_POLICIES, GOAL_DEFAULT_LIMITS,
+from naiba.core.contracts import (GOAL_COMPLETION_POLICIES, GOAL_DEFAULT_LIMITS, GOAL_EXECUTION_POLICIES,
                                   GOAL_MAX_LIMITS, GOAL_STATUSES, GOAL_STOP_CODES)
 
 
@@ -117,6 +117,17 @@ def migrate_goal_extensions(db: sqlite3.Connection) -> None:
         raise
 
 
+def migrate_goal_continuous(db: sqlite3.Connection) -> None:
+    """v36 GOAL 增量：显式执行策略（旧目标保留 bounded，新目标默认 continuous）。"""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(chat_goals)")}
+    if columns and "execution_policy" not in columns:
+        db.execute("ALTER TABLE chat_goals ADD COLUMN execution_policy TEXT NOT NULL DEFAULT 'bounded'")
+
+
+def _has_goal_column(db: sqlite3.Connection, column: str) -> bool:
+    return any(row[1] == column for row in db.execute("PRAGMA table_info(chat_goals)"))
+
+
 def goal_now() -> int:
     return int(time.time() * 1000)
 
@@ -176,10 +187,18 @@ def insert_goal(db: sqlite3.Connection, conversation_id: str, message_id: str, r
     stop_code = spec.get("stop_code", "")
     if stop_code not in GOAL_STOP_CODES:
         raise ValueError("无效的目标停止原因")
+    execution_policy = str(spec.get("execution_policy") or "bounded")
+    if execution_policy not in GOAL_EXECUTION_POLICIES:
+        raise ValueError("无效的目标执行策略")
     for key in ("criteria", "sources", "stages", "manual_items"):
         if not isinstance(spec.get(key, []), list):
             raise ValueError("目标清单必须是列表")
-    deadline = spec.get("deadline_at", now + spec.get("duration_ms", 3 * 60 * 60 * 1000))
+    if "deadline_at" in spec:
+        deadline = spec["deadline_at"]
+    elif execution_policy == "continuous":
+        deadline = 0
+    else:
+        deadline = now + spec.get("duration_ms", 3 * 60 * 60 * 1000)
     columns = {row[1] for row in db.execute("PRAGMA table_info(chat_goals)")}
     # Explicit v33 fixtures and old callers remain supported; real installs use
     # the independent v34 migration before constructing new GOALs.
@@ -193,14 +212,24 @@ def insert_goal(db: sqlite3.Connection, conversation_id: str, message_id: str, r
                    (spec["id"], run_id))
         return
     binding = _wait_binding(spec.get("wait_binding", {}), spec["id"], run_id)
-    db.execute("""INSERT INTO chat_goals(id, conversation_id, request_id, request_hash, message,
-        input_message_id, run_id, status, created_at, updated_at, deadline_at, criteria,
-        limits,sources,stages,manual_items,completion_policy,wait_binding,stop_code)
-        VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?)""",
-        (spec["id"], conversation_id, spec["request_id"], spec["request_hash"], spec["message"],
-         message_id, run_id, now, now, deadline, goal_json(criteria), goal_json(limits),
-         goal_json(spec.get("sources", [])), goal_json(spec.get("stages", [])),
-         goal_json(manual_items), policy, goal_json(binding), stop_code))
+    if "execution_policy" in columns:
+        db.execute("""INSERT INTO chat_goals(id, conversation_id, request_id, request_hash, message,
+            input_message_id, run_id, status, created_at, updated_at, deadline_at, criteria,
+            limits,sources,stages,manual_items,completion_policy,wait_binding,stop_code,execution_policy)
+            VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (spec["id"], conversation_id, spec["request_id"], spec["request_hash"], spec["message"],
+             message_id, run_id, now, now, deadline, goal_json(criteria), goal_json(limits),
+             goal_json(spec.get("sources", [])), goal_json(spec.get("stages", [])),
+             goal_json(manual_items), policy, goal_json(binding), stop_code, execution_policy))
+    else:
+        db.execute("""INSERT INTO chat_goals(id, conversation_id, request_id, request_hash, message,
+            input_message_id, run_id, status, created_at, updated_at, deadline_at, criteria,
+            limits,sources,stages,manual_items,completion_policy,wait_binding,stop_code)
+            VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?)""",
+            (spec["id"], conversation_id, spec["request_id"], spec["request_hash"], spec["message"],
+             message_id, run_id, now, now, deadline, goal_json(criteria), goal_json(limits),
+             goal_json(spec.get("sources", [])), goal_json(spec.get("stages", [])),
+             goal_json(manual_items), policy, goal_json(binding), stop_code))
     db.execute("""INSERT INTO chat_goal_rounds(goal_id,generation,run_id,status,created_at,
         model_requests_start,tool_actions_start) VALUES (?,1,?,'queued',?,0,0)""",
         (spec["id"], run_id, now))
@@ -245,7 +274,15 @@ class GoalStore:
             result.setdefault(key, [])
         result.setdefault("stop_code", "")
         result.setdefault("wait_binding", {})
+        result.setdefault("execution_policy", "bounded")
         return result
+
+    def round_run_ids(self, goal_id: str) -> list[str]:
+        with self.storage._connect() as db:
+            return [str(row[0]) for row in db.execute(
+                "SELECT run_id FROM chat_goal_rounds WHERE goal_id=? ORDER BY generation ASC",
+                (goal_id,),
+            ).fetchall() if row[0]]
 
     def waiting(self, kind: str = "", target_id: str = "") -> list[dict[str, Any]]:
         with self.storage._connect() as db:
@@ -295,9 +332,14 @@ class GoalStore:
 
     def bind_next(self, db: sqlite3.Connection, goal_id: str, run_id: str, version: int) -> None:
         now = goal_now()
+        policy_clause = (
+            "(execution_policy='continuous' OR generation<json_extract(limits,'$.rounds'))"
+            if _has_goal_column(db, "execution_policy")
+            else "generation<json_extract(limits,'$.rounds')"
+        )
         updated = db.execute("UPDATE chat_goals SET run_id=?, generation=generation+1, version=version+1, updated_at=?, "
-                             "wait_binding='{}' WHERE id=? AND version=? AND status='queued' AND deadline_at>? "
-                             "AND generation<json_extract(limits,'$.rounds')",
+                             f"wait_binding='{{}}' WHERE id=? AND version=? AND status='queued' "
+                             f"AND (deadline_at<=0 OR deadline_at>?) AND {policy_clause}",
                              (run_id, now, goal_id, version, now))
         if updated.rowcount != 1:
             raise GoalConflict("目标状态已变化或时间、轮次额度已用完")
@@ -309,9 +351,14 @@ class GoalStore:
         with self.storage._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             now = goal_now()
+            policy_clause = (
+                "(execution_policy='continuous' OR generation<=json_extract(limits,'$.rounds'))"
+                if _has_goal_column(db, "execution_policy")
+                else "generation<=json_extract(limits,'$.rounds')"
+            )
             changed = db.execute("UPDATE chat_goals SET status='running', version=version+1, updated_at=? "
-                "WHERE id=? AND run_id=? AND status='queued' AND deadline_at>? "
-                "AND generation<=json_extract(limits,'$.rounds')",
+                f"WHERE id=? AND run_id=? AND status='queued' AND (deadline_at<=0 OR deadline_at>?) "
+                f"AND {policy_clause}",
                 (now, goal_id, run_id, now)).rowcount
             if changed:
                 db.execute("UPDATE chat_goal_rounds SET status='running' WHERE goal_id=? AND run_id=?",
@@ -339,9 +386,14 @@ class GoalStore:
             raise ValueError("无效的目标额度")
         now = goal_now()
         with self.storage._connect() as db:
+            limit_clause = (
+                f"(execution_policy='continuous' OR {counter}+?<=json_extract(limits,'$.{counter}'))"
+                if _has_goal_column(db, "execution_policy")
+                else f"{counter}+?<=json_extract(limits,'$.{counter}')"
+            )
             return db.execute(f"UPDATE chat_goals SET {counter}={counter}+?, updated_at=? "
-                f"WHERE id=? AND run_id=? AND status='running' AND deadline_at>? "
-                f"AND {counter}+?<=json_extract(limits,'$.{counter}') "
+                f"WHERE id=? AND run_id=? AND status='running' AND (deadline_at<=0 OR deadline_at>?) "
+                f"AND {limit_clause} "
                 f"AND (? IS NULL OR {counter}+?<=?)",
                 (count, now, goal_id, run_id, now, count, maximum, count, maximum)).rowcount == 1
 
@@ -462,7 +514,7 @@ class GoalStore:
         with self.storage._connect() as db:
             changed = db.execute("INSERT INTO chat_goal_actions(goal_id,action_id,run_id,state,receipt) "
                 "SELECT id,?,run_id,'pending',? FROM chat_goals WHERE id=? AND run_id=? "
-                "AND status='running' AND deadline_at>?",
+                "AND status='running' AND (deadline_at<=0 OR deadline_at>?)",
                 (action_id, goal_json(receipt), goal_id, run_id, goal_now())).rowcount
             if not changed:
                 raise GoalConflict("目标已停止，未发送工具动作")
@@ -470,6 +522,12 @@ class GoalStore:
     def finish_action(self, goal_id: str, action_id: str) -> None:
         with self.storage._connect() as db:
             db.execute("UPDATE chat_goal_actions SET state='confirmed' WHERE goal_id=? AND action_id=? AND state='pending'",
+                       (goal_id, action_id))
+
+    def discard_action(self, goal_id: str, action_id: str) -> None:
+        """移除未实际执行的待决动作回执（例如工具在真正派发前因 NEED_CONFIRM 被拦截）。"""
+        with self.storage._connect() as db:
+            db.execute("DELETE FROM chat_goal_actions WHERE goal_id=? AND action_id=? AND state='pending'",
                        (goal_id, action_id))
 
     def pending_actions(self, goal_id: str) -> list[tuple[str, dict[str, Any]]]:

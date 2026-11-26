@@ -131,17 +131,16 @@ async function checkViewport(browser,width) {
     await page.waitForTimeout(150);
     assert.ok(healthChecks>beforeHealth,'测试连接仍触发真实前端读取');
 
-    // 页脚菜单向上展开，真实另存对话框只查看不提交。
+    // 页脚菜单向上展开，真实另存对话框只查看不提交；单次页脚不再重复放「批量生成」。
     const actionSummary=page.locator('.comfyui-submit-row .wb-media-menu > summary');
     await actionSummary.click();
     await reachable(page.locator('#comfyuiSaveCurrentAs'),'另存工作流菜单');
+    assert.equal(await page.locator('#comfyuiOpenBatch').count(),0,'单次页脚已移除冗余批量生成按钮');
     await page.locator('#comfyuiSaveCurrentAs').click();
     await page.locator('#comfyuiSaveAsDialog').waitFor({state:'visible'});
     assert.match(await page.locator('#comfyuiSaveAsList').innerText(),/单次草稿：返回仍保留/);
     await page.locator('#comfyuiSaveAsCancel').click();
-    await actionSummary.click();
-    await reachable(page.locator('#comfyuiOpenBatch'),'批量生成菜单');
-    await page.locator('#comfyuiOpenBatch').click();
+    await pane('batch').click();
     await page.locator('[data-batch-select="workflow"]').selectOption(workflow.id);
     await page.locator('[data-batch-item="name"]').waitFor({state:'visible'});
     for(const [point,key] of [['prompt','4|text'],['duration','6|duration'],['resolution','8|width']])
@@ -199,13 +198,16 @@ async function checkViewport(browser,width) {
     await row.locator('[data-batch-action="remove-item"]').scrollIntoViewIfNeeded();
     await page.screenshot({path:path.join(OUT,`batch-actions-${width}.png`)});
 
-    // 结果管理入口做命中测试，不执行释放、打开目录或清除。
+    // 结果管理入口做命中测试；总产物文件夹入口收在页眉「⋯」菜单内。
     await pane('tasks').click();
     const resultSummary=page.locator('.comfyui-tasks-actions > summary');
     await resultSummary.click();
-    for(const id of ['comfyuiFreeModels','comfyuiOpenOutputs','comfyuiClearTasks'])await reachable(page.locator(`#${id}`),id);
+    for(const id of ['comfyuiFreeModels','comfyuiClearTasks'])await reachable(page.locator(`#${id}`),id);
     await page.keyboard.press('Escape');
     assert.equal(await resultSummary.locator('..').getAttribute('open'),null);
+    await connectionSummary.click();
+    await reachable(page.locator('#comfyuiOpenOutputs'),'打开总产物文件夹');
+    await page.keyboard.press('Escape');
     await pane('run').click();
     assert.equal(await page.locator('[data-comfyui-slot="4|text"]').inputValue(),'单次草稿：返回仍保留');
     await pane('batch').click();

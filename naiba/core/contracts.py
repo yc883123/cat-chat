@@ -186,6 +186,13 @@ JOB_SUBMISSION_GUARD_KEY = "submission_guard_version"
 COMFYUI_SUBMISSIONS_KEY = "submissions"
 # Editing metadata only: this does not change a ComfyUI graph or execution.
 COMFYUI_BATCH_CONVERT_KEY = "convert"
+# Managed ComfyUI output directory fields (legacy tasks omit version or < 2 and
+# always fall back to outputs/<task_id>). output_dir_move records crash-safe intent.
+COMFYUI_OUTPUT_LAYOUT_VERSION_KEY = "output_layout_version"
+COMFYUI_OUTPUT_LAYOUT_MANAGED_VERSION = 2
+COMFYUI_OUTPUT_DIR_KEY = "output_dir"
+COMFYUI_OUTPUT_DIR_MOVE_KEY = "output_dir_move"
+COMFYUI_OUTPUT_DIR_CLASSIFY_PENDING_KEY = "output_dir_classify_pending"
 # History pagination limits each response, never the retained history. Cursors
 # order by immutable (created_at, id) and belong to their list/filter scope.
 COMFYUI_HISTORY_PAGE_SIZE_KEY = "page_size"
@@ -349,11 +356,12 @@ GOAL_STATUSES = ("queued", "running", "waiting_tool", "pausing", "paused", "need
                  "awaiting_review", "cancelling", "cancelled", "completed")
 GOAL_DEFAULT_LIMITS = {"model_requests": 256, "tool_actions": 200, "rounds": 32}
 GOAL_MAX_LIMITS = {"model_requests": 4096, "tool_actions": 4096, "rounds": 512}
+GOAL_EXECUTION_POLICIES = ("continuous", "bounded")
 GOAL_COMPLETION_POLICIES = ("machine_all", "mixed", "manual")
 GOAL_CHECK_VERSION = 1
 GOAL_PLAN_VERSION = 1
 GOAL_LOCAL_CHECK_KIND = "goal_check"
-GOAL_STOP_CODES = ("", "budget_model", "budget_tools", "budget_rounds", "deadline", "no_progress",
+GOAL_STOP_CODES = ("", "budget_model", "budget_tools", "budget_rounds", "deadline", "no_progress", "loop_detected",
                    "configuration", "source_changed", "unknown_write", "job_missing", "job_failed", "check_failed", "error")
 
 
@@ -577,7 +585,7 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # callable(messages, trace_start, limit, budget, used) -> {"history", "limit", "budget"}。
     # skills/agent 在步与步之间调用；返回 history 为空 = 本步不整理，照常发请求。
     "compact_context",
-    "trace_view", "trace_checkpoint", "tool_loop_complete", "model_view_transform", "goal_cycle",
+    "trace_view", "trace_checkpoint", "tool_loop_complete", "model_view_transform", "goal_cycle", "goal_id",
     # 整理完成后，下一次完整请求组装好时推送一次包含 system/schema 的占用估算。
     "context_estimate_pending",
     "model_key", "context_limit", "context_limit_source",
@@ -617,6 +625,7 @@ def default_run_context() -> dict[str, Any]:
         "tool_loop_complete": None,
         "model_view_transform": None,
         "goal_cycle": None,
+        "goal_id": "",
         "context_estimate_pending": False,
         "model_key": "",
         "context_limit": 0,
@@ -824,6 +833,7 @@ class RunContext(TypedDict, total=False):
     tool_loop_complete: Any          # 可信任务适配器的工具组完成钩子，返回正文或 None
     model_view_transform: Any        # 可信任务适配器的下一请求视图变换，不修改原始 trace
     goal_cycle: Any                  # 可信 GOAL 轮次；模型/普通聊天请求不能填写
+    goal_id: str                     # 归属 GOAL 编号（供子代理/后台任务跨轮关联与级联取消）
     context_estimate_pending: bool   # 下一次正式请求前推送整理后的完整输入估算
     model_key: str                   # 本轮模型键（供实时用量事件标记）
     context_limit: int                # 本轮有效窗口（profile 或类型回退）

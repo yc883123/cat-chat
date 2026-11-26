@@ -7,7 +7,7 @@ import { markdown } from "./02-markdown.js";
 import { setContextUsage, toolMediaMarkup, updateContextComposerLock, updateContextUsage, usageMarkup } from "./03-media.js";
 import { fillContextResetSeed, getStreamingProseSegment, messageElement, moveBottomProseInline, refreshFirstTurnCard, replaceWithMessage, scheduleStreamingMarkdown, scrollToBottom } from "./04-messages.js";
 import { loadTasks, renderPermissionModeSwitch } from "./06-tasks-plans.js";
-import { updateUnloadModelButton } from "./07-models-agents.js";
+import { effectiveModelReasoningEffort, selectedProvider, updateUnloadModelButton } from "./07-models-agents.js";
 import { conversationOpenGeneration, isConversationOpenCurrent, createConversation, openConversation, renderSidebar } from "./08-conversations.js";
 import { uploadFiles, renderPendingFiles } from "./10-upload.js";
 import { SKILL_INSTALL_PRESET, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, settleReconnectStatus, showCompactionStatus, showElapsedStatus, stopRunWatchdog } from "./11-run-stream.js";
@@ -381,14 +381,21 @@ export function updateDeepReasoningButton() {
   btn.disabled = disabled;
   const effort = state.reasoningEffort || (state.deepReasoningEnabled ? 'medium' : 'auto');
   const auto = effort === 'auto';
-  const active = auto || effort !== 'off';
+  const inherited = auto ? effectiveModelReasoningEffort(selectedProvider(), $('#composerModelSelect')?.value || '') : effort;
+  const effectiveEffort = auto ? inherited : effort;
+  const active = effectiveEffort !== 'off';
   const label = REASONING_LABELS[effort] || REASONING_LABELS.auto;
+  const inheritedLabel = REASONING_LABELS[inherited] || REASONING_LABELS.auto;
   btn.classList.toggle('active', active);
   btn.dataset.reasoningEffort = effort;
   btn.setAttribute('aria-pressed', String(active));
-  btn.title = auto ? '思考强度：跟随 API（自动）' : `思考强度：${label}`;
+  btn.title = auto
+    ? (inherited !== 'auto' ? `思考强度：跟随模型配置（${inheritedLabel}）` : '思考强度：跟随 API（自动）')
+    : `思考强度：${label}`;
   const labelEl = $('#reasoningLabel');
-  if (labelEl) labelEl.textContent = `思考 ${label}`;
+  if (labelEl) {
+    labelEl.textContent = auto && inherited !== 'auto' ? `思考 ${inheritedLabel}` : `思考 ${label}`;
+  }
   // 菜单高亮当前等级（点开就能看到"现在用的是哪一档"）
   document.querySelectorAll('#reasoningMenu [data-reasoning-effort]').forEach((item) => {
     const isCurrent = item.dataset.reasoningEffort === effort;
@@ -408,6 +415,7 @@ export function toggleDeepReasoning() {
   menu.hidden = !open;
   $('#deepReasoningButton')?.setAttribute('aria-expanded', String(open));
   if (open) {
+    document.dispatchEvent(new CustomEvent('naiba:close-chat-status'));
     updateDeepReasoningButton();
     positionReasoningMenu();
   }
@@ -450,6 +458,7 @@ export function togglePermissionModeMenu() {
   if (!menu) return;
   if (permissionMenuState.open) { closePermissionModeMenu(); return; }
   if (button?.disabled) return;
+  document.dispatchEvent(new CustomEvent('naiba:close-chat-status'));
   // 弹层挂到 body 并 fixed 定位：避免被 .composer-wrap 的 overflow 裁剪（教训 §九.27）。
   if (menu.parentElement !== document.body) document.body.appendChild(menu);
   permissionMenuState.open = true;
@@ -845,7 +854,13 @@ function handleReasoningEndEvent() {
   if (block) {
     block.dataset.active = 'false';
     const content = block.querySelector('.reasoning-content');
-    if (!(content?.dataset.raw || '').trim()) block.remove();
+    const clean = (content?.dataset.raw || '').trim();
+    if (!clean) {
+      block.remove();
+    } else {
+      const tag = block.querySelector('summary .reasoning-tag');
+      if (tag) tag.textContent = '思考';
+    }
   }
 }
 
@@ -857,7 +872,7 @@ function handleReasoningEvent(event, { row, answer }) {
     block = document.createElement('details');
     block.className = 'reasoning-block';
     block.open = true;
-    block.innerHTML = '<summary>思考过程</summary><div class="reasoning-content"></div>';
+    block.innerHTML = '<summary><span class="reasoning-tag">思考</span></summary><div class="reasoning-content"></div>';
     answer.before(block);
   }
   const content = block.querySelector('.reasoning-content');
@@ -878,12 +893,22 @@ function toolLiveElapsed(card) {
   return startedAt ? Math.max(0, Math.round((Date.now() - startedAt) / 1000)) : 0;
 }
 
+function toolSummaryMarkup({ statusText, tool, reason = '', seconds = null }) {
+  const reasonHtml = reason ? `<span class="tool-step-reason">${escapeHtml(reason)}</span>` : '';
+  const timeHtml = seconds === null ? '' : `<span class="tool-step-time">${seconds}s</span>`;
+  return `<span class="tool-step-dot" aria-hidden="true"></span><span class="tool-step-status">${escapeHtml(statusText)}</span><code class="tool-step-name">${escapeHtml(tool)}</code>${reasonHtml}${timeHtml}`;
+}
+
 function startToolLiveTimer(card) {
   const tick = () => {
     const summary = card.querySelector('summary');
     if (!summary) return;
-    const reason = card.dataset.reason ? ` · ${card.dataset.reason}` : '';
-    summary.textContent = `Running · ${card.dataset.tool || ''}${reason} · 已运行 ${toolLiveElapsed(card)}s`;
+    summary.innerHTML = toolSummaryMarkup({
+      statusText: '执行中',
+      tool: card.dataset.tool || '',
+      reason: card.dataset.reason || '',
+      seconds: toolLiveElapsed(card),
+    });
   };
   tick();
   toolLiveTimers.set(card, setInterval(tick, 1000));
@@ -976,16 +1001,33 @@ function handleToolStartEvent(event, { row, answer }) {
   scrollToBottom();
 }
 
-function handleToolResultEvent(event, { row }) {
+function handleToolResultEvent(event, { row, conversationId }) {
   const card = findToolCard(row, event);
   if (!card) return;
   const seconds = stopToolLiveTimer(card);
   card.dataset.state = event.success ? 'completed' : 'failed';
+  const tool = String(event.tool || card.dataset.tool || '');
+  if (tool === 'todo_write' && event.success) {
+    try {
+      const parsed = JSON.parse(String(event.result || ''));
+      if (parsed && Array.isArray(parsed.todos)) {
+        const cid = String(conversationId || state.conversationId || '');
+        if (cid) {
+          state.conversationTodos ||= {};
+          state.conversationTodos[cid] = parsed.todos;
+          document.dispatchEvent(new CustomEvent('naiba:todos-changed', { detail: { id: cid } }));
+        }
+      }
+    } catch (_) {}
+  }
   const summary = card.querySelector('summary');
   if (summary) {
-    const reason = card.dataset.reason ? ` · ${card.dataset.reason}` : '';
-    const tool = String(event.tool || card.dataset.tool || '');
-    summary.textContent = `${event.success ? 'Completed' : 'Failed'} · ${tool}${reason} · ${seconds}s`;
+    summary.innerHTML = toolSummaryMarkup({
+      statusText: event.success ? '已执行' : '执行失败',
+      tool,
+      reason: card.dataset.reason || '',
+      seconds,
+    });
   }
   const live = card.querySelector('.tool-live');
   // 实时输出区留在卡片内（卡片折叠，展开仍能看到这次命令真实打了什么），空则不留空块。

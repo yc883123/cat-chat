@@ -4,7 +4,7 @@
 
 import { $, api, draggedFileCache, escapeHtml, isCoarsePointer, localFileUrl, state, toast, triggerDownload } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
-import { selectedProvider } from "./07-models-agents.js";
+import { effectiveModelContextWindow, selectedProvider } from "./07-models-agents.js";
 import { renderPendingFiles } from "./10-upload.js";
 // 输入框自增高（§九.128）：placeholder 与输入区宽度都在 updateContextComposerLock 里变，
 // 必须在那里同步重算一次高度（13-skill-refs 只依赖 01-core/02-markdown，不引入新的成环面）。
@@ -958,8 +958,11 @@ export function mediaProductsMarkup(metadata = {}) {
 export function toolRunMarkup(run = {}, markerClass = '') {
   // 工具块下方就地内嵌本次调用产出的媒体（P3）：媒体记录来自后端在产出点按声明
   // 采集的 run.media，流式与历史重放走同一份数据，位置天然一致。
-  return `<details class="tool-run${markerClass}">
-    <summary>${run.success ? '已执行' : '执行失败'} · ${escapeHtml(run.tool)}${run.reason ? ` · ${escapeHtml(run.reason)}` : ''}</summary>
+  const state = run.success ? 'completed' : 'failed';
+  const statusText = run.success ? '已执行' : '执行失败';
+  const reasonHtml = run.reason ? `<span class="tool-step-reason">${escapeHtml(run.reason)}</span>` : '';
+  return `<details class="tool-run${markerClass}" data-state="${state}">
+    <summary><span class="tool-step-dot" aria-hidden="true"></span><span class="tool-step-status">${statusText}</span><code class="tool-step-name">${escapeHtml(run.tool)}</code>${reasonHtml}</summary>
     <pre>${escapeHtml(JSON.stringify(run.arguments || {}, null, 2))}\n\n${escapeHtml(run.result || '')}</pre>
   </details>${toolMediaMarkup(run)}`;
 }
@@ -1068,9 +1071,11 @@ export function reasoningMarkup(reasoning, markerClass = '') {
   // 区别对待——用户实测确认展开态会造成最终答复被夹在时间线中间的观感问题）。
   return list.map((text) => {
     const clean = String(text || '').trim();
-    const preview = clean.replace(/\s+/g, ' ').slice(0, 80);
-    const summary = preview ? `思考：${preview}${clean.length > preview.length ? '…' : ''}` : '思考';
-    const body = `<summary>${escapeHtml(summary)}</summary><div class="reasoning-content">${markdown(clean)}</div></details>`;
+    const preview = clean.replace(/\s+/g, ' ').slice(0, 96);
+    const previewHtml = preview
+      ? `<span class="reasoning-preview">${escapeHtml(preview)}${clean.length > preview.length ? '…' : ''}</span>`
+      : '';
+    const body = `<summary><span class="reasoning-tag">思考</span>${previewHtml}</summary><div class="reasoning-content">${markdown(clean)}</div></details>`;
     return `<details class="reasoning-block tool-reasoning${markerClass}">${body}`;
   }).join('');
 }
@@ -1267,7 +1272,8 @@ export function renderContextUsage() {
   const profiles = state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
   const profile = profiles.find((item) => item.model_key === usage.model_key)
     || selectedProvider();
-  const profileLimit = Number(profile?.context_window || 0);
+  const activeModelName = String(usage.model_name || $('#composerModelSelect')?.value || profile?.model || '').trim();
+  const profileLimit = effectiveModelContextWindow(profile, activeModelName);
   const trustedStoredLimit = usage.context_limit_source
     ? Number(usage.context_limit || 0)
     : 0;

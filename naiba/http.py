@@ -557,6 +557,27 @@ class RequestHandler(BaseHTTPRequestHandler):
                 # 读取侧已跳过 hydrate（include_trace=False），这里再剥一遍只是兜底
                 # （存量行 metadata 里仍内联 trace 的极端形态）。
                 strip_message_traces(conversation["messages"])
+                if not conversation.get("todos"):
+                    # 兼容 v36 之前的旧会话：数据库快照为空时，从历史 tool_runs 里回填最近一次 todo_write。
+                    for msg in reversed(conversation["messages"]):
+                        meta = msg.get("metadata") if isinstance(msg, dict) else None
+                        runs = meta.get("tool_runs") if isinstance(meta, dict) else None
+                        if not isinstance(runs, list):
+                            continue
+                        found_todos = None
+                        for tr in reversed(runs):
+                            if not isinstance(tr, dict) or tr.get("tool") != "todo_write" or not tr.get("success"):
+                                continue
+                            try:
+                                parsed_tr = json.loads(str(tr.get("result") or ""))
+                                if isinstance(parsed_tr, dict) and isinstance(parsed_tr.get("todos"), list):
+                                    found_todos = parsed_tr["todos"]
+                                    break
+                            except (ValueError, TypeError):
+                                continue
+                        if found_todos is not None:
+                            conversation["todos"] = found_todos
+                            break
             self._json(conversation or {"error": "对话不存在"}, HTTPStatus.OK if conversation else HTTPStatus.NOT_FOUND)
         elif path == "/api/plans":
             query = urllib.parse.parse_qs(parsed.query)
@@ -831,9 +852,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.comfyui.api_task_events(task_id, str(query.get("after", ["0"])[0])))
         elif path.startswith("/api/comfyui/tasks/") and "/files/" in path:
             # 产物文件：/api/comfyui/tasks/<id>/files/<name>（本地落盘字节）。
+            query = urllib.parse.parse_qs(parsed.query)
             middle = path[len("/api/comfyui/tasks/"):]
             task_id, _, name = middle.partition("/files/")
-            self._serve_comfyui_task_file(task_id, name)
+            self._serve_comfyui_task_file(
+                task_id, name, download=query.get("download", ["0"])[0] == "1"
+            )
         elif path.startswith("/api/comfyui/tasks/"):
             self._json(*self.app.comfyui.api_task(path.rsplit("/", 1)[-1]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/artifact"):
@@ -1411,6 +1435,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/providers/pricing":
             # 定价弹层专用入口：只提交 {id, kind, pricing}，不碰连接配置。
             self._json(*self.app.api_update_provider_pricing(body))
+        elif path == "/api/providers/model-override":
+            # 单模型独立参数专用入口：只提交 {id, kind, model_name, override}，不碰连接配置。
+            self._json(*self.app.api_update_provider_model_override(body))
         elif path == "/api/provider-presets/open":
             # 「打开注册页」：preset_id 进、白名单地址出，不接受前端传 URL（见 app.py）。
             self._json(*self.app.api_open_provider_key_url(str(body.get("preset_id") or "")))
@@ -2244,13 +2271,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_comfyui_task_file(self, task_id: str, name: str) -> None:
-        """造梦机产物文件：只服务 data/comfyui/outputs/<task_id>/ 下的受管字节。"""
+    def _serve_comfyui_task_file(self, task_id: str, name: str, *, download: bool = False) -> None:
+        """造梦机产物文件：通过受管任务目录解析当前文件字节。"""
         path = self.app.comfyui.task_file(task_id, urllib.parse.unquote(str(name or "")))
         if path is None:
             self._json({"error": "产物文件不存在"}, HTTPStatus.NOT_FOUND)
             return
-        self._serve_local_file(str(path))
+        self._serve_local_file(str(path), download=download)
 
     def _serve_local_file(self, source: str, download: bool = False) -> None:
         if source.startswith("http://127.0.0.1:8188/") or source.startswith("http://localhost:8188/"):

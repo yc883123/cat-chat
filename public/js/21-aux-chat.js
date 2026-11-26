@@ -298,8 +298,11 @@ function auxMessageRow(message, index) {
     element.querySelectorAll('.tool-run').forEach((card, runIndex) => {
       const run = runs[runIndex];
       if (!run?.pending) return;
+      card.dataset.state = 'running';
       const summary = card.querySelector('summary');
-      if (summary) summary.textContent = `执行中 · ${String(run.tool || '')}`;
+      if (summary) {
+        summary.innerHTML = `<span class="tool-step-dot" aria-hidden="true"></span><span class="tool-step-status">执行中</span><code class="tool-step-name">${escapeHtml(String(run.tool || ''))}</code>`;
+      }
     });
   }
   const answer = element.querySelector('.answer-content');

@@ -731,7 +731,7 @@ class ComfyUIService:
         task = self.store.get_task(str(task_id or ""))
         if task is None:
             return {"error": "任务记录不存在或已被删除"}, 404
-        target = self.store.task_output_dir(str(task.get("id") or "")).resolve()
+        target = self.store.task_output_dir(task).resolve()
         if not target.is_dir():
             return {"error": "这个条目还没有产物文件夹"}, 404
         try:
@@ -748,5 +748,5 @@ class ComfyUIService:
         safe = str(name or "").strip()
         if not safe or "/" in safe or "\\" in safe or safe.startswith("."):
             return None
-        path = self.store.task_output_dir(task_id) / safe
+        path = self.store.task_output_dir(task) / safe
         return path if path.is_file() else None

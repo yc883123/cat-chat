@@ -2,19 +2,29 @@
 import { $, api, escapeHtml, randomUuid, state, toast } from './01-core.js';
 
 const STATUS = {
+  queued: '排队中', running: '执行中', waiting_tool: '等待任务', pausing: '暂停中', paused: '已暂停',
+  needs_user: '待处理', blocked: '已停止', awaiting_review: '待验收',
+  cancelling: '取消中', cancelled: '已取消', completed: '已完成',
+};
+const STATUS_DETAIL = {
   queued: '排队中', running: '进行中', waiting_tool: '等待后台任务', pausing: '正在暂停', paused: '已暂停',
   needs_user: '需要你处理', blocked: '已停止', awaiting_review: '待验收',
   cancelling: '正在取消', cancelled: '已取消', completed: '已完成',
 };
-const ACTION_LABEL = { pause: '暂停', resume: '继续目标', cancel: '取消目标', accept: '确认完成' };
+const ACTION_LABEL = {
+  pause: '暂停', resume: '继续目标', rebaseline: '按当前设置继续',
+  cancel: '取消目标', accept: '确认完成', dismiss: '关闭显示',
+};
 const ACTIONS = {
   queued: ['pause', 'cancel'], running: ['pause', 'cancel'], waiting_tool: ['pause', 'cancel'],
-  paused: ['resume', 'cancel'], needs_user: ['resume', 'cancel'], blocked: ['cancel'],
+  paused: ['resume', 'cancel'], needs_user: ['resume', 'cancel'], blocked: ['resume', 'cancel'],
   awaiting_review: ['accept', 'cancel'],
+  completed: ['dismiss'], cancelled: ['dismiss'],
 };
 const STOP_CODES = {
   budget_model: '模型请求额度用尽', budget_tools: '工具动作额度用尽', budget_rounds: '续跑轮次额度用尽',
-  deadline: '已到截止时间', no_progress: '多轮无确认进展', configuration: '执行配置已变化',
+  deadline: '已到截止时间', no_progress: '多轮无确认进展', loop_detected: '检测到重复失败循环，已自动暂停',
+  configuration: '执行配置已变化',
   source_changed: '引用计划已变化', unknown_write: '存在无法核对的写入', job_missing: '后台任务无法确认',
   job_failed: '后台任务失败', check_failed: '本地验收未通过', error: '本轮运行错误',
 };
@@ -25,6 +35,32 @@ const ROUND_STATUS = {
   needs_user: '需处理', blocked: '已停止', awaiting_review: '待验收', cancelling: '取消中',
   cancelled: '已取消', completed: '已完成',
 };
+const DISMISSED_STORAGE_KEY = 'naibaGoalDismissedIds';
+const dismissedGoalIds = (() => {
+  try {
+    if (typeof localStorage === 'undefined') return new Set();
+    const raw = JSON.parse(localStorage.getItem(DISMISSED_STORAGE_KEY) || '[]');
+    return new Set(Array.isArray(raw) ? raw.map(String).filter(Boolean).slice(-200) : []);
+  } catch (_) {
+    return new Set();
+  }
+})();
+function persistDismissedGoals() {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(DISMISSED_STORAGE_KEY, JSON.stringify([...dismissedGoalIds].slice(-200)));
+  } catch (_) {}
+}
+const isTerminalGoal = (goal) => Boolean(goal && ['cancelled', 'completed'].includes(goal.status));
+const isDismissedGoal = (goal) => Boolean(isTerminalGoal(goal) && goal?.id && dismissedGoalIds.has(String(goal.id)));
+function actionsForGoal(goal) {
+  if (!goal) return [];
+  const base = ACTIONS[goal.status] || [];
+  if (goal.stop_code === 'configuration' && ['paused', 'needs_user', 'blocked'].includes(goal.status)) {
+    return ['rebaseline', 'cancel'];
+  }
+  return base;
+}
 const snapshots = new Map();
 const readErrors = new Map();
 const pendingChecks = new Set();
@@ -69,14 +105,71 @@ export function goalCanPause() {
   return !writes.has(conversationId()) && Boolean(ACTIONS[currentGoal()?.status]?.includes('pause'));
 }
 
+export function dismissGoal(goalId = currentGoal()?.id) {
+  const gid = String(goalId || '');
+  const goal = currentGoal();
+  if (!gid || (goal && String(goal.id) === gid && !isTerminalGoal(goal))) return false;
+  dismissedGoalIds.add(gid);
+  persistDismissedGoals();
+  paint();
+  return true;
+}
+
+export function goalStatusInfo(id = conversationId()) {
+  const key = String(id || '');
+  const goal = snapshots.get(key) || null;
+  const error = readErrors.get(key) || '';
+  const dismissed = isDismissedGoal(goal);
+  const visible = Boolean((goal && !dismissed) || error);
+  let pillTone = 'neutral';
+  let pillText = '';
+  let spinning = false;
+  if (error && (!goal || dismissed)) {
+    pillText = 'GOAL 状态异常';
+    pillTone = 'error';
+  } else if (goal && !dismissed) {
+    const label = STATUS[goal.status] || '状态未知';
+    pillText = `GOAL ${label}`;
+    if (error) {
+      pillTone = 'error';
+    } else if (goal.status === 'running' || goal.status === 'queued') {
+      pillTone = 'running';
+      spinning = true;
+    } else if (goal.status === 'waiting_tool' || goal.status === 'pausing' || goal.status === 'cancelling') {
+      pillTone = 'waiting';
+      spinning = true;
+    } else if (goal.status === 'paused' || goal.status === 'needs_user' || goal.status === 'awaiting_review') {
+      pillTone = 'warning';
+    } else if (goal.status === 'blocked') {
+      pillTone = 'error';
+    } else if (goal.status === 'completed') {
+      pillTone = 'done';
+    } else if (goal.status === 'cancelled') {
+      pillTone = 'cancelled';
+    }
+  }
+  return {
+    goal,
+    error,
+    dismissed,
+    visible,
+    pillText,
+    pillTone,
+    spinning,
+    active: isActive(goal),
+    terminal: isTerminalGoal(goal),
+  };
+}
+
 function paint() {
   const card = $('#goalCard');
   const id = conversationId();
   const goal = currentGoal();
   const error = readErrors.get(id);
+  const dismissed = isDismissedGoal(goal);
   if (card) {
-    card.hidden = !goal && !error;
-    const key = JSON.stringify([id, goal, error, writes.has(id), rounds.get(String(goal?.id || ''))]);
+    card.hidden = (!goal || dismissed) && !error;
+    const key = JSON.stringify([id, goal, error, dismissed, writes.has(id), rounds.get(String(goal?.id || ''))]);
     if (card.dataset.snapshot !== key) {
       const detailsWasOpen = card.dataset.goalId === String(goal?.id) && card.querySelector('details')?.open;
       const focusedAction = card.contains(document.activeElement) && document.activeElement?.dataset.goalAction;
@@ -87,13 +180,14 @@ function paint() {
       }
       card.dataset.snapshot = key;
       card.dataset.goalId = goal?.id || '';
-      if (goal) {
+      if (goal && !dismissed) {
+        const isContinuous = goal.execution_policy === 'continuous';
         const deadline = goal.deadline_at ? new Date(goal.deadline_at) : null;
         const created = goal.created_at ? new Date(goal.created_at) : null;
         const dateText = date => date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : '';
         const evidence = Array.isArray(goal.evidence)
           ? goal.evidence.map(item => `${item.passed ? '通过' : '未通过'}：${item.path || item.check_id || '目标文件'}${item.sha256 ? `\nSHA-256：${item.sha256}` : ''}`).join('\n') : '';
-        const limits = goal.limits || {};
+        const limits = (!isContinuous && goal.limits) ? goal.limits : {};
         const used = (keyName) => goal[keyName] != null
           ? (limits[keyName] ? `${goal[keyName]}/${limits[keyName]}` : `${goal[keyName]}`) : '';
         const counts = [
@@ -109,19 +203,20 @@ function paint() {
         const sources = Array.isArray(goal.sources) ? goal.sources : [];
         const stages = Array.isArray(goal.stages) ? goal.stages : [];
         const manualItems = Array.isArray(goal.manual_items) ? goal.manual_items : [];
-        const extendable = !['cancelled', 'completed', 'cancelling'].includes(goal.status);
-        card.innerHTML = `<header><strong>GOAL</strong><span role="status">${STATUS[goal.status] || '状态未知'}</span></header>
+        const extendable = !isContinuous && !['cancelled', 'completed', 'cancelling'].includes(goal.status);
+        const actions = actionsForGoal(goal);
+        card.innerHTML = `<header><strong>GOAL</strong><span role="status">${STATUS_DETAIL[goal.status] || '状态未知'}</span>${isContinuous ? '<span class="goal-policy-badge">持续执行</span>' : ''}</header>
           <div class="goal-card-message">${escapeHtml(goal.message || '')}</div>
           ${goal.reason ? `<p class="goal-card-reason">${escapeHtml(goal.reason)}</p>` : ''}
-          <div class="goal-card-actions">${(ACTIONS[goal.status] || []).map(action =>
-            `<button class="control-button" type="button" data-goal-action="${action}" ${writes.has(id) ? 'disabled' : ''}>${ACTION_LABEL[action]}</button>`).join('')}</div>
+          <div class="goal-card-actions">${actions.map(action =>
+            `<button class="control-button${action === 'resume' || action === 'rebaseline' || action === 'accept' ? ' primary' : ''}" type="button" data-goal-action="${action}" ${writes.has(id) && action !== 'dismiss' ? 'disabled' : ''}>${ACTION_LABEL[action]}</button>`).join('')}</div>
           <details${detailsWasOpen ? ' open' : ''}><summary>详情</summary>
             ${counts ? `<p>${escapeHtml(counts)}</p>` : ''}
             ${criteriaTotal ? `<p>已验收 ${passedCount}/${criteriaTotal} 项${manualItems.length ? `，另有 ${manualItems.length} 项人工核对` : ''}</p>` : ''}
             ${goal.stop_code && STOP_CODES[goal.stop_code] ? `<p>停止原因：${escapeHtml(STOP_CODES[goal.stop_code])}</p>` : ''}
             ${POLICY_LABEL[goal.completion_policy] ? `<p>验收方式：${escapeHtml(POLICY_LABEL[goal.completion_policy])}</p>` : ''}
             ${dateText(created) ? `<p>创建时间：${escapeHtml(dateText(created))}</p>` : ''}
-            ${dateText(deadline) ? `<p>截止时间：${escapeHtml(dateText(deadline))}</p>` : ''}
+            ${!isContinuous && dateText(deadline) ? `<p>截止时间：${escapeHtml(dateText(deadline))}</p>` : ''}
             ${goal.run_id ? `<p>Run：${escapeHtml(goal.run_id)}</p>` : ''}
             ${waitLine ? `<p>${escapeHtml(waitLine)}</p>` : ''}
             ${sources.length ? `<p>引用计划：${sources.map(item => escapeHtml(item.name || item.path || '')).join('、')}</p>` : ''}
@@ -287,7 +382,11 @@ function storeGoal(id, goal) {
 function scheduleGoalPoll() {
   clearTimeout(timer);
   if (!viewId || !isCurrentView(viewId) || document.visibilityState === 'hidden') return;
-  timer = setTimeout(refreshGoal, goalIsActive() || readErrors.has(viewId) ? 1800 : 10000);
+  const status = currentGoal()?.status || '';
+  const interval = (status === 'cancelling' || status === 'pausing')
+    ? 600
+    : (goalIsActive() || readErrors.has(viewId) ? 1800 : 10000);
+  timer = setTimeout(refreshGoal, interval);
 }
 
 export async function refreshGoal() {
@@ -387,19 +486,24 @@ export async function submitGoal(payload) {
 export async function changeGoal(action) {
   const goal = currentGoal();
   const id = conversationId();
-  if (!isCurrentView(id) || writes.has(id) || !ACTIONS[goal?.status]?.includes(action)) return false;
+  if (action === 'dismiss') return dismissGoal(goal?.id);
+  const allowed = actionsForGoal(goal);
+  const validAction = allowed.includes(action) || Boolean(ACTIONS[goal?.status]?.includes(action));
+  if (!isCurrentView(id) || writes.has(id) || !validAction) return false;
   if (action === 'cancel' && !confirm('取消目标？已经产出的文件和记录会保留。')) return false;
   beginGoalWrite(id);
+  const endpointAction = action === 'rebaseline' ? 'resume' : action;
+  const body = action === 'rebaseline' ? { version: goal.version, rebaseline: true } : { version: goal.version };
   try {
-    const result = await api(`/api/goals/${encodeURIComponent(goal.id)}/${action}`, {
-      method: 'POST', body: { version: goal.version }, signal: AbortSignal.timeout(20000),
+    const result = await api(`/api/goals/${encodeURIComponent(goal.id)}/${endpointAction}`, {
+      method: 'POST', body, signal: AbortSignal.timeout(20000),
     });
     if (!result.goal || !storeGoal(id, result.goal)) throw new Error('服务端未返回有效目标状态');
     pendingChecks.delete(id);
     readErrors.delete(id);
     return true;
   } catch (error) {
-    if (isCurrentView(id)) toast(`${ACTION_LABEL[action]}失败：${error.message}`);
+    if (isCurrentView(id)) toast(`${ACTION_LABEL[action] || action}失败：${error.message}`);
     return false;
   } finally {
     finishGoalWrite(id);

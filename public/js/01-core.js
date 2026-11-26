@@ -39,6 +39,8 @@ export const state = {
   chatBackgroundPresets: [],
   conversations: [],
   conversationId: '',
+  // 会话级 todo_write 任务清单快照（conversationId -> [{id, content, status}]）
+  conversationTodos: {},
   selectedSkills: storedSkillIds,
   // 本会话已引用的 skill id（skills 事件权威累计，切会话清空）：弹窗头部
   // 「本会话已引用 M 个」与行内「已引用」标签共用的同一份运行时状态。
@@ -1113,11 +1115,14 @@ export function setAppView(view) {
   $('#superAgentView')?.toggleAttribute('hidden', next !== 'super-agent');
   $('#messages')?.toggleAttribute('hidden', next !== 'chat');
   $('#chatBackdrop')?.toggleAttribute('hidden', next !== 'chat');
+  if (next !== 'chat') $('#chatStatusBar')?.setAttribute('hidden', '');
   $('#turnRail')?.toggleAttribute('hidden', next !== 'chat');
   $('.composer-wrap:not(.edit-placeholder)')?.toggleAttribute('hidden', next !== 'chat');
   $('.topbar')?.toggleAttribute('hidden', next !== 'chat');
   $('#sidebarWorkspaceHeader')?.toggleAttribute('hidden', next !== 'chat');
   $('#sidebarWorkspaceTree')?.toggleAttribute('hidden', next !== 'chat');
+  document.dispatchEvent(new CustomEvent('naiba:close-chat-status'));
+  document.dispatchEvent(new CustomEvent('naiba:tasks-changed'));
   $('#sidebarStudioNav')?.toggleAttribute('hidden', next !== 'studio');
   for (const [id, active] of [['openChatMode', next === 'chat'], ['openStudio', next === 'studio'], ['openSuperAgent', next === 'super-agent']]) {
     const button = $(`#${id}`);

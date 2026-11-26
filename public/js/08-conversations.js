@@ -1487,6 +1487,8 @@ export async function openConversation(id, { expectedGeneration = null, recoverR
   // 辅助对话靠这条广播跟随当前主对话（21 监听；08 不 import 21，避免循环依赖）。
   // 放在会话数据入 state 之后：辅助面板要按 id 查父会话标题。
   state.conversationSnapshot = conversationSnapshot(conversation);
+  state.conversationTodos ||= {};
+  state.conversationTodos[id] = Array.isArray(conversation.todos) ? conversation.todos : [];
   console.log('[naiba] openConversation', id.slice(0, 8), '服务器返回消息数=', (conversation.messages || []).length);
   // 首轮上下文（系统提示词 + 工具集）折叠卡：单独拉取，失败静默（老会话无此数据）。
   const hasSystem = firstTurn && typeof firstTurn === 'object' && Boolean(firstTurn.system || firstTurn.prompt);
@@ -1519,7 +1521,9 @@ export async function openConversation(id, { expectedGeneration = null, recoverR
 export function conversationSnapshot(conversation) {
   const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
   const last = messages.at(-1);
-  return [conversation?.updated_at || '', messages.length, last?.id || '', last?.role || ''].join('|');
+  const todos = Array.isArray(conversation?.todos) ? conversation.todos : [];
+  const todoKey = todos.map((item) => `${item?.status || ''}:${item?.content || ''}`).join(',');
+  return [conversation?.updated_at || '', messages.length, last?.id || '', last?.role || '', todoKey].join('|');
 }
 
 export async function syncCurrentConversation() {
@@ -1536,12 +1540,15 @@ export async function syncCurrentConversation() {
     const index = state.conversations.findIndex((item) => item.id === id);
     if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...conversation };
     state.conversationSnapshot = snapshot;
+    state.conversationTodos ||= {};
+    state.conversationTodos[id] = Array.isArray(conversation.todos) ? conversation.todos : [];
     renderSidebar();
     renderMessages(conversation.messages || []);
     renderPermissionModeSwitch();
     state.webSearchEnabled = Boolean(Number(conversation.web_search_enabled || 0));
     state.deepReasoningEnabled = Boolean(Number(conversation.deep_reasoning_enabled || 0));
     updateDeepReasoningButton();
+    document.dispatchEvent(new CustomEvent('naiba:todos-changed', { detail: { id } }));
   } catch (error) {
     console.debug('[naiba] 对话同步失败:', error.message);
   } finally {
@@ -1891,7 +1898,8 @@ export function renderRunTasks() {
     badge.classList.toggle('is-idle', active.length === 0 && jobs.length > 0);
   }
   $('#openTasks')?.classList.toggle('has-active', active.length > 0);
-  const current = active.filter((task) => task.conversation_id === state.conversationId);
+  // 子代理已由顶部右侧胶囊集中展示，底部 #activeTaskBar 只保留非子代理后台任务（命令/ComfyUI/轮询等），避免双处重复提示。
+  const current = active.filter((task) => task.conversation_id === state.conversationId && task.kind !== 'subagent');
   const bar = $('#activeTaskBar');
   if (bar) {
     bar.hidden = current.length === 0;
@@ -1899,6 +1907,7 @@ export function renderRunTasks() {
       bar.innerHTML = `当前对话有 ${current.length} 个后台任务正在执行。<button type="button" data-open-tasks>查看</button>`;
     }
   }
+  document.dispatchEvent(new CustomEvent('naiba:tasks-changed'));
   renderTaskSummary(jobs, active);
   const list = $('#taskList');
   if (!list) return;

@@ -1253,6 +1253,7 @@ class ConversationRunMixin:
             }
             if goal_cycle is not None:
                 run_context["goal_cycle"] = goal_cycle
+                run_context["goal_id"] = str(goal_cycle.row["id"])
                 goal_cycle.cancel_event = cancel_event
                 goal_cycle.event = event
                 run_context["confirmation_ui"] = False

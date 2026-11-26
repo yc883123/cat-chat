@@ -83,7 +83,9 @@ async function waitForClosed(page, timeout = 30000) {
 async function fillForm(page, { withLimits }) {
   await page.fill('#providerName', PREFIX);
   await page.fill('#providerBaseUrl', 'https://example.invalid/v1');
-  await page.selectOption('#providerModel', '__custom__');
+  await page.click('#providerModelTrigger');
+  await page.waitForSelector('#modelPickerDialog[open]');
+  await page.click('#modelPickerManual');
   await page.fill('#providerModelCustom', 'smoke-model-reentry');
   if (withLimits) {
     // 填全上下文/输出上限 ⇒ saveProvider 跳过慢探测走快路径（用于 ③ 之后的连点验证）。

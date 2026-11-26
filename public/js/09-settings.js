@@ -1175,7 +1175,7 @@ export function setProviderEditMode(editing) {
     '#providerName', '#providerBaseUrl', '#providerApiKey', '#providerFormat',
     '#providerKind', '#providerModel', '#providerModelTrigger', '#providerModelCustom', '#providerContextWindow',
     '#providerMaxOutputTokens', '#providerTemperature', '#providerReasoningEffort',
-    '#providerSupportsImages', '#loadProviderModels', '#addProviderModelOverride',
+    '#providerSupportsImages', '#loadProviderModels', '#providerAddModelOverride',
   ].forEach((selector) => {
     const element = $(selector);
     if (element) element.disabled = !editing;
@@ -1432,7 +1432,9 @@ export function syncSavedProvider(saved) {
   // 新卡片默认没有单价 ⇒ 用量页「费用单价」角标要跟着变（不用等切回设置页才发现）。
   refreshUsagePricingBadge();
   syncComposerModelPicker();
-  document.dispatchEvent(new CustomEvent('cat-chat:model-overrides-updated'));
+  if (typeof document !== 'undefined' && typeof CustomEvent === 'function') {
+    document.dispatchEvent(new CustomEvent('cat-chat:model-overrides-updated'));
+  }
 }
 
 // 保存进行中的重入闸：`#saveProvider` 禁用只能挡住"点按钮"，**挡不住在输入框里按回车**
@@ -6332,7 +6334,9 @@ async function commitModelOverride(resetToDefault = false) {
       renderProviderModelOverrides();
     }
     syncComposerModelPicker();
+    if (typeof document !== 'undefined' && typeof CustomEvent === 'function') {
     document.dispatchEvent(new CustomEvent('cat-chat:model-overrides-updated'));
+  }
     if (dialog?.open) dialog.close('confirm');
     toast(hasAny ? `已保存 ${modelName} 的独立参数` : `已恢复 ${modelName} 为供应商默认参数`);
   } catch (error) {

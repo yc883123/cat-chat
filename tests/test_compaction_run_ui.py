@@ -223,6 +223,7 @@ function node(){const classes=new Set();return {textContent:'',title:'',style:{s
 const $=s=>{if(!nodes.has(s))nodes.set(s,node());return nodes.get(s);};
 const state={conversationId:'c1',chatBusy:true,contextUsage:null,bootstrap:{model_profiles:[]}};
 const context=vm.createContext({state,$,toast:s=>toasts.push(s),selectedProvider:()=>({}),
+ effectiveModelContextWindow:(profile,model)=>Number(profile?.model_overrides?.[model]?.context_window||profile?.context_window||0),
  maybeWarnContextUsage(){},updateContextComposerLock(){},
  window:{setInterval(update){timers.add(update);return update;},clearInterval(update){timers.delete(update);}}});
 const media=fs.readFileSync('public/js/03-media.js','utf8');

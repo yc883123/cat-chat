@@ -319,6 +319,7 @@ const context = vm.createContext({
   },
   populateVisionSettings: () => ui.push('vision'),
   populateModels: () => ui.push('models'),
+  syncComposerModelPicker: () => {},
   refreshUsagePricingBadge: () => ui.push('pricing'),
   renderProviders: () => ui.push('cards'),
   cancelProviderEdit: () => ui.push('cancel'),

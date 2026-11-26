@@ -40,6 +40,7 @@ const context = {
   renderProviderPresetGrid() {}, fillProviderPresetGuide() {}, refreshProviderPresetGrid() {},
   syncProviderKindOptions() {}, updateProviderFormatGuide() {}, updateProviderContextField() {},
   updateProviderKvmemFields() {}, updateProviderVisionHint() {}, updateUnloadModelButton() {},
+  renderProviderModelOverrides() {}, syncModelSelectTrigger() {},
   // 09-settings.js 保存供应商后会刷新 KVMem 服务状态；这里是只提取部分函数的
   // vm 沙箱，给个空桩即可，真实模块里 refreshProviderKvmemService 是同文件 export。
   refreshProviderKvmemService: async () => ({}),
@@ -61,14 +62,14 @@ function actualFunction(name) {
 }
 const declarations = [
   'providerFormGeneration', 'providerCopyId', 'providerModelCheckGeneration',
-  'providerModelCheckTimer', 'providerSaveInFlight',
+  'providerModelCheckTimer', 'providerSaveInFlight', 'providerModelOverridesDraft',
 ].map(name => {
   const match = new RegExp(`^(?:export )?let ${name}(?: = [^;]+)?;`, 'm').exec(source);
   assert.ok(match, `missing production state ${name}`);
   return match[0].replace(/^export /, '');
 });
 vm.runInContext(declarations.join('\n') + '\n' + [
-  'nextProviderCopyName', 'copyProvider', 'showProviderForm', 'providerFormValue',
+  'cloneModelOverrides', 'nextProviderCopyName', 'copyProvider', 'showProviderForm', 'providerFormValue',
   'saveProvider', 'cancelProviderEdit', 'toggleProviderKey',
 ].map(actualFunction).join('\n'), context);
 const event = { preventDefault() {} };

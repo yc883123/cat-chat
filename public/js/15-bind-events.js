@@ -2335,7 +2335,7 @@ export function bindEvents() {
   bindModelPickerDialog();
   bindModelOverrideDialog();
   $('#providerModelTrigger')?.addEventListener('click', openProviderModelPicker);
-  $('#addProviderModelOverride')?.addEventListener('click', () => openProviderModelOverrideEditor());
+  $('#providerAddModelOverride')?.addEventListener('click', () => openProviderModelOverrideEditor());
   $('#providerModel').addEventListener('change', () => {
     toggleCustomModel();
     applyProviderModelCapabilities();

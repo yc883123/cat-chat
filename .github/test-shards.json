@@ -156,6 +156,7 @@
   "test_comfyui_native_submission",
   "test_comfyui_provider_tools",
   "test_composer_model_follow",
+  "test_composer_popup_layer",
   "test_context_menu",
   "test_contracts",
   "test_conv_files",

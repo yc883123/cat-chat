@@ -110,6 +110,11 @@ export const popupState = { open: false, selectedIndex: 0, items: [], token: nul
 export function positionComposerPopup(popup) {
   const input = $('#messageInput');
   if (!popup || !input || popup.hidden) return;
+  // 弹层必须先挂到 body 再按视口坐标定位：壁纸 / 模型皮肤下 .composer 带 backdrop-filter
+  // （styles.css 的磨砂玻璃块），按 CSS 规范它会成为 position:fixed 后代的包含块——弹层坐标
+  // 于是被当成"相对 composer"，整体再往下偏一个 composer 的高度，直接掉出屏幕
+  // （表现为输入 @ 或 / 毫无反应，2026-11-26 报障）。与思考强度菜单、上下文用量浮层同一套路。
+  if (popup.parentElement !== document.body) document.body.appendChild(popup);
   const rect = input.getBoundingClientRect();
   // 可视视口感知（2026-09-30 手机截图报障）：Android Chrome 弹出软键盘时布局视口不动、
   // 可视视口缩小且被推到输入框上方（visualViewport.offsetTop > 0）。弹层是 position:fixed、

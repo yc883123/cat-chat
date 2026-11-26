@@ -2024,12 +2024,17 @@ export function renderAgentPromptPresetList() {
 export function closeAgentPromptPresetPanel() {
   const panel = $('#agentPromptPresetPanel');
   const button = $('#agentPromptPresetButton');
+  // 面板是 popover：关闭要走 hidePopover，否则 :popover-open 留在顶层（下次 hidden=false 也还会挡住点击）。
+  if (panel?.matches?.(':popover-open')) panel.hidePopover();
   if (panel) panel.hidden = true;
   button?.setAttribute('aria-expanded', 'false');
 }
 
 // 面板固定定位：与按钮左对齐、优先向下展开，贴边时上翻并夹在视口内。
-// 面板挂在模态 <dialog> 内部（top layer，body 上的 fixed 会被盖住），fixed 不受祖先 overflow 裁剪。
+// 面板挂在模态 <dialog> 内部（body 上的 fixed 会被盖住），但 4.8.1 起 dialog 自身统一带
+// backdrop-filter（磨砂玻璃）——按 CSS 规范它会成为 fixed 后代的包含块，面板坐标会被再叠上
+// 一层 dialog 原点（表现为面板整体右下偏移）。用 popover 把自己送进顶层：既盖在 dialog 之上，
+// 坐标也重新按视口解释。不支持 Popover 的旧内核退回原来的 dialog 内 fixed。
 export function positionAgentPromptPresetPanel() {
   const panel = $('#agentPromptPresetPanel');
   const button = $('#agentPromptPresetButton');
@@ -2054,6 +2059,7 @@ export async function toggleAgentPromptPresetPanel() {
     return;
   }
   panel.hidden = false;
+  try { panel.showPopover?.(); } catch { /* 已在顶层/旧内核无此 API：保持原样 */ }
   button?.setAttribute('aria-expanded', 'true');
   // 每次打开都重新取：可能刚在「存为快捷提示词」里存过新的。
   await loadConversationPromptPresets();

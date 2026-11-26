@@ -1943,6 +1943,10 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
   background: var(--surface); box-shadow: var(--shadow-3); overflow: hidden;
 }
 .quick-msg-panel[hidden] { display: none; }
+/* Agent 设置弹窗里的快捷提示词面板以 popover（顶层）显示：UA 的 [popover] 规则自带
+   inset:0 + margin:auto + 内边距与 Canvas 底色，只写 top/left 会被居中/加边，
+   这里把会改几何与配色的几项钉回原样。 */
+.agent-preset-panel { margin: 0; padding: 0; color: var(--text); }
 .quick-msg-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--text); font-size: 12px; font-weight: 600; }
 .quick-msg-head button { border: 0; border-radius: var(--r-sm); background: none; color: var(--accent); font-size: 12px; padding: 2px 6px; cursor: pointer; }
 .quick-msg-head button:hover { background: var(--surface-2); }

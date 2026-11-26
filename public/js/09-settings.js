@@ -2,7 +2,7 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, notifyProvidersChanged, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
+import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, notifyProvidersChanged, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
 import { applyConversationAgent, invalidateModelCatalogs, KVMEM_FAIL_STATES, KVMEM_POLL_INTERVAL_MS, KVMEM_POLL_LIMITS, kvmemLabel, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, syncComposerModelPicker, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
@@ -58,23 +58,7 @@ export function renderSkills(filter = '') {
 }
 
 export function populateAppearanceSettings() {
-  const appearance = state.bootstrap?.settings?.appearance || {};
-  // 会话字体三键可能是旧版服务端没给的（undefined）——applyAppearance 会沿用当前值，
-  // 所以这里直接透传，不做 || 兜底（否则"连上旧实例"会把用户字体重置回默认）。
-  applyAppearance({
-    theme: appearance.theme || 'system',
-    skin: appearance.skin || 'violet',
-    // 旧版服务端没有 skin_mode（undefined）→ applyAppearance 沿用当前值，
-    // 不会出现「打开一次设置就重置成自动」。
-    skin_mode: appearance.skin_mode,
-    chat_font_size: appearance.chat_font_size,
-    chat_font_family: appearance.chat_font_family,
-    chat_font_family_custom: appearance.chat_font_family_custom,
-    // 三个新键直接透传（undefined 时 applyAppearance 沿用当前值，见其回落约定）。
-    done_sound: appearance.done_sound,
-    done_sound_volume: appearance.done_sound_volume,
-    tray_done_toast: appearance.tray_done_toast,
-  });
+  // 启动时已同步服务端外观，打开面板只回显当前值。
   // 选项先建好再回显：select / 模型皮肤卡片里没有对应项时 value 会被清空。
   buildChatFontPickOptions();
   buildModelSkinCards();
@@ -129,11 +113,13 @@ export function syncAppearanceControls() {
   const theme = appearance.theme || 'system';
   const skin = appearance.skin || 'violet';
   const skinMode = appearance.skin_mode || 'auto';
+  const expandStyle = appearance.composer_expand_style || 'frosted';
   const size = Number(appearance.chat_font_size) || 15;
   const family = appearance.chat_font_family || 'system';
   const custom = appearance.chat_font_family_custom || '';
   $$('input[name="appearanceTheme"]').forEach((input) => { input.checked = input.value === theme; });
   $$('input[name="appearanceSkinMode"]').forEach((input) => { input.checked = input.value === skinMode; });
+  $$('input[name="appearanceComposerExpandStyle"]').forEach((input) => { input.checked = input.value === expandStyle; });
   // 皮肤选中态跨两处表达：配色皮肤用 radio，模型皮肤用卡片上的 is-active。
   // 两边都要按当前 skin 回显，且**同一次同步里互斥**——否则面板会出现两个选中项。
   $$('input[name="appearanceSkin"]').forEach((input) => { input.checked = input.value === skin; });
@@ -158,6 +144,14 @@ export function syncAppearanceControls() {
   syncRangeFill(slider);
   const output = $('#chatFontSizeValue');
   if (output) output.textContent = `${size}px`;
+  const opacitySlider = $('#messageCardOpacity');
+  if (opacitySlider) {
+    const opacityVal = appearance.message_card_opacity ?? 50;
+    if (opacitySlider.value !== String(opacityVal)) opacitySlider.value = String(opacityVal);
+    syncRangeFill(opacitySlider);
+    const opacityOutput = $('#messageCardOpacityValue');
+    if (opacityOutput) opacityOutput.textContent = `${opacityVal}%`;
+  }
   const customRow = $('#chatFontCustomRow');
   if (customRow) customRow.hidden = !usingPick;
   const pick = $('#chatFontPick');
@@ -209,6 +203,7 @@ export function buildChatFontPickOptions() {
 // 而不是默认值——否则打开一次设置就会把用户已存的偏好抹平。
 export function appearanceFormValues() {
   const slider = $('#chatFontSize');
+  const opacitySlider = $('#messageCardOpacity');
   const family = $('input[name="appearanceChatFont"]:checked');
   const customInput = $('#chatFontFamilyCustom');
   const pick = $('#chatFontPick');
@@ -226,6 +221,8 @@ export function appearanceFormValues() {
     // 优先读卡片上的选中态——它是模型皮肤的**唯一**表达方式（没有 radio 能装 18 个键）。
     skin: activePickerSkin() || 'violet',
     skin_mode: $('input[name="appearanceSkinMode"]:checked')?.value || undefined,
+    composer_expand_style: $('input[name="appearanceComposerExpandStyle"]:checked')?.value || undefined,
+    message_card_opacity: opacitySlider ? Number(opacitySlider.value) : undefined,
     chat_font_size: slider ? Number(slider.value) : undefined,
     chat_font_family: fontFamily || undefined,
     // 只有「手动填写」时才带上用户串：选了预置字体就不去动它，
@@ -1741,56 +1738,42 @@ export async function saveInterjectDirectSend(enabled) {
 /**
  * 完成提示音 / 托盘完成卡片：即时生效（与「插话直达」同款——POST /api/settings 单项提交，
  * checkbox 已经由用户点成新值，写失败必须回滚；服务端 settings 是唯一事实来源）。
- * 走 appearance 段整体提交（saveAppearance），后端白名单校验新键。
+ * 通过 saveAppearance 提交该字段。失败回滚和并发合并由同一保存队列负责。
  */
 export async function saveDoneSound(enabled) {
   const value = Boolean(enabled);
-  const previous = state.appearance?.done_sound !== false;
   try {
     await saveAppearance({ done_sound: value });
-    if ($('#doneSoundToggle')) $('#doneSoundToggle').checked = value;
-    toast(value ? '完成提示音已开启' : '完成提示音已关闭');
-    return value;
+    if (state.appearance.done_sound === value) toast(value ? '完成提示音已开启' : '完成提示音已关闭');
   } catch (error) {
-    // saveAppearance 失败时本地保留的是乐观新值；功能开关必须回滚旧值，
-    // 否则"看着开了其实没开"（与「插话直达」同款教训）。
-    applyAppearance({ ...state.appearance, done_sound: previous });
-    syncAppearanceControls();
     toast(`保存失败：${error.message}`);
-    return previous;
   }
+  syncAppearanceControls();
+  return state.appearance.done_sound;
 }
 
 export async function saveDoneSoundVolume(percent) {
   const raw = Number(percent);
   const value = Number.isFinite(raw) ? Math.min(100, Math.max(0, Math.round(raw))) : 60;
-  const previous = Number(state.appearance?.done_sound_volume) || 60;
   try {
     await saveAppearance({ done_sound_volume: value });
-    syncAppearanceControls();
-    return value;
   } catch (error) {
-    applyAppearance({ ...state.appearance, done_sound_volume: previous });
-    syncAppearanceControls();
     toast(`保存失败：${error.message}`);
-    return previous;
   }
+  syncAppearanceControls();
+  return state.appearance.done_sound_volume;
 }
 
 export async function saveTrayDoneToast(enabled) {
   const value = Boolean(enabled);
-  const previous = state.appearance?.tray_done_toast !== false;
   try {
     await saveAppearance({ tray_done_toast: value });
-    if ($('#trayDoneToastToggle')) $('#trayDoneToastToggle').checked = value;
-    toast(value ? '托盘完成卡片已开启' : '托盘完成卡片已关闭');
-    return value;
+    if (state.appearance.tray_done_toast === value) toast(value ? '托盘完成卡片已开启' : '托盘完成卡片已关闭');
   } catch (error) {
-    applyAppearance({ ...state.appearance, tray_done_toast: previous });
-    syncAppearanceControls();
     toast(`保存失败：${error.message}`);
-    return previous;
   }
+  syncAppearanceControls();
+  return state.appearance.tray_done_toast;
 }
 
 /** 「试听」：无视开关直接播一声当前音量的提示音（挑音量时不用先开开关）。 */

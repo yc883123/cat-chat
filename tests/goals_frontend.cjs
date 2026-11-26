@@ -85,7 +85,7 @@ function harness() {
   vm.runInContext(read('31-goals.js').replace(/^import .*\n/gm, '').replace(/^export /gm, ''), context);
   for (const [file, names] of [
     ['03-media.js', ['updateContextComposerLock', 'updateSendButtonState', 'updateInterjectButtonState']],
-    ['11-run-stream.js', ['sendChatMessage']], ['12-chat-input.js', ['cancelCurrentRun']],
+    ['11-run-stream.js', ['sendChatMessage', 'sendGenuiChatAction', 'canSendCardAction']], ['12-chat-input.js', ['cancelCurrentRun']],
     ['15-bind-events.js', ['openFilePicker', 'ensureAttachMenu', 'hideAttachMenu', 'showAttachMenu']],
     ['04-messages.js', ['startEditMessage', 'resendFromUserMessage', 'regenerateMessage', 'deleteMessageFlow', 'startNewSession', 'cancelSessionStart', 'cancelCompaction']],
     ['18-interjections.js', ['sendRunInterjection', 'guideInterjection', 'guideAllInterjections', 'deleteInterjection', 'reuseInterjection']],
@@ -97,6 +97,56 @@ function harness() {
 }
 const cases = [];
 function test(name, run) { cases.push({ name, run }); }
+
+test('GenUI main action sends precisely card payload and preserves drafts and files', async () => {
+  const h = harness(); await h.navigate('A');
+  h.elements['#messageInput'].value = '未发送草稿';
+  const files = [{ path: 'a.txt' }, { path: 'folder', folder: true }, { name: '上传中', uploading: true }];
+  h.state.pendingFiles = files;
+  const action = '[genui-action] confirm\n{"value":"/skill"}';
+  await h.context.sendGenuiChatAction(action, 'A');
+  assert.equal(h.fetches.length, 1);
+  const payload = JSON.parse(h.fetches[0].body);
+  assert.equal(payload.conversation_id, 'A');
+  assert.equal(payload.message, action);
+  assert.deepEqual(payload.attachments, []);
+  assert.deepEqual(payload.folders, []);
+  assert.deepEqual(payload.skill_policy.referenced_ids, []);
+  assert.equal(h.elements['#messageInput'].value, '未发送草稿');
+  assert.equal(h.state.pendingFiles, files);
+});
+
+test('GenUI action does not queue an interjection or submit a GOAL draft', async () => {
+  const h = harness(); await h.navigate('A');
+  h.elements['#messageInput'].value = '未发送目标';
+  h.context.setGoalDraftMode(true);
+  await h.context.sendGenuiChatAction('action', 'A');
+  assert.equal(h.fetches.length, 0);
+  assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  assert(h.context.goalDraftEnabled());
+  h.context.setGoalDraftMode(false);
+  h.state.chatRunId = 'run-A';
+  await h.context.sendGenuiChatAction('action', 'A');
+  assert.equal(h.fetches.length, 0);
+  assert.equal(h.elements['#messageInput'].value, '未发送目标');
+  assert(h.notices.some(text => text.includes('未发送')));
+});
+
+test('GenUI context confirmation from an older navigation cannot send after returning', async () => {
+  const h = harness(); await h.navigate('A');
+  let generation = 1;
+  h.context.conversationOpenGeneration = () => generation;
+  h.context.isConversationOpenCurrent = (expected, id) => generation === expected && id === h.state.conversationId;
+  h.context.pendingContextWarning = () => ({ percent: 90, threshold: 85 });
+  let resume;
+  h.context.showContextWarning = (_percent, _threshold, options) => { resume = options.onContinue; };
+  await h.context.sendGenuiChatAction('action', 'A');
+  assert.equal(typeof resume, 'function');
+  generation += 2; // A → B → A：仍是相同 ID，但不是同一次导航。
+  resume(); await flush();
+  assert.equal(h.fetches.length, 0);
+  assert(h.notices.some(text => text.includes('已切换')));
+});
 
 test('GET restores card, escapes data and locks all nonterminal statuses', async () => {
   for (const status of ['queued', 'running', 'pausing', 'paused', 'needs_user', 'blocked', 'awaiting_review', 'cancelling', 'cancelled', 'completed']) {

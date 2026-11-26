@@ -2,7 +2,7 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, setAppView, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setAppViewLeaveChat, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
+import { $, $$, api, applyModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, setAppView, triggerDownload, previewAppearancePatch, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setAppViewLeaveChat, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, renderContextUsage, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateContextComposerLock, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelCompaction, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, jobWaitAction, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
@@ -11,7 +11,7 @@ import { bindKvmemControls, checkUpdate, closeAgentAbilityPopover, closeAgentHel
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, exitSidebarBatchMode, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, runSidebarBatchArchive, runSidebarBatchDelete, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarBatchActive, sidebarBatchRunning, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, toggleSidebarBatchMode, toggleSidebarBatchSelectAll, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
 import { addProvider, addSearchProfile, appearanceFormValues, applyProviderCapability, applyProviderModelCapabilities, applyProviderPreset, bindModelOverrideDialog, bindModelPickerDialog, cancelProviderEdit, captureProviderKvmem, hideLocalPickers, pickKvmemPath, providerKvmemServiceAction, refreshProviderKvmemService, cleanImageCache, compactDatabase, copyProvider, deleteAgent, deleteProvider, deleteSearchProfile, hideAgentForm, handleMcpListClick, closeMcpForm, openMcpForm, setMcpFormMode, submitMcpForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetSelectChange, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, duplicateAgent, openProviderCard, openProviderModelOverrideEditor, openProviderModelPicker, openProviderPresetKeyUrl, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderMcp, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, skillDisplayName, skillMatchesQuery, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderKvmemFields, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup, populateVisionModels } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
-import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState, updateDeepReasoningButton } from "./12-chat-input.js";
+import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handleReasoningMenuKey, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState, updateDeepReasoningButton } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, loadFileTab, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, hideFilePopup, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
@@ -37,6 +37,7 @@ import { bindWriterEvents } from "./27-writer.js";
 import { bindSuperAgentEvents, closeSuperAgentView, openSuperAgentView } from "./28-super-agent.js";
 import { bindOnebotSettingsEvents, openOnebotSettings, closeOnebotSettings } from "./30-onebot-settings.js";
 import { bindChatStatusEvents, closeChatStatusPopover } from "./32-chat-status.js";
+import { bindGenuiObserver } from "./33-genui.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
@@ -356,7 +357,7 @@ async function openChatBackgroundEditor() {
     setChatBackgroundStatus('先选择一张背景图，再调整取景', true);
     return;
   }
-  // 打开前刷新几何量：编辑器打开期间不再跟踪窗口变化（对话区比例与滑杆上下限定格，
+  // 打开前刷新几何量：编辑器打开期间不再跟踪窗口变化（背景层比例与滑杆上下限定格，
   // 免得调图中窗口一动取景就跳；关掉重开即精确）。
   refreshChatBackgroundGeometry();
   const aspect = await probeChatBackgroundImageAspect(image);
@@ -448,6 +449,7 @@ function bindChatBackgroundEditor() {
   // close 事件是**唯一兜底**：Esc、× 、取消、以及任何 dialog.close() 都会走到这里。
   dialog.addEventListener('close', () => {
     if (chatBgEditorSnapshot) void revertChatBackgroundEditor();
+    refreshChatBackgroundGeometry();
     chatBgPointers.clear();
     chatBgDrag = null;
     chatBgResize = null;
@@ -457,7 +459,7 @@ function bindChatBackgroundEditor() {
   });
 
   $('#chatBgSave')?.addEventListener('click', () => { void commitChatBackgroundEditor(); });
-  // 「填满」= 图片内最大的、比例等于对话区比例的居中矩形（= 旧模型 zoom=1 的观感）。
+  // 「填满」= 图片内最大的、比例等于背景层比例的居中矩形。
   $('#chatBgFitCover')?.addEventListener('click', () => applyChatBackgroundCropPreset(chatBackgroundFillCrop()));
   // 「完整显示」= 整张图（形状与对话区不同就留白，由模糊底补）。
   $('#chatBgFitContain')?.addEventListener('click', () => applyChatBackgroundCropPreset({ x: 0, y: 0, w: 1, h: 1 }));
@@ -1361,39 +1363,61 @@ export function bindEvents() {
     const status = $('#chatFontStatus'); if (status) status.textContent = text;
   };
   let appearanceStatusTimer = 0;
-  const flashSaved = () => {
-    setAppearanceStatus('已保存');
-    clearTimeout(appearanceStatusTimer);
-    appearanceStatusTimer = setTimeout(() => setAppearanceStatus(''), 1800);
+  let appearanceCommitGeneration = 0;
+  const appearanceFields = (...keys) => {
+    const form = appearanceFormValues();
+    return Object.fromEntries(keys.map((key) => [key, form[key]]));
   };
   // 只应用不落库：字号滑块拖动、自定义字体逐字符输入这类高频事件走这里，
   // 逐像素打接口既无意义也拖慢输入。
-  const previewAppearance = () => {
-    applyAppearance(appearanceFormValues());
+  const previewAppearance = (key) => {
+    previewAppearancePatch(appearanceFields(key));
     syncAppearanceControls();
   };
   // 即时落库：外观面板的每一次「确定」改动都立刻保存。
   // 为什么不再有「保存外观」按钮：聊天背景、提示音本来就是即时的，皮肤选中也立刻生效，
   // 只留主题/字体需要点按钮时，用户根本不知道自己漏存了什么（而且按钮还夹在卡片中间）。
   // 现在整页统一为「改了就是改了」，底部只留「恢复默认外观」。
-  const commitAppearance = async () => {
-    const values = appearanceFormValues();
-    applyAppearance(values);
-    syncAppearanceControls();
+  const commitAppearance = async (values, successMessage = '已保存') => {
+    const generation = ++appearanceCommitGeneration;
+    clearTimeout(appearanceStatusTimer);
+    setAppearanceStatus('正在保存…');
     try {
-      await saveAppearance(values);
-      flashSaved();
+      const write = saveAppearance(values);
+      syncAppearanceControls();
+      await write;
+      if (generation === appearanceCommitGeneration) {
+        setAppearanceStatus(successMessage);
+        appearanceStatusTimer = setTimeout(() => setAppearanceStatus(''), 1800);
+      }
+      return true;
     } catch (error) {
-      toast(`保存外观失败：${error.message}`);
+      const message = `保存外观失败：${error.message}`;
+      if (generation === appearanceCommitGeneration) setAppearanceStatus(message);
+      toast(message);
+      return false;
+    } finally {
+      syncAppearanceControls();
     }
   };
-  $$('input[name="appearanceTheme"], input[name="appearanceChatFont"]')
-    .forEach((input) => input.addEventListener('change', () => { void commitAppearance(); }));
+  $$('input[name="appearanceTheme"]').forEach((input) =>
+    input.addEventListener('change', () => { void commitAppearance(appearanceFields('theme')); }));
+  $$('input[name="appearanceChatFont"]').forEach((input) =>
+    input.addEventListener('change', () => { void commitAppearance(appearanceFields('chat_font_family', 'chat_font_family_custom')); }));
+  $$('input[name="appearanceComposerExpandStyle"]').forEach((input) =>
+    input.addEventListener('change', () => { void commitAppearance(appearanceFields('composer_expand_style')); }));
   // 皮肤跟随方式：先落库模式，再（切回自动时）按当前模型同步一次皮肤。
   $$('input[name="appearanceSkinMode"]').forEach((input) => input.addEventListener('change', async () => {
     if (!input.checked) return;
-    await commitAppearance();
-    if (input.value === 'auto') await applyModelSkinFor(composerModelChoice());
+    if (await commitAppearance(appearanceFields('skin_mode')) && input.value === 'auto') {
+      try {
+        await applyModelSkinFor(composerModelChoice());
+      } catch (error) {
+        toast(`自动换肤失败：${error.message}`);
+      } finally {
+        syncAppearanceControls();
+      }
+    }
   }));
   // 模型皮肤卡片：点一下 = 选中该皮肤，并**同时切到手动模式**（用户手挑的结果不能被
   // 模型规则立刻覆盖）。同时清掉配色皮肤的 radio，保证面板里只有一个选中项。
@@ -1408,7 +1432,7 @@ export function bindEvents() {
     });
     const mode = $('input[name="appearanceSkinMode"][value="manual"]');
     if (mode) mode.checked = true;
-    void commitAppearance();
+    void commitAppearance(appearanceFields('skin', 'skin_mode'));
   });
   // 点配色皮肤 radio = 也在手挑，同样切到手动模式（否则保存后又被模型规则覆盖）。
   $$('input[name="appearanceSkin"]').forEach((input) => input.addEventListener('change', () => {
@@ -1419,16 +1443,19 @@ export function bindEvents() {
     });
     const mode = $('input[name="appearanceSkinMode"][value="manual"]');
     if (mode) mode.checked = true;
-    void commitAppearance();
+    void commitAppearance(appearanceFields('skin', 'skin_mode'));
   }));
   // 字号滑块：拖动时只预览，松手（change）才落库。
-  $('#chatFontSize')?.addEventListener('input', () => previewAppearance());
-  $('#chatFontSize')?.addEventListener('change', () => { void commitAppearance(); });
+  $('#chatFontSize')?.addEventListener('input', () => previewAppearance('chat_font_size'));
+  $('#chatFontSize')?.addEventListener('change', () => { void commitAppearance(appearanceFields('chat_font_size')); });
+  // 消息卡片不透明度滑块：拖动时只预览，松手（change）才落库。
+  $('#messageCardOpacity')?.addEventListener('input', () => previewAppearance('message_card_opacity'));
+  $('#messageCardOpacity')?.addEventListener('change', () => { void commitAppearance(appearanceFields('message_card_opacity')); });
   // 点选字体（原生 select：手机上弹系统选择器，不必打字）。
-  $('#chatFontPick')?.addEventListener('change', () => { void commitAppearance(); });
+  $('#chatFontPick')?.addEventListener('change', () => { void commitAppearance(appearanceFields('chat_font_family', 'chat_font_family_custom')); });
   // 自定义字体名：边打边预览，失焦/回车（change）才落库。
-  $('#chatFontFamilyCustom')?.addEventListener('input', () => previewAppearance());
-  $('#chatFontFamilyCustom')?.addEventListener('change', () => { void commitAppearance(); });
+  $('#chatFontFamilyCustom')?.addEventListener('input', () => previewAppearance('chat_font_family_custom'));
+  $('#chatFontFamilyCustom')?.addEventListener('change', () => { void commitAppearance(appearanceFields('chat_font_family_custom')); });
   // 完成提示音 / 托盘完成卡片：即时保存（与「插话直达」同款，不走「保存外观」统一落库——
   // 功能开关要的是"点了就生效"，跟主题预览那种"攒一批再存"是两种交互）。
   // 音量滑条用 change（松手才存）而不是 input（拖动过程每格打一次 API）。
@@ -1447,15 +1474,11 @@ export function bindEvents() {
     if (id) void openConversation(id).catch(error => toast(`打开会话失败：${error.message}`));
   });
   appearanceReset?.addEventListener('click', async () => {
-    try {
-      // 恢复默认必须连 skin_mode 一起回默认（auto），否则「恢复默认」之后皮肤虽然变回
-      // 紫藤，模式却还停在手动，用户下次换模型时皮肤不会跟着变——看起来像没恢复干净。
-      // 聊天背景**不动**：那是用户上传/挑的图，删掉就找不回来了；要清用「清除背景」。
-      await saveAppearance({ theme: 'system', skin: 'violet', skin_mode: 'auto', chat_font_size: 15, chat_font_family: 'system', chat_font_family_custom: '' });
-      syncAppearanceControls();
-      setAppearanceStatus('已恢复默认主题、皮肤与字体（聊天背景保留）');
-      setFontStatus('');
-    } catch (error) { toast(`恢复默认失败：${error.message}`); }
+    const changed = await commitAppearance(
+      { theme: 'system', skin: 'violet', skin_mode: 'auto', composer_expand_style: 'frosted', message_card_opacity: 50, chat_font_size: 15, chat_font_family: 'system', chat_font_family_custom: '' },
+      '已恢复默认外观（保留聊天背景）',
+    );
+    if (changed) setFontStatus('');
   });
   // 聊天背景：选图（走 /api/uploads，不进待发送附件列表）、强度滑杆、清除。
   // 控件在旧 index.html 里不存在时整块跳过（与上面外观控件同款的可选增强约定）。
@@ -1797,6 +1820,7 @@ export function bindEvents() {
     if (path) event.dataTransfer.setData('application/x-naiba-file-path', path);
   });
   $('#deepReasoningButton').addEventListener('click', toggleDeepReasoning);
+  $('#reasoningMenu')?.addEventListener('keydown', handleReasoningMenuKey);
   $('#reasoningMenu')?.addEventListener('click', async (event) => {
     const effort = event.target.closest?.('[data-reasoning-effort]')?.dataset.reasoningEffort;
     if (effort) await setReasoningEffort(effort);
@@ -3497,4 +3521,6 @@ bindComfyuiEvents();
 bindNovelEvents();
 // 织书台（工作台第五个功能页）：事件接线（与 Studio 同一个组合根）。
 bindWriterEvents();
+// GenUI（dsh-ui 互动卡片围栏）：监听消息区并懒加载渲染内核。
+bindGenuiObserver();
 // 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。

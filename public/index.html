@@ -21,12 +21,21 @@
         '13_kimi_pro','14_kimi','15_minimax_m','16_minimax_m_flash',
         '17_qwen','18_qwen_flash']);
       document.documentElement.dataset.skin = skins.has(a.skin) ? a.skin : 'violet';
+      document.documentElement.dataset.composerExpandStyle = ['frosted', 'fade_top'].includes(a.composer_expand_style) ? a.composer_expand_style : 'frosted';
+      const mco = (a.message_card_opacity === undefined || a.message_card_opacity === null || a.message_card_opacity === '' || typeof a.message_card_opacity === 'boolean') ? 50 : Math.trunc(Number(a.message_card_opacity));
+      document.documentElement.style.setProperty('--msg-card-opacity', (Number.isFinite(mco) ? Math.min(100, Math.max(20, mco)) : 50) + '%');
     } catch (_) {} })();
   </script>
   <title>Cat Chat</title>
   <link rel="stylesheet" href="/styles.css?v=__ASSET_VERSION__">
 </head>
 <body>
+  <!-- 全视口动态背景层：有自定义背景或模型皮肤时铺满整屏（侧栏 / 顶栏 / 对话 / 工作台 / 弹窗共用同一张无缝底图） -->
+  <div class="app-backdrop" id="appBackdrop" aria-hidden="true">
+    <span class="chat-bg-blur"></span>
+    <span class="model-skin-layer"></span>
+    <span class="chat-bg-surface"></span>
+  </div>
   <div class="app-shell" id="appShell">
     <aside class="sidebar" id="sidebar" aria-label="对话导航">
       <!-- 应用级视图切换：对话（会话树）/ 工作台（Studio）。工作台是应用级视图，
@@ -2361,7 +2370,20 @@
           <div class="super-agent-create-start"><label class="super-agent-check"><input id="superAgentCreateAutostart" type="checkbox">创建后立即开始（可能产生模型费用）</label>
           <label class="super-agent-check" id="superAgentCreateAutoAdvanceWrap"><input id="superAgentCreateAutoAdvance" type="checkbox">完成一步后自动继续；需要确认时会等你</label>
           <p class="writer-dialog-hint">不勾选立即开始时，只保存任务，稍后可手动开始。关联已有后台任务不会重新执行。</p></div>
-          <details class="super-agent-create-options" id="superAgentCreateMixedOptions"><summary>串联多个步骤 <small>可选</small></summary><div class="super-agent-create-group"><p class="writer-dialog-hint">把当前任务加入清单，再切换类型添加下一步。写作任务请选择“只做一个步骤”。</p><button type="button" class="control-button tiny" id="superAgentCreateAddStep">添加当前步骤</button><p class="writer-dialog-hint" id="superAgentCreateDraftStatus" role="status"></p><ol id="superAgentCreateSteps" class="super-agent-mixed-steps" aria-label="待创建的步骤"></ol><label class="super-agent-check"><input type="checkbox" id="superAgentCreateMixedAutoAdvance">按顺序自动继续，需要确认时会等你</label><button type="button" class="control-button primary" id="superAgentCreateMixedSubmit" disabled>创建整套任务</button></div></details>
+          <details class="super-agent-create-options" id="superAgentCreateMixedOptions">
+            <summary>串联多个步骤 <small>可选</small></summary>
+            <div class="super-agent-create-group">
+              <p class="writer-dialog-hint">先添加当前步骤，再选择下一步的任务类型。写作任务请选择「只做一个步骤」。</p>
+              <div class="super-agent-create-links">
+                <button type="button" class="control-button tiny" id="superAgentCreateAddStep">添加当前步骤</button>
+                <button type="button" class="control-button tiny" id="superAgentCreateChooseNext">选择下一步类型</button>
+              </div>
+              <p class="writer-dialog-hint" id="superAgentCreateDraftStatus" role="status"></p>
+              <ol id="superAgentCreateSteps" class="super-agent-mixed-steps" aria-label="待创建的步骤"></ol>
+              <label class="super-agent-check"><input type="checkbox" id="superAgentCreateMixedAutoAdvance">按顺序自动继续，需要确认时会等你</label>
+              <button type="button" class="control-button primary" id="superAgentCreateMixedSubmit" disabled>创建整套任务</button>
+            </div>
+          </details>
           </form>
         </div>
         <div class="dlg-foot">
@@ -2401,22 +2423,6 @@
             <button class="icon-button expand-button" id="expandComposer" type="button" title="展开输入框" aria-pressed="false" aria-label="展开输入框">
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><g transform="rotate(45 12 12)"><path d="M7 9l5-5 5 5"></path><path d="M7 15l5 5 5-5"></path></g></svg>
             </button>
-          </div>
-          <div class="reasoning-wrap">
-            <button class="icon-button deep-reasoning-button" type="button" id="deepReasoningButton" title="思考强度：跟随 API（自动）" aria-label="思考强度" aria-pressed="false" aria-haspopup="menu" aria-expanded="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <circle cx="12" cy="12" r="1"></circle>
-                <path d="M20.2 20.2c2.04-2.03.02-7.35-4.5-11.87S5.86 1.8 3.83 3.83c-2.04 2.03-.02 7.35 4.5 11.87s9.84 6.53 11.87 4.5Z"></path>
-                <path d="M15.7 15.7c4.52-4.52 6.54-9.84 4.5-11.87-2.03-2.04-7.35-.02-11.87 4.5S1.8 18.17 3.83 20.2c2.03 2.04 7.35.02 11.87-4.5Z"></path>
-              </svg>
-            </button>
-            <div class="reasoning-menu" id="reasoningMenu" role="menu" hidden>
-              <button type="button" data-reasoning-effort="auto" role="menuitemradio">跟随 API（自动）</button>
-              <button type="button" data-reasoning-effort="off" role="menuitemradio">关闭</button>
-              <button type="button" data-reasoning-effort="low" role="menuitemradio">低</button>
-              <button type="button" data-reasoning-effort="medium" role="menuitemradio">中</button>
-              <button type="button" data-reasoning-effort="high" role="menuitemradio">高</button>
-            </div>
           </div>
           <div class="context-usage-wrap">
             <button class="context-usage-button" type="button" id="contextUsageButton" title="上下文用量：暂无数据" aria-label="查看上下文和 Token 用量" aria-expanded="false">
@@ -2480,6 +2486,7 @@
             <!-- 审批模式：收起为一个上拉框（触发按钮显示当前档 + 点击在按钮上方弹出列表），不再平铺四段 -->
             <div class="permission-mode-switch" id="permissionModeSwitch">
               <button type="button" class="permission-mode-button" id="permissionModeButton" aria-haspopup="listbox" aria-expanded="false" title="当前对话审批模式">
+                <svg class="permission-mode-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path></svg>
                 <span class="permission-mode-prefix">审批</span>
                 <b class="permission-mode-value" id="permissionModeValue">确认</b>
                 <svg class="permission-mode-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6"></path></svg>
@@ -2499,6 +2506,46 @@
                 </button>
               </div>
             </div>
+            <!-- 思考强度：底栏胶囊直接显示当前级别，点击向上展开强度列表 -->
+            <div class="reasoning-wrap">
+              <button class="deep-reasoning-button" type="button" id="deepReasoningButton" title="思考强度：跟随 API（自动）" aria-label="思考强度" aria-pressed="false" aria-haspopup="menu" aria-expanded="false" aria-controls="reasoningMenu">
+                <svg class="reasoning-pill-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="12" cy="12" r="1.2"></circle>
+                  <path d="M20.2 20.2c2.04-2.03.02-7.35-4.5-11.87S5.86 1.8 3.83 3.83c-2.04 2.03-.02 7.35 4.5 11.87s9.84 6.53 11.87 4.5Z"></path>
+                  <path d="M15.7 15.7c4.52-4.52 6.54-9.84 4.5-11.87-2.03-2.04-7.35-.02-11.87 4.5S1.8 18.17 3.83 20.2c2.03 2.04 7.35.02 11.87-4.5Z"></path>
+                </svg>
+                <span class="reasoning-label" id="reasoningLabel"><span class="reasoning-prefix">思考</span> <b class="reasoning-value" id="reasoningValue">自动</b></span>
+                <svg class="reasoning-pill-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6"></path></svg>
+              </button>
+              <div class="reasoning-menu" id="reasoningMenu" role="menu" aria-label="思考强度" hidden>
+                <div class="reasoning-menu-head">思考强度</div>
+                <button type="button" data-reasoning-effort="auto" role="menuitemradio">
+                  <span class="reasoning-opt-icon is-auto" aria-hidden="true"></span>
+                  <span class="reasoning-opt-copy"><b>跟随 API（自动）</b><small>按模型默认策略</small></span>
+                  <span class="reasoning-opt-check" aria-hidden="true">✓</span>
+                </button>
+                <button type="button" data-reasoning-effort="off" role="menuitemradio">
+                  <span class="reasoning-opt-icon is-off" aria-hidden="true"></span>
+                  <span class="reasoning-opt-copy"><b>关闭</b><small>不启用深度思考</small></span>
+                  <span class="reasoning-opt-check" aria-hidden="true">✓</span>
+                </button>
+                <button type="button" data-reasoning-effort="low" role="menuitemradio">
+                  <span class="reasoning-opt-icon is-bars is-low" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <span class="reasoning-opt-copy"><b>低</b><small>轻量快速推理</small></span>
+                  <span class="reasoning-opt-check" aria-hidden="true">✓</span>
+                </button>
+                <button type="button" data-reasoning-effort="medium" role="menuitemradio">
+                  <span class="reasoning-opt-icon is-bars is-medium" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <span class="reasoning-opt-copy"><b>中</b><small>速度与深度平衡</small></span>
+                  <span class="reasoning-opt-check" aria-hidden="true">✓</span>
+                </button>
+                <button type="button" data-reasoning-effort="high" role="menuitemradio">
+                  <span class="reasoning-opt-icon is-bars is-high" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <span class="reasoning-opt-copy"><b>高</b><small>复杂问题深度思考</small></span>
+                  <span class="reasoning-opt-check" aria-hidden="true">✓</span>
+                </button>
+              </div>
+            </div>
             <!-- 造梦机助手会话专属：对话侧直达「对话参数」配置弹窗（设计文档 §5.4；仅 agent_id=dreamer 显示）。
                  确定性界面操作，不新增分页/弹窗，复用造梦机工作流卡的同一个 #comfyuiChatConfigDialog。 -->
             <button type="button" class="composer-meta-more-button dreamer-chat-config-entry" id="dreamerChatConfigEntry" title="指认造梦机助手在对话里可修改的参数" hidden>
@@ -2506,7 +2553,7 @@
               对话参数
             </button>
             <div class="composer-meta-more">
-              <button type="button" class="composer-meta-more-button" id="quickMessageButton" aria-haspopup="menu" aria-expanded="false" title="快捷消息：点击插入常用提示词">快捷消息</button>
+              <button type="button" class="composer-meta-more-button" id="quickMessageButton" aria-haspopup="menu" aria-expanded="false" title="快捷消息：点击插入常用提示词"><svg class="composer-meta-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z"></path></svg><span>快捷消息</span></button>
               <div class="quick-msg-panel" id="quickMessagePanel" hidden>
                 <div class="quick-msg-head">
                   <span>快捷消息</span>
@@ -2518,7 +2565,6 @@
             </div>
           </div>
           <div class="composer-meta-right">
-            <span class="reasoning-label" id="reasoningLabel" title="当前思考强度（点击输入框右侧的按钮切换）">思考 自动</span>
             <span class="context-percent-label" id="contextPercentLabel" title="上下文用量：暂无数据">上下文 --</span>
             <span id="runtimeStatus">就绪</span>
           </div>
@@ -2983,7 +3029,7 @@
         <!-- 每个导航项前置一枚线性图标（纯装饰，aria-hidden；可访问名仍是按钮文字）。
              设置搜索按 button.textContent 匹配，图标不产生文本节点，故不影响筛选。 -->
         <div class="settings-nav-group"><span class="settings-nav-heading">常规</span>
-          <button class="active" data-settings-tab="appearance" data-settings-search="主题 皮肤 深色 浅色 字体 字号"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"></rect><circle cx="12" cy="12" r="3.2"></circle></svg>外观</button>
+          <button class="active" data-settings-tab="appearance" data-settings-search="主题 皮肤 深色 浅色 字体 字号 输入框 放大 渐变 透明"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"></rect><circle cx="12" cy="12" r="3.2"></circle></svg>外观</button>
           <button data-settings-tab="runtime" data-settings-search="超时 代理 缓存 工作区"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14"></path><circle cx="9" cy="6" r="2"></circle><circle cx="15" cy="12" r="2"></circle><circle cx="10" cy="18" r="2"></circle></svg>运行设置</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">模型与 Agent</span>
@@ -3066,6 +3112,38 @@
             </label>
             <p class="hint">数值越小背景越淡（最淡 5%）；100% 时背景图完全显示。「调整背景图」里可以拖动/缩放决定露出图片的哪一块。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p>
             <p class="hint" id="chatBackgroundStatus" role="status"></p>
+          </div>
+          <div class="settings-card appearance-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M15 4h5v5M9 20H4v-5M20 4l-6 6M4 20l6-6"></path></svg></span><div><h4>输入框放大样式</h4><p>点击输入框右上角放大键时的底色风格；放大键仍保持一键展开与收起。</p></div></div>
+            <div class="appearance-composer-expand-options" role="radiogroup" aria-label="输入框放大样式">
+              <label class="appearance-option appearance-expand-option">
+                <input type="radio" name="appearanceComposerExpandStyle" value="frosted">
+                <span class="expand-style-swatch is-frosted" aria-hidden="true"></span>
+                <span><b>磨砂半透</b><small>轻磨砂玻璃感，四周带柔和描边</small></span>
+              </label>
+              <label class="appearance-option appearance-expand-option">
+                <input type="radio" name="appearanceComposerExpandStyle" value="fade_top">
+                <span class="expand-style-swatch is-fade-top" aria-hidden="true"></span>
+                <span><b>下实上透渐变</b><small>下半不透明，顶部全透明自然淡出</small></span>
+              </label>
+            </div>
+          </div>
+          <div class="settings-card appearance-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3.5" stroke-dasharray="3 2"></rect><rect x="7" y="8" width="10" height="8" rx="2"></rect></svg></span><div><h4>消息卡片不透明度</h4><p>数值越低，自定义背景或模型皮肤越容易透过消息卡片和思考块看到。</p></div></div>
+            <div class="chat-font-size-row message-card-opacity-row">
+              <label for="messageCardOpacity">不透明度</label>
+              <input id="messageCardOpacity" type="range" min="20" max="100" step="1" value="50" aria-describedby="messageCardOpacityValue">
+              <output id="messageCardOpacityValue" for="messageCardOpacity">50%</output>
+            </div>
+            <div class="message-card-opacity-preview" id="messageCardOpacityPreview" aria-hidden="true">
+              <span class="model-skin-layer"></span>
+              <span class="chat-bg-surface"></span>
+              <div class="mco-preview-stack">
+                <div class="mco-preview-bubble is-user"><span>透明卡片能透出背景插画吗？</span></div>
+                <div class="mco-preview-bubble is-ai"><b>实时效果预览</b><span>拖动上方滑杆即可调节通透感，兼顾背景展示与清晰阅读。</span></div>
+              </div>
+            </div>
+            <p class="hint">数值越小越通透、背景越清晰（20%–100%，默认 50%），100% 为不透明实底；仅在启用模型皮肤或自定义背景时生效。</p>
           </div>
           <div class="settings-card appearance-card">
             <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6.5V5h14v1.5M12 5v14M8.5 19h7"></path></svg></span><div><h4>会话字体</h4><p>只影响消息区的正文与气泡，界面其它部分和代码块字体保持不变。</p></div></div>

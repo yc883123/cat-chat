@@ -441,7 +441,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .conversation-time { color: var(--sidebar-muted); font-size: 10px; flex: none; }
 .composer-workspace { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 2px 4px 2px 6px; }
 .composer-workspace-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; color: var(--accent); }
-#composerWorkspaceSelect { border: 0; outline: 0; background: var(--surface); color: var(--accent); font-size: 11px; font-weight: 600; padding: 2px 18px 2px 4px; border-radius: var(--r-xs); max-width: 150px; }
+#composerWorkspaceSelect { border: 0; outline: 0; background-color: var(--surface); color: var(--accent); font-size: 11px; font-weight: 600; padding: 2px 20px 2px 6px; border-radius: var(--r-xs); max-width: 150px; }
 
 .icon-button { width: 36px; height: 36px; border: 0; border-radius: var(--r-md); background: transparent; color: inherit; display: inline-grid; place-items: center; font-size: 19px; flex: none; transition: var(--t-fast); }
 .icon-button:hover { background: var(--surface-2); }
@@ -465,24 +465,213 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .context-percent-label.warning { color: var(--warning); }
 .context-percent-label.danger { color: var(--danger); }
 /* 强度列表：fixed + JS 定位（挂到 body），避免被 .composer-wrap 的 overflow 裁剪 */
-.reasoning-menu { position: fixed; z-index: 45; min-width: 118px; padding: 4px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-2); }
+.reasoning-menu {
+  position: fixed;
+  z-index: 45;
+  min-width: 204px;
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid color-mix(in oklab, var(--line-strong) 82%, transparent);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--surface) 92%, transparent);
+  box-shadow: 0 14px 34px rgba(18, 22, 42, .16), 0 2px 8px rgba(18, 22, 42, .06), inset 0 1px 0 color-mix(in oklab, var(--surface) 78%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(1.24);
+  backdrop-filter: blur(18px) saturate(1.24);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+html[data-theme="dark"] .reasoning-menu {
+  background: color-mix(in oklab, var(--surface) 90%, transparent);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .48), 0 2px 10px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .07);
+}
 .reasoning-menu[hidden] { display: none; }
-.reasoning-menu button { display: block; width: 100%; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); padding: 6px 10px; text-align: left; }
-.reasoning-menu button:hover { background: var(--surface-2); }
-/* 当前等级高亮（点开即可看出现在用的是哪一档） */
-.reasoning-menu button.is-active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.deep-reasoning-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.deep-reasoning-button:hover { color: var(--accent); opacity: 1; }
-.deep-reasoning-button.active { opacity: 1; background: var(--accent-solid); color: #fff; box-shadow: 0 0 0 2px rgba(124,92,255,.2); }
+.reasoning-menu-head {
+  padding: 3px 9px 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--muted);
+  user-select: none;
+}
+.reasoning-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  padding: 7px 9px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.reasoning-menu button:hover { background: color-mix(in oklab, var(--surface-2) 86%, transparent); }
+.reasoning-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.reasoning-menu button.is-active {
+  background: color-mix(in oklab, var(--accent) 13%, transparent);
+  color: var(--accent);
+}
+.reasoning-opt-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  padding: 3px 2px;
+  color: var(--muted);
+  background: color-mix(in oklab, var(--surface-2) 90%, transparent);
+}
+.reasoning-menu button.is-active .reasoning-opt-icon {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 16%, transparent);
+}
+.reasoning-opt-icon.is-auto {
+  align-items: center;
+}
+.reasoning-opt-icon.is-auto::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.8px solid currentColor;
+  box-shadow: inset 0 0 0 1.5px transparent;
+}
+.reasoning-opt-icon.is-off {
+  align-items: center;
+}
+.reasoning-opt-icon.is-off::before {
+  content: "";
+  width: 9px;
+  height: 1.8px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: .72;
+}
+.reasoning-opt-icon.is-bars i {
+  display: block;
+  width: 2.5px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: .24;
+}
+.reasoning-opt-icon.is-bars i:nth-child(1) { height: 4px; }
+.reasoning-opt-icon.is-bars i:nth-child(2) { height: 7.5px; }
+.reasoning-opt-icon.is-bars i:nth-child(3) { height: 11px; }
+.reasoning-opt-icon.is-low i:nth-child(1),
+.reasoning-opt-icon.is-medium i:nth-child(1),
+.reasoning-opt-icon.is-medium i:nth-child(2),
+.reasoning-opt-icon.is-high i { opacity: 1; }
+.reasoning-opt-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.reasoning-opt-copy b {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
+}
+.reasoning-menu button.is-active .reasoning-opt-copy b { color: var(--accent); }
+.reasoning-opt-copy small {
+  font-size: 10.5px;
+  line-height: 1.25;
+  color: var(--muted);
+}
+.reasoning-opt-check {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  opacity: 0;
+  transform: scale(.8);
+  transition: opacity var(--t-fast), transform var(--t-fast);
+}
+.reasoning-menu button.is-active .reasoning-opt-check {
+  opacity: 1;
+  transform: scale(1);
+}
+.deep-reasoning-button {
+  color: var(--muted);
+  opacity: .82;
+  border-radius: 11px;
+  transition: background var(--t-fast), color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast), opacity var(--t-fast);
+}
+.deep-reasoning-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.85; stroke-linecap: round; stroke-linejoin: round; }
+.deep-reasoning-button:hover { color: var(--accent); opacity: 1; background: color-mix(in oklab, var(--accent) 12%, transparent); }
+.deep-reasoning-button.active {
+  opacity: 1;
+  background: linear-gradient(145deg var(--in-oklab), var(--accent), var(--accent-solid));
+  color: #fff;
+  box-shadow: 0 4px 12px color-mix(in oklab, var(--accent-solid) 32%, transparent), inset 0 1px 0 rgba(255, 255, 255, .24);
+}
+.deep-reasoning-button.active:hover {
+  color: #fff;
+  filter: brightness(1.05);
+}
 .deep-reasoning-button:disabled, .web-search-button:disabled, .attach-button:disabled { opacity: .35; cursor: not-allowed; }
 .context-usage-wrap { position: relative; flex: none; align-self: flex-end; }
-.context-usage-button { width: 32px; height: 38px; display: grid; place-items: center; border: 0; background: transparent; padding: 0; color: var(--muted); }
-.context-usage-button:hover { color: var(--text); background: var(--surface-2); }
-.context-usage-ring { --context-percent: 0; width: 17px; height: 17px; display: block; border-radius: 50%; background: conic-gradient(var(--accent) calc(var(--context-percent) * 1%), var(--line-strong) 0); position: relative; }
-.context-usage-ring::after { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--surface); }
-.context-usage-ring.warning { background: conic-gradient(var(--warning) calc(var(--context-percent) * 1%), var(--line-strong) 0); }
-.context-usage-ring.danger { background: conic-gradient(var(--danger) calc(var(--context-percent) * 1%), var(--line-strong) 0); }
-.context-usage-popover { position: fixed; left: 12px; top: 12px; z-index: 100; width: min(280px, calc(100vw - 24px)); max-height: min(50vh, 260px); overflow-y: auto; padding: 10px 11px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-2); color: var(--text); font-size: 12px; line-height: 1.5; }
+.context-usage-button {
+  width: 34px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  transition: background var(--t-fast), transform var(--t-fast);
+}
+.context-usage-button:hover {
+  color: var(--text);
+  background: color-mix(in oklab, var(--text) 7%, transparent);
+}
+.context-usage-button:active { transform: scale(.94); }
+/* 真正镂空的进度环：用 radial-gradient mask 挖空圆心，不再用 ::after 糊实白圆点，
+   在磨砂/透明壁纸输入框上透出背后玻璃感，告别“灰圈中间贴一块死白圆片”的割裂感。 */
+.context-usage-ring {
+  --context-percent: 0;
+  width: 20px;
+  height: 20px;
+  display: block;
+  border-radius: 50%;
+  background: conic-gradient(var(--accent) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 16%, transparent) 0);
+  -webkit-mask-image: radial-gradient(farthest-side, transparent calc(100% - 2.8px), #000 calc(100% - 2.2px));
+  mask-image: radial-gradient(farthest-side, transparent calc(100% - 2.8px), #000 calc(100% - 2.2px));
+  position: relative;
+}
+.context-usage-ring.warning { background: conic-gradient(var(--warning) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 16%, transparent) 0); }
+.context-usage-ring.danger { background: conic-gradient(var(--danger) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 16%, transparent) 0); }
+.context-usage-popover {
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  z-index: 100;
+  width: min(280px, calc(100vw - 24px));
+  max-height: min(50vh, 260px);
+  overflow-y: auto;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in oklab, var(--line-strong) 82%, transparent);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--surface) 92%, transparent);
+  box-shadow: 0 14px 34px rgba(18, 22, 42, .16), 0 2px 8px rgba(18, 22, 42, .06);
+  -webkit-backdrop-filter: blur(18px) saturate(1.24);
+  backdrop-filter: blur(18px) saturate(1.24);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
 .context-usage-popover[hidden] { display: none; }
 .context-usage-popover strong { display: block; margin-bottom: 4px; }
 .context-usage-popover small { display: block; margin-top: 4px; color: var(--muted); }
@@ -658,7 +847,7 @@ html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer {
   border-color: color-mix(in oklab, var(--surface) 48%, var(--line-strong));
   box-shadow: 0 8px 28px rgba(30, 33, 56, .10), inset 0 1px 0 color-mix(in oklab, var(--surface) 68%, transparent);
 }
-html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
+html:not([data-composer-expand-style="fade_top"]):is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
   background:
     linear-gradient(135deg var(--in-oklab),
       color-mix(in oklab, var(--surface) 48%, transparent) 0%,
@@ -671,7 +860,7 @@ html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:
   border-color: color-mix(in oklab, var(--accent) 44%, color-mix(in oklab, var(--surface) 52%, transparent));
   box-shadow: 0 10px 30px rgba(30, 33, 56, .10), inset 0 1px 0 color-mix(in oklab, var(--surface) 68%, transparent);
 }
-html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer:focus-within {
+html:not([data-composer-expand-style="fade_top"]):is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer:focus-within {
   border-color: color-mix(in oklab, var(--accent) 70%, transparent);
   box-shadow: 0 0 0 2px rgba(var(--brand-500-rgb), .14), 0 10px 30px rgba(30, 33, 56, .10), inset 0 1px 0 color-mix(in oklab, var(--surface) 74%, transparent);
 }
@@ -767,7 +956,7 @@ html:is([data-chat-bg="on"], [data-model-skin="on"]) .starter-grid .starter-add 
     -webkit-backdrop-filter: blur(12px) saturate(1.18);
     backdrop-filter: blur(12px) saturate(1.18);
   }
-  html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
+  html:not([data-composer-expand-style="fade_top"]):is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
     background:
       linear-gradient(135deg var(--in-oklab),
         color-mix(in oklab, var(--surface) 44%, transparent) 0%,
@@ -780,7 +969,7 @@ html:is([data-chat-bg="on"], [data-model-skin="on"]) .starter-grid .starter-add 
     -webkit-backdrop-filter: blur(11px) saturate(1.18);
     backdrop-filter: blur(11px) saturate(1.18);
   }
-  html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
+  html[data-theme="dark"]:not([data-composer-expand-style="fade_top"]):is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
     background:
       linear-gradient(135deg var(--in-oklab),
         color-mix(in oklab, var(--surface) 38%, transparent) 0%,
@@ -1635,13 +1824,32 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .composer .interject-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .composer .deep-reasoning-button svg { width: 20px; height: 20px; }
 .attach-button { color: var(--muted); }
-.send-button { border: 0; border-radius: var(--r-md); background: var(--accent-solid); color: white; transition: var(--t-fast); }
-.send-button:hover { background: var(--brand-700); }
-/* 不可发送态（无文字且无附件 / 上传中 / 上下文已满）：灰底灰字，可发送时才回到 accent 实心。 */
-.send-button:disabled { background: var(--surface-2); color: var(--muted); }
-.send-button:disabled:hover { background: var(--surface-2); }
-.send-button.is-stop { background: var(--red); }
-.send-button.is-stop:hover { background: var(--brand-700); }
+.send-button {
+  border: 0;
+  border-radius: 11px;
+  background: linear-gradient(145deg var(--in-oklab), var(--accent), var(--accent-solid));
+  color: white;
+  box-shadow: 0 4px 12px color-mix(in oklab, var(--accent-solid) 32%, transparent), inset 0 1px 0 rgba(255, 255, 255, .24);
+  transition: background var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast), filter var(--t-fast), opacity var(--t-fast);
+}
+.send-button:hover { filter: brightness(1.06); }
+.send-button:active { transform: scale(.94); }
+/* 不可发送态（无文字且无附件 / 上传中 / 上下文已满）：柔和半透中性底，不再突兀发灰。 */
+.send-button:disabled {
+  background: color-mix(in oklab, var(--text) 7%, var(--surface-2));
+  color: color-mix(in oklab, var(--muted) 78%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--line-strong) 55%, transparent);
+  filter: none;
+}
+.send-button:disabled:hover {
+  background: color-mix(in oklab, var(--text) 7%, var(--surface-2));
+  filter: none;
+}
+.send-button.is-stop {
+  background: linear-gradient(145deg var(--in-oklab), var(--red), color-mix(in oklab, var(--red) 82%, #000));
+  box-shadow: 0 4px 12px color-mix(in oklab, var(--red) 32%, transparent), inset 0 1px 0 rgba(255, 255, 255, .2);
+}
+.send-button.is-stop:hover { filter: brightness(1.06); }
 /* 「插话」按钮：只在运行中出现（关闭态由 [hidden] 承担），样式刻意比发送键轻——
    视觉主按钮永远留给「停止」，避免运行中把「阻止它」和「插一句话」混淆。 */
 .interject-button { display: grid; place-items: center; flex: none; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--text); transition: var(--t-fast); }
@@ -2142,6 +2350,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .settings-nav button.active::before { content: ""; position: absolute; left: 3px; top: 8px; bottom: 8px; width: 3px; border-radius: 999px; background: var(--accent); }
 .settings-nav-group { margin-bottom: 18px; }
 .settings-nav-group:last-child { margin-bottom: 0; }
+.settings-dialog .settings-nav :is(.settings-nav-group, [data-settings-tab])[hidden] { display: none; }
 .settings-nav-heading { display: block; padding: 0 10px; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .05em; }
 .settings-search { position: relative; display: block; margin: 0 2px 14px; }
 .settings-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
@@ -2194,6 +2403,34 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skin-violet .skin-swatch { background:#7c5cff; } .skin-ocean .skin-swatch { background:#168aad; } .skin-rose .skin-swatch { background:#d45d79; } .skin-forest .skin-swatch { background:#4c956c; }
 /* 皮肤跟随方式（自动 / 手动）：两栏，与上面配色皮肤同一种卡片密度。 */
 .appearance-skin-mode { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:8px; }
+/* 输入框放大样式（磨砂半透 / 下实上透渐变）：两栏卡片 + 缩略示意图，一眼区分顶边是否淡出。 */
+.appearance-composer-expand-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.appearance-expand-option { align-items:center; gap:10px; }
+.appearance-expand-option .expand-style-swatch {
+  flex:none; display:block; position:relative; width:42px; height:42px;
+  border-radius:9px; overflow:hidden; border:1px solid var(--line);
+  background:
+    radial-gradient(circle at 26% 24%, color-mix(in oklab, var(--accent) 52%, transparent), transparent 62%),
+    linear-gradient(135deg var(--in-oklab),
+      color-mix(in oklab, var(--accent) 28%, var(--surface-2)) 0%,
+      color-mix(in oklab, var(--accent) 12%, var(--bg)) 100%);
+}
+.appearance-expand-option .expand-style-swatch::after {
+  content:""; position:absolute; inset:6px; border-radius:5px;
+}
+.appearance-expand-option .expand-style-swatch.is-frosted::after {
+  background:linear-gradient(180deg var(--in-oklab),
+    color-mix(in oklab, var(--surface) 84%, transparent) 0%,
+    color-mix(in oklab, var(--surface) 38%, transparent) 100%);
+  border:1px solid color-mix(in oklab, var(--accent) 42%, var(--line-strong));
+}
+.appearance-expand-option .expand-style-swatch.is-fade-top::after {
+  background:var(--surface);
+  border:1px solid var(--line-strong);
+  -webkit-mask-image:linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, .14) 24%, #000 54%, #000 100%);
+  mask-image:linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, .14) 24%, #000 54%, #000 100%);
+}
+@media (max-width:520px) { .appearance-composer-expand-options { grid-template-columns:1fr; } }
 .appearance-skin-group-label { margin:14px 0 8px; color:var(--muted); font-size:11.5px; font-weight:600; letter-spacing:.02em; }
 /* 外观页底部操作区：外观全部即时保存，这里只留「恢复默认外观」与状态提示。 */
 .appearance-footer { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin:2px 0 10px; }
@@ -3557,7 +3794,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 
 /* 外观设置面板控件（兼容 select 与可点击皮肤卡片两种渲染） */
 .appearance-options { display: grid; gap: 10px; }
-.appearance-theme-select, #appearanceTheme, #appearanceSkin { min-height: 38px; width: 100%; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 0 10px; }
+.appearance-theme-select, #appearanceTheme, #appearanceSkin { min-height: 38px; width: 100%; border: 1px solid var(--line); border-radius: var(--r-md); background-color: var(--surface); color: var(--text); padding: 0 30px 0 10px; }
 .appearance-skin-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .appearance-skin-card { min-height: 72px; padding: 10px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); color: var(--text); text-align: left; transition: border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast); }
 .appearance-skin-card:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: var(--shadow-1); }
@@ -4167,13 +4404,96 @@ html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
 .composer-wrap.is-expanded textarea { min-height: 200px; max-height: 72dvh; }
 /* 底部 composer 展开时抬高包裹层上限；编辑态 wrap 本身就是 max-height:none / overflow:visible，
    用 :not(.is-inline-edit) 排除，免得把编辑态的纵向空间限制拉回来。 */
-.composer-wrap.is-expanded:not(.is-inline-edit) { max-height: 88dvh; background: transparent; }
+.composer-wrap.is-expanded:not(.is-inline-edit) {
+  position: relative;
+  z-index: 2;
+  max-height: 88dvh;
+  background: transparent;
+}
 .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
   background: linear-gradient(180deg var(--in-oklab),
     color-mix(in oklab, var(--surface) 92%, transparent) 0%,
     color-mix(in oklab, var(--surface) 72%, var(--accent-soft) 14%) 100%);
   -webkit-backdrop-filter: blur(12px) saturate(1.14);
   backdrop-filter: blur(12px) saturate(1.14);
+}
+/* 输入框放大样式「下实上透渐变」（fade_top）：
+   底色与边框一并画在 ::before 伪元素上并用垂直 mask-image 向上淡出，
+   下半部分（52%–100%）100% 不透明且边框清晰，上半部分向顶部平滑过渡到完全透明（无硬边、无模糊）。 */
+html[data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: 0 16px 28px -16px rgba(30, 33, 56, .18);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html[data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit) .composer::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  -webkit-mask-image: linear-gradient(180deg,
+    transparent 0%,
+    rgba(0, 0, 0, .03) 8%,
+    rgba(0, 0, 0, .18) 20%,
+    rgba(0, 0, 0, .56) 34%,
+    rgba(0, 0, 0, .90) 46%,
+    #000 52%,
+    #000 100%);
+  mask-image: linear-gradient(180deg,
+    transparent 0%,
+    rgba(0, 0, 0, .03) 8%,
+    rgba(0, 0, 0, .18) 20%,
+    rgba(0, 0, 0, .56) 34%,
+    rgba(0, 0, 0, .90) 46%,
+    #000 52%,
+    #000 100%);
+}
+html[data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit) .composer:focus-within {
+  border-color: transparent;
+  box-shadow: 0 16px 28px -16px rgba(var(--brand-500-rgb), .24);
+}
+html[data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit) .composer:focus-within::before,
+html[data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit).dragover .composer::before {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+html[data-theme="dark"][data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit) .composer {
+  box-shadow: 0 16px 30px -14px rgba(0, 0, 0, .42);
+}
+html[data-theme="dark"][data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit) .composer:focus-within {
+  box-shadow: 0 16px 30px -14px rgba(0, 0, 0, .48);
+}
+/* 壁纸/模型皮肤下顶部完全透明时，补一点轻文字阴影与收起键浅托底，确保顶部行字与收起键依然清晰可读。 */
+html[data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer-input .input-mirror {
+  text-shadow: 0 1px 6px color-mix(in oklab, var(--bg) 92%, transparent), 0 0 2px color-mix(in oklab, var(--surface) 88%, transparent);
+}
+html[data-theme="dark"][data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer-input .input-mirror {
+  text-shadow: 0 1px 6px rgba(0, 0, 0, .80), 0 0 2px rgba(0, 0, 0, .68);
+}
+html[data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer-input textarea::placeholder {
+  color: color-mix(in oklab, var(--text) 68%, var(--muted));
+  text-shadow: 0 1px 6px color-mix(in oklab, var(--bg) 92%, transparent);
+}
+html[data-theme="dark"][data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer-input textarea::placeholder {
+  text-shadow: 0 1px 6px rgba(0, 0, 0, .80);
+}
+html[data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .expand-button[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--surface) 78%, var(--accent-soft));
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .14);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+html[data-theme="dark"][data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .expand-button[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--surface) 84%, var(--accent-soft));
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .38), inset 0 0 0 1px color-mix(in oklab, var(--accent) 42%, transparent);
 }
 /* 展开键迷你形态（S5 定稿）：18px 迷你键浮在输入框右上角，图标 45° 斜双箭头（HTML 里
    `rotate(45 12 12)`）。尺寸要显式压过两处既有规则——`.composer .icon-button`（38px）
@@ -8800,19 +9120,27 @@ body[data-app-view="super-agent"] #sidebarWorkspaceTree { display: none; }
 #newConversationDefaultStatus { overflow-wrap: anywhere; }
 @media (max-width: 600px) { .new-conversation-default-fields { grid-template-columns: minmax(0, 1fr); } }
 
-/* 统一单选 <select> 下拉箭头靠右居中，避免高版本 Chromium 在 display:block / 表单内把原生 ▼ 折到文字下方 */
+/* 统一单选 <select> 下拉箭头靠右居中，彻底隐藏高版本 Chromium 的原生 ▼ / ::picker-icon 避免双箭头与折行 */
 select:not([multiple]):not([size]) {
   -webkit-appearance: none;
   appearance: none;
+  align-content: center;
   background-image: var(--select-caret);
   background-repeat: no-repeat;
   background-position: right 10px center;
   background-size: 11px 7px;
   padding-right: 30px;
 }
+select:not([multiple]):not([size])::picker-icon {
+  display: none !important;
+  content: none !important;
+}
+#composerWorkspaceSelect:not([multiple]):not([size]),
 .composer-provider select:not([multiple]):not([size]),
 .mode-select select:not([multiple]):not([size]),
 .cbm-items select:not([multiple]):not([size]) {
+  background-image: var(--select-caret);
+  background-repeat: no-repeat;
   background-position: right 6px center;
   background-size: 9px 6px;
   padding-right: 22px;
@@ -9204,4 +9532,2171 @@ html[data-theme="dark"] .chat-status-dot.is-done { background: #4ade80; }
   .chat-status-popover.is-sheet .chat-status-sheet-handle { display: block; }
   .chat-status-popover.is-sheet .chat-status-popover-close { width: 40px; height: 40px; }
   .chat-status-popover.is-sheet .chat-status-subagent-actions .control-button { min-height: 44px; padding: 0 14px; }
+}
+
+/* ── GenUI（dsh-ui 互动卡片：移植自 omdsh-dev/dsh-genui，MIT）主题映射与宿主槽位 ── */
+:root {
+  --dsh-content-font-size: var(--msg-font-size, 15px);
+  --ds-font-family-code: var(--font-mono);
+  --dsw-alias-bg-base: var(--bg);
+  --dsw-alias-bg-layer-1: var(--surface);
+  --dsw-alias-bg-layer-2: var(--surface-2);
+  --dsw-alias-bg-layer-3: var(--surface-inset, var(--surface-2));
+  --dsw-alias-border-l1: var(--line);
+  --dsw-alias-border-l2: var(--line-strong);
+  --dsw-alias-fill-hover: color-mix(in oklab, var(--text) 5%, transparent);
+  --dsw-alias-label-primary: var(--text);
+  --dsw-alias-label-secondary: var(--muted);
+  --dsw-alias-label-tertiary: color-mix(in oklab, var(--muted) 76%, transparent);
+  --dsw-alias-label-caption: var(--muted);
+  --dsw-alias-markdown-code-block: var(--surface-2);
+  --dsw-alias-markdown-hr: var(--line);
+  --dsw-alias-state-business-primary: var(--accent);
+  --dsw-alias-state-success-primary: #16a34a;
+  --dsw-alias-state-success-secondary: #15803d;
+  --dsw-alias-state-warn-primary: #d97706;
+  --dsw-alias-state-warn-secondary: #b45309;
+  --dsw-alias-state-error-primary: var(--danger, #dc2626);
+}
+html[data-theme="dark"] {
+  --dsw-alias-state-success-primary: #4ade80;
+  --dsw-alias-state-success-secondary: #86efac;
+  --dsw-alias-state-warn-primary: #fbbf24;
+  --dsw-alias-state-warn-secondary: #fde68a;
+  --dsw-alias-state-error-primary: #f87171;
+}
+.genui-slot {
+  margin: 10px 0;
+  min-width: 0;
+  max-width: 100%;
+}
+.genui-slot .genui-raw { display: none; }
+.genui-slot .genui-mount:empty { display: none; }
+.genui-slot.is-rendered .genui-fallback { display: none; }
+.genui-slot .genui-diagnostic {
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--danger, #ef4444) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--danger, #ef4444) 36%, transparent);
+  color: var(--danger, #ef4444);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.genui-slot .genui-diagnostic[hidden] { display: none; }
+.genui-streaming-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in oklab, var(--accent) 26%, var(--line));
+  background: color-mix(in oklab, var(--accent-soft) 55%, var(--surface));
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.genui-streaming-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+@media (prefers-reduced-motion: reduce) {
+  .genui-streaming-dot { animation: none; }
+}
+/* 覆盖 dsh-genui 内部 button/table 避免被 Cat Chat 全局样式意外挤压 */
+.genui-slot .genui-mount table { margin: 0; }
+
+/* ==========================================================================
+   全站统一视觉升级：方案 B · 全局动态纱窗玻璃 + 轻盈毛玻璃胶囊流（Airy Glass Pills）
+   1. 全视口无缝背景（.app-backdrop）：有背景图或模型皮肤时，底图贯穿左侧导航栏、
+      顶栏、对话区、右侧面板、工作台、任务总管与所有模态弹窗，消除硬切缝。
+   2. 左侧导航栏高透纱窗玻璃（清晰透出背景图），所有导航项/会话行/按钮胶囊化。
+   3. 全部弹窗（设置页 / 任务 / Skill / MCP / 用量 / 确认框 / 工作台弹窗等）统一
+      升级为动态磨砂玻璃 + 999px 圆胶囊输入/下拉/按钮/分段标签 + 16–22px 玻璃卡片。
+   4. 底栏新增同款 [⚛ 思考 自动 ^] 胶囊（取代输入框内圆按钮与右侧重复文字）。
+   ========================================================================== */
+:root {
+  --pill-bg: color-mix(in oklab, var(--surface) 94%, var(--bg));
+  --pill-bg-hover: var(--surface);
+  --pill-border: color-mix(in oklab, var(--line-strong) 76%, transparent);
+  --pill-border-hover: color-mix(in oklab, var(--accent) 44%, var(--line-strong));
+  --pill-shadow: 0 1px 3px rgba(24, 30, 56, .05), inset 0 1px 0 rgba(255, 255, 255, .92);
+  --pill-shadow-hover: 0 3px 10px rgba(24, 30, 56, .08), inset 0 1px 0 rgba(255, 255, 255, .96);
+  --glass-pop-bg: color-mix(in oklab, var(--surface) 92%, transparent);
+  --glass-pop-border: color-mix(in oklab, var(--line-strong) 82%, transparent);
+  --glass-pop-shadow: 0 14px 34px rgba(18, 22, 42, .15), 0 2px 8px rgba(18, 22, 42, .06), inset 0 1px 0 color-mix(in oklab, var(--surface) 78%, transparent);
+  --glass-dialog-bg: color-mix(in oklab, var(--surface) 94%, var(--bg));
+  --glass-dialog-nav-bg: color-mix(in oklab, var(--surface-2) 64%, transparent);
+  --glass-dialog-bar-bg: color-mix(in oklab, var(--surface) 72%, transparent);
+  --glass-dialog-border: color-mix(in oklab, var(--line-strong) 82%, transparent);
+  --glass-dialog-shadow: 0 24px 64px rgba(18, 22, 44, .18), 0 4px 16px rgba(18, 22, 44, .06), inset 0 1px 0 rgba(255, 255, 255, .92);
+  --glass-card-bg: color-mix(in oklab, var(--surface) 92%, var(--bg));
+  --glass-card-border: color-mix(in oklab, var(--line) 88%, transparent);
+  --glass-panel-bg: color-mix(in oklab, var(--surface) 94%, var(--bg));
+  --glass-backdrop-dim: rgba(20, 22, 40, .28);
+}
+html[data-theme="dark"] {
+  --pill-bg: color-mix(in oklab, var(--surface) 92%, var(--surface-2));
+  --pill-bg-hover: color-mix(in oklab, var(--surface-2) 86%, var(--surface));
+  --pill-border: rgba(255, 255, 255, .11);
+  --pill-border-hover: color-mix(in oklab, var(--accent) 52%, rgba(255, 255, 255, .20));
+  --pill-shadow: 0 2px 6px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .06);
+  --pill-shadow-hover: 0 4px 12px rgba(0, 0, 0, .34), inset 0 1px 0 rgba(255, 255, 255, .10);
+  --glass-pop-bg: color-mix(in oklab, var(--surface) 88%, transparent);
+  --glass-pop-border: rgba(255, 255, 255, .13);
+  --glass-pop-shadow: 0 18px 40px rgba(0, 0, 0, .48), 0 2px 10px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .07);
+  --glass-dialog-bg: color-mix(in oklab, var(--surface) 92%, var(--bg));
+  --glass-dialog-nav-bg: color-mix(in oklab, var(--surface-2) 62%, transparent);
+  --glass-dialog-bar-bg: color-mix(in oklab, var(--surface) 76%, transparent);
+  --glass-dialog-border: rgba(255, 255, 255, .13);
+  --glass-dialog-shadow: 0 28px 72px rgba(0, 0, 0, .54), 0 4px 16px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .08);
+  --glass-card-bg: color-mix(in oklab, var(--surface-2) 68%, var(--surface));
+  --glass-card-border: rgba(255, 255, 255, .10);
+  --glass-panel-bg: color-mix(in oklab, var(--surface) 92%, var(--bg));
+  --glass-backdrop-dim: rgba(6, 8, 16, .52);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) {
+  --pill-bg: color-mix(in oklab, var(--surface) 74%, transparent);
+  --pill-bg-hover: color-mix(in oklab, var(--surface) 88%, transparent);
+  --pill-border: color-mix(in oklab, #fff 78%, var(--line));
+  --pill-shadow: 0 2px 10px rgba(24, 30, 56, .07), inset 0 1px 0 rgba(255, 255, 255, .86);
+  --pill-shadow-hover: 0 4px 14px rgba(24, 30, 56, .11), inset 0 1px 0 rgba(255, 255, 255, .94);
+  --glass-pop-bg: color-mix(in oklab, var(--surface) 76%, transparent);
+  --glass-pop-border: rgba(255, 255, 255, .72);
+  --glass-dialog-bg: color-mix(in oklab, var(--surface) 40%, transparent);
+  --glass-dialog-nav-bg: color-mix(in oklab, var(--surface) 14%, transparent);
+  --glass-dialog-bar-bg: color-mix(in oklab, var(--surface) 18%, transparent);
+  --glass-dialog-border: rgba(255, 255, 255, .68);
+  --glass-dialog-shadow: 0 24px 68px rgba(18, 22, 44, .18), 0 4px 16px rgba(18, 22, 44, .06), inset 0 1px 0 rgba(255, 255, 255, .82);
+  --glass-card-bg: color-mix(in oklab, var(--surface) 36%, transparent);
+  --glass-card-border: rgba(255, 255, 255, .62);
+  --glass-panel-bg: color-mix(in oklab, var(--surface) 44%, transparent);
+  --glass-backdrop-dim: rgba(18, 22, 42, .12);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) {
+  --pill-bg: color-mix(in oklab, var(--surface) 68%, transparent);
+  --pill-bg-hover: color-mix(in oklab, var(--surface) 84%, transparent);
+  --pill-border: rgba(255, 255, 255, .14);
+  --pill-shadow: 0 3px 12px rgba(0, 0, 0, .30), inset 0 1px 0 rgba(255, 255, 255, .07);
+  --pill-shadow-hover: 0 5px 16px rgba(0, 0, 0, .40), inset 0 1px 0 rgba(255, 255, 255, .11);
+  --glass-pop-bg: color-mix(in oklab, var(--surface) 74%, transparent);
+  --glass-pop-border: rgba(255, 255, 255, .15);
+  --glass-dialog-bg: color-mix(in oklab, var(--surface) 44%, transparent);
+  --glass-dialog-nav-bg: color-mix(in oklab, var(--surface) 16%, transparent);
+  --glass-dialog-bar-bg: color-mix(in oklab, var(--surface) 22%, transparent);
+  --glass-dialog-border: rgba(255, 255, 255, .15);
+  --glass-dialog-shadow: 0 28px 72px rgba(0, 0, 0, .54), inset 0 1px 0 rgba(255, 255, 255, .08);
+  --glass-card-bg: color-mix(in oklab, var(--surface-2) 38%, transparent);
+  --glass-card-border: rgba(255, 255, 255, .13);
+  --glass-panel-bg: color-mix(in oklab, var(--surface) 46%, transparent);
+  --glass-backdrop-dim: rgba(4, 6, 14, .28);
+}
+
+/* ── 0. 全视口动态背景层（.app-backdrop）：贯穿侧栏 / 顶栏 / 对话 / 工作台 / 任务总管 / 弹窗 ── */
+.app-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .app-backdrop {
+  display: block;
+}
+.app-backdrop > .chat-bg-surface,
+.app-backdrop > .model-skin-layer {
+  position: absolute;
+  inset: 0;
+}
+.app-backdrop > .model-skin-layer {
+  display: none;
+  background-image: var(--model-skin-image, none);
+  background-size: cover;
+  background-position: 50% 38%;
+  background-repeat: no-repeat;
+}
+html[data-model-skin="on"] .app-backdrop > .model-skin-layer { display: block; }
+html[data-model-skin="on"] .app-backdrop > .chat-bg-surface,
+html[data-model-skin="on"] .app-backdrop > .chat-bg-blur { display: none; }
+.app-backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: clamp(0.36, calc(0.22 + var(--chat-bg-opacity, 0.35) * 0.64), 0.92);
+  background:
+    radial-gradient(ellipse 116% 90% at 54% 46%, transparent 38%, color-mix(in oklab, var(--bg) 28%, transparent) 100%),
+    linear-gradient(180deg var(--in-oklab),
+      color-mix(in oklab, var(--bg) 42%, transparent) 0%,
+      color-mix(in oklab, var(--bg) 16%, transparent) 14%,
+      color-mix(in oklab, var(--bg) 8%, transparent) 38%,
+      color-mix(in oklab, var(--bg) 12%, transparent) 72%,
+      color-mix(in oklab, var(--bg) 34%, transparent) 100%);
+  -webkit-backdrop-filter: blur(1.5px) saturate(1.06);
+  backdrop-filter: blur(1.5px) saturate(1.06);
+}
+html[data-model-skin="on"] .app-backdrop::after { opacity: 0.56; }
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .app-backdrop::after {
+  background:
+    radial-gradient(ellipse 116% 90% at 54% 46%, transparent 28%, color-mix(in oklab, var(--bg) 46%, transparent) 100%),
+    linear-gradient(180deg var(--in-oklab),
+      color-mix(in oklab, var(--bg) 56%, transparent) 0%,
+      color-mix(in oklab, var(--bg) 30%, transparent) 16%,
+      color-mix(in oklab, var(--bg) 20%, transparent) 42%,
+      color-mix(in oklab, var(--bg) 26%, transparent) 74%,
+      color-mix(in oklab, var(--bg) 48%, transparent) 100%);
+}
+html[data-theme="dark"][data-model-skin="on"] .app-backdrop::after { opacity: 0.78; }
+
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .app-shell {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+/* 保持 #chatBackdrop / .studio-*-layer 在 DOM 与计算样式中完整可用，但隐藏视觉重绘避免与全屏底图产生拼缝 */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .chat-backdrop,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .studio-view .studio-skin-layer,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .studio-view .studio-bg-layer {
+  opacity: 0;
+}
+
+/* ── 1. 底部工具栏 .composer-meta：彻底去套娃与碎标签，统一 28px 轻盈胶囊流 ── */
+.composer-meta {
+  min-height: 30px;
+  padding: 8px 2px 0;
+  gap: 8px 10px;
+  font-size: 12px;
+  letter-spacing: .005em;
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-meta,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-meta {
+  text-shadow: none;
+}
+.composer-meta-left { gap: 6px; align-items: center; }
+
+/* 六组左侧胶囊：工作区 / API / 模型 / 审批 / 思考强度 / 快捷消息（含对话参数） + 右侧状态胶囊 */
+.composer-workspace,
+.composer-provider,
+.composer-model,
+.permission-mode-button,
+.composer-meta-left .deep-reasoning-button,
+.composer-meta-more-button,
+.composer-meta-right {
+  height: 28px;
+  min-height: 28px;
+  border-radius: 999px;
+  border: 1px solid var(--pill-border);
+  background-color: var(--pill-bg);
+  background: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  color: var(--text);
+  -webkit-backdrop-filter: blur(16px) saturate(1.28);
+  backdrop-filter: blur(16px) saturate(1.28);
+  transition: transform var(--t-fast), border-color var(--t-fast), background-color var(--t-fast), box-shadow var(--t-fast), color var(--t-fast);
+}
+.composer-workspace:hover,
+.composer-provider:hover,
+.composer-model:hover,
+.permission-mode-button:hover:not(:disabled),
+.composer-meta-left .deep-reasoning-button:hover:not(:disabled),
+.composer-meta-more-button:hover:not(:disabled) {
+  border-color: var(--pill-border-hover);
+  background-color: var(--pill-bg-hover);
+  background: var(--pill-bg-hover);
+  box-shadow: var(--pill-shadow-hover);
+  transform: translateY(-.5px);
+}
+.composer-workspace:focus-within,
+.composer-provider:focus-within,
+.composer-model:has(.composer-model-trigger[aria-expanded="true"]),
+.permission-mode-button[aria-expanded="true"],
+.composer-meta-left .deep-reasoning-button[aria-expanded="true"],
+.composer-meta-more-button[aria-expanded="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 16%, transparent), var(--pill-shadow);
+}
+
+/* 工作区胶囊：消除双层嵌套白框，直接透明融入外胶囊 */
+.composer-workspace {
+  padding: 0 4px 0 10px;
+  gap: 5px;
+}
+.composer-workspace-icon { display: inline-flex; align-items: center; }
+.composer-workspace-icon svg { width: 13px; height: 13px; stroke-width: 1.9; }
+#composerWorkspaceSelect:not([multiple]):not([size]) {
+  height: 26px;
+  border: 0;
+  border-radius: 999px;
+  background-color: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 20px 0 2px;
+  background-position: right 6px center;
+  background-size: 9px 6px;
+  cursor: pointer;
+}
+
+/* API 胶囊：「API」弱化前缀 + 透明下拉融为一体 */
+.composer-provider {
+  padding: 0 4px 0 11px;
+  gap: 5px;
+  font-size: 12px;
+}
+.composer-provider > span,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-provider > span {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  opacity: .72;
+}
+.composer-provider select:not([multiple]):not([size]),
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-provider select:not([multiple]):not([size]) {
+  height: 26px;
+  min-height: 26px;
+  width: auto;
+  max-width: min(176px, 20vw);
+  border: 0;
+  border-radius: 999px;
+  background-color: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0 22px 0 2px;
+  background-position: right 6px center;
+  background-size: 9px 6px;
+  cursor: pointer;
+}
+
+/* 模型胶囊：「模型」弱化前缀 + 等宽模型 ID 融为一体 */
+.composer-model {
+  padding: 0 4px 0 11px;
+  gap: 5px;
+  font-size: 12px;
+}
+.composer-model > span,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-model > span {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  opacity: .72;
+}
+.composer-model-trigger,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-model-trigger {
+  height: 26px;
+  min-width: 84px;
+  max-width: 220px;
+  padding: 0 6px 0 2px;
+  gap: 5px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  background-color: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.composer-model-trigger:hover { background: transparent; }
+.composer-model-trigger-text {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: -.01em;
+}
+.composer-model-trigger-caret { width: 11px; height: 11px; opacity: .55; }
+
+/* 审批模式胶囊：盾牌图标 + 弱化前缀 + 强调值 */
+.permission-mode-button {
+  padding: 0 10px 0 10px;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.permission-mode-icon {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .78;
+}
+.permission-mode-prefix {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  opacity: .74;
+}
+.permission-mode-value { font-size: 12px; font-weight: 600; }
+.permission-mode-caret { width: 11px; height: 11px; opacity: .55; }
+
+/* 思考强度胶囊：与审批胶囊同款 28px 轻盈玻璃胶囊，直接显示级别 */
+.composer-meta-left .deep-reasoning-button,
+.composer-meta-left .deep-reasoning-button.active {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  padding: 0 10px;
+  gap: 5px;
+  opacity: 1;
+  background: var(--pill-bg);
+  background-color: var(--pill-bg);
+  color: var(--text);
+  box-shadow: var(--pill-shadow);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.composer-meta-left .deep-reasoning-button.active:hover:not(:disabled) {
+  background: var(--pill-bg-hover);
+  background-color: var(--pill-bg-hover);
+  color: var(--text);
+  filter: none;
+}
+.composer-meta-left .deep-reasoning-button .reasoning-pill-icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.composer-meta-left .deep-reasoning-button[data-reasoning-effort="off"] .reasoning-pill-icon {
+  stroke: var(--muted);
+  opacity: .72;
+}
+.composer-meta-left .deep-reasoning-button .reasoning-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  color: inherit;
+}
+.composer-meta-left .deep-reasoning-button .reasoning-prefix {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  opacity: .74;
+}
+.composer-meta-left .deep-reasoning-button .reasoning-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.composer-meta-left .deep-reasoning-button[data-reasoning-effort="off"] .reasoning-value {
+  color: var(--muted);
+  font-weight: 500;
+}
+.composer-meta-left .deep-reasoning-button .reasoning-pill-caret {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .55;
+  transition: transform var(--t-fast);
+}
+.composer-meta-left .deep-reasoning-button[aria-expanded="true"] .reasoning-pill-caret {
+  transform: rotate(180deg);
+}
+
+/* 快捷消息 / 对话参数胶囊 */
+.composer-meta-more-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.composer-meta-btn-icon {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .86;
+}
+
+/* 右侧状态胶囊：等宽上下文% + 带呼吸绿点的就绪态 */
+.composer-meta-right,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-meta-right {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 12px;
+  gap: 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: color-mix(in oklab, var(--text) 84%, var(--muted));
+}
+.composer-meta-right .context-percent-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: .82;
+}
+.composer-meta-right .context-percent-label.warning,
+.composer-meta-right .context-percent-label.danger { opacity: 1; font-weight: 600; }
+.composer-meta-right #runtimeStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-weight: 500;
+}
+.composer-meta-right #runtimeStatus::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, .20);
+}
+.composer-meta-right #runtimeStatus.compaction-running::before {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--warning) 24%, transparent);
+}
+
+/* ── 2. 主输入框与圆形触控按键（与圆润胶囊呼应） ── */
+.composer {
+  border-radius: 20px;
+  padding: 7px 8px;
+}
+.composer .attach-button,
+.composer .context-usage-button,
+.composer .interject-button,
+.composer .send-button {
+  border-radius: 999px;
+}
+/* 展开/收起输入框按钮：告别生硬 18px 小白方贴片
+   - 折叠态：居中柔圆轻透图标键，悬停浮现轻玻璃晕环
+   - 展开态：化作方案 B 轻盈毛玻璃胶囊「收起」，贴合输入框右上角（不挡文字，不孤悬半空） */
+.composer .composer-input .expand-button {
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in oklab, var(--muted) 86%, transparent);
+  transition: transform var(--t-fast), background-color var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast), color var(--t-fast), opacity var(--t-fast);
+}
+.composer .composer-input .expand-button svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  stroke-width: 1.9;
+}
+.composer .composer-input .expand-button:hover {
+  color: var(--accent);
+  background: var(--pill-bg-hover);
+  border-color: var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.composer-wrap.is-expanded .composer .composer-input .expand-button {
+  top: 4px;
+  transform: none;
+}
+.composer-wrap.is-expanded:not(.is-inline-edit) .composer .composer-input .expand-button[aria-pressed="true"],
+html[data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer .composer-input .expand-button[aria-pressed="true"],
+html[data-theme="dark"][data-composer-expand-style="fade_top"]:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-wrap.is-expanded:not(.is-inline-edit) .composer .composer-input .expand-button[aria-pressed="true"] {
+  top: 4px;
+  right: -76px;
+  transform: none;
+  width: auto;
+  height: 28px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 11px 0 9px;
+  border: 1px solid var(--pill-border);
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: var(--pill-shadow);
+  -webkit-backdrop-filter: blur(16px) saturate(1.32);
+  backdrop-filter: blur(16px) saturate(1.32);
+}
+.composer-wrap.is-expanded:not(.is-inline-edit) .composer .composer-input .expand-button[aria-pressed="true"]::after {
+  content: "收起";
+}
+.composer-wrap.is-expanded:not(.is-inline-edit) .composer .composer-input .expand-button[aria-pressed="true"]:hover {
+  background: var(--pill-bg-hover);
+  border-color: var(--pill-border-hover);
+  box-shadow: var(--pill-shadow-hover);
+  transform: translateY(-.5px);
+}
+/* 展开态图标箭头向内翻转，明确表达「收起」语义 */
+.composer .composer-input .expand-button[aria-pressed="true"] svg path:first-of-type {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: rotate(180deg);
+}
+.composer .composer-input .expand-button[aria-pressed="true"] svg path:last-of-type {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: rotate(180deg);
+}
+/* 气泡内行内编辑展开态保持紧凑圆玻璃键，不超出气泡边界 */
+.composer-wrap.is-inline-edit.is-expanded .composer .composer-input .expand-button[aria-pressed="true"] {
+  top: 4px;
+  right: 0;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--pill-border);
+  background: var(--pill-bg);
+  color: var(--accent);
+  box-shadow: var(--pill-shadow);
+}
+
+/* ── 3. 对话顶栏 .topbar：高透纱窗玻璃 + 全部胶囊化 ── */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .topbar {
+  background: linear-gradient(180deg var(--in-oklab),
+    color-mix(in oklab, var(--surface) 44%, transparent) 0%,
+    color-mix(in oklab, var(--surface) 24%, transparent) 100%);
+  border-bottom-color: rgba(255, 255, 255, .44);
+  -webkit-backdrop-filter: blur(14px) saturate(1.36);
+  backdrop-filter: blur(14px) saturate(1.36);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .topbar {
+  background: linear-gradient(180deg var(--in-oklab),
+    color-mix(in oklab, var(--surface) 46%, transparent) 0%,
+    color-mix(in oklab, var(--surface) 28%, transparent) 100%);
+  border-bottom-color: rgba(255, 255, 255, .10);
+}
+.topbar .model-control select,
+.topbar .agent-control select,
+.topbar .turn-jump-select,
+.topbar .control-button,
+.topbar .mcp-button,
+.topbar .agent-ability-button,
+.topbar .kvmem-status-button,
+.topbar .workspace-control {
+  border-radius: 999px;
+  border-color: var(--pill-border);
+  background-color: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  font-size: 12.5px;
+  font-weight: 500;
+  -webkit-backdrop-filter: blur(16px) saturate(1.28);
+  backdrop-filter: blur(16px) saturate(1.28);
+  transition: transform var(--t-fast), border-color var(--t-fast), background-color var(--t-fast), box-shadow var(--t-fast), color var(--t-fast);
+}
+.topbar .model-control select,
+.topbar .agent-control select,
+.topbar .turn-jump-select {
+  padding-left: 13px;
+  padding-right: 32px;
+  background-position: right 12px center;
+}
+.topbar .control-button,
+.topbar .mcp-button,
+.topbar .agent-ability-button,
+.topbar .kvmem-status-button {
+  padding-left: 13px;
+  padding-right: 13px;
+}
+.topbar .control-button:hover,
+.topbar .mcp-button:hover,
+.topbar .agent-ability-button:hover,
+.topbar .kvmem-status-button:hover,
+.topbar .turn-jump-select:hover,
+.topbar .agent-control select:hover {
+  border-color: var(--pill-border-hover);
+  background-color: var(--pill-bg-hover);
+  box-shadow: var(--pill-shadow-hover);
+  transform: translateY(-.5px);
+}
+.topbar .agent-control > span {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  opacity: .76;
+}
+.agent-help-button {
+  width: 22px;
+  height: 22px;
+  border-color: var(--pill-border);
+  background: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  font-size: 11.5px;
+  font-weight: 600;
+  transition: transform var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+}
+.agent-help-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-.5px);
+}
+
+/* ── 4. 左侧导航栏 .sidebar：高透动态纱窗玻璃（清晰透出背景图）+ 全胶囊导航项 ── */
+.sidebar-mode-switch { border-radius: 999px; padding: 3px; }
+.sidebar-mode-btn { border-radius: 999px; }
+.search-mode-switch { border-radius: 999px; padding: 2px; }
+.search-mode-switch button { border-radius: 999px; }
+.workspace-search-input { border-radius: 999px; padding: 0 12px; }
+.workspace-group-header,
+.workspace-new-chat,
+.conversation-item,
+.sidebar-studio-nav .studio-page,
+.workspace-batch-actions button,
+.super-agent-filters button,
+.super-agent-new-task,
+.sidebar-footer .icon-button,
+.sidebar-mode-row .icon-button,
+.workspace-header-actions .icon-button {
+  border-radius: 999px;
+}
+.conversation-item { padding-left: 10px; padding-right: 4px; transition: background var(--t-fast), color var(--t-fast), box-shadow var(--t-fast), border-color var(--t-fast); }
+.workspace-group-header { padding-left: 10px; padding-right: 10px; }
+.workspace-new-chat { padding-left: 8px; padding-right: 10px; }
+.super-agent-thread { border-radius: 14px; }
+.sidebar .super-agent-thread-panel { background: transparent; border: 0; }
+
+/* 有背景图或模型皮肤时：左侧栏变为高透明动态纱窗玻璃，完整透出背景插画 */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar {
+  --sidebar-text: #111528;
+  --sidebar-muted: #2C3450;
+  --sidebar-line: rgba(255, 255, 255, .52);
+  --sidebar-hover: rgba(255, 255, 255, .56);
+  --sidebar-active: rgba(255, 255, 255, .86);
+  --overlay-2: rgba(255, 255, 255, .60);
+  color: var(--sidebar-text);
+  background: linear-gradient(180deg var(--in-oklab),
+    rgba(255, 255, 255, .42) 0%,
+    rgba(246, 248, 255, .30) 100%);
+  border-right: 1px solid rgba(255, 255, 255, .58);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, .40), 4px 0 24px rgba(18, 22, 44, .06);
+  -webkit-backdrop-filter: blur(13px) saturate(1.42);
+  backdrop-filter: blur(13px) saturate(1.42);
+  text-shadow: 0 1px 10px rgba(255, 255, 255, .82);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-switch {
+  background: rgba(255, 255, 255, .42);
+  border-color: rgba(255, 255, 255, .72);
+  box-shadow: 0 2px 10px rgba(20, 24, 48, .06), inset 0 1px 0 rgba(255, 255, 255, .84);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-btn {
+  color: var(--sidebar-muted);
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-btn.active {
+  background: rgba(255, 255, 255, .88);
+  color: var(--accent);
+  box-shadow: 0 2px 8px rgba(var(--brand-500-rgb), .18), inset 0 1px 0 rgba(255, 255, 255, .96);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-item {
+  border: 1px solid transparent;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-item:hover {
+  background: rgba(255, 255, 255, .56);
+  border-color: rgba(255, 255, 255, .66);
+  color: var(--sidebar-text);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-item.active {
+  background: rgba(255, 255, 255, .80);
+  border-color: rgba(255, 255, 255, .90);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 2px 10px rgba(20, 24, 48, .08), inset 0 1px 0 rgba(255, 255, 255, .95);
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-item.active .conversation-open {
+  color: var(--accent);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-group-count,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-group-count {
+  background: rgba(255, 255, 255, .62);
+  border: 1px solid rgba(255, 255, 255, .76);
+  color: var(--sidebar-muted);
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-new-chat:hover {
+  background: rgba(255, 255, 255, .56);
+  color: var(--accent);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-new-chat:hover .nc-plus {
+  background: rgba(255, 255, 255, .78);
+  color: var(--accent);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-search-input {
+  background: rgba(255, 255, 255, .66);
+  border-color: rgba(255, 255, 255, .78);
+  color: var(--sidebar-text);
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .address-button {
+  color: var(--sidebar-text);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-footer .icon-button,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-row .icon-button,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-header-actions .icon-button {
+  color: var(--sidebar-muted);
+  background: rgba(255, 255, 255, .28);
+  border: 1px solid rgba(255, 255, 255, .44);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-footer .icon-button:hover,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-row .icon-button:hover,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-header-actions .icon-button:hover {
+  background: rgba(255, 255, 255, .76);
+  border-color: rgba(255, 255, 255, .90);
+  color: var(--accent);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-studio-nav .studio-page[aria-current="page"],
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-studio-nav .studio-page[aria-current="page"]:hover {
+  background: rgba(255, 255, 255, .82);
+  color: var(--accent);
+  box-shadow: 0 2px 10px rgba(20, 24, 48, .08), inset 0 1px 0 rgba(255, 255, 255, .95);
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .super-agent-new-task {
+  background: color-mix(in oklab, var(--accent) 16%, rgba(255, 255, 255, .68));
+  border-color: color-mix(in oklab, var(--accent) 36%, rgba(255, 255, 255, .82));
+  color: var(--accent);
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .super-agent-filters button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, .80);
+  color: var(--accent);
+  font-weight: 600;
+  text-shadow: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .super-agent-thread.active {
+  background: rgba(255, 255, 255, .78);
+  border-color: color-mix(in oklab, var(--accent) 44%, rgba(255, 255, 255, .85));
+  color: var(--sidebar-text);
+  text-shadow: none;
+}
+
+/* 暗色模式 + 背景图/模型皮肤：深色高透烟熏纱窗玻璃 */
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar {
+  --sidebar-text: #F2F4FC;
+  --sidebar-muted: #B8C2DC;
+  --sidebar-line: rgba(255, 255, 255, .12);
+  --sidebar-hover: rgba(255, 255, 255, .11);
+  --sidebar-active: color-mix(in oklab, var(--accent) 32%, rgba(255, 255, 255, .08));
+  --overlay-2: rgba(255, 255, 255, .12);
+  color: var(--sidebar-text);
+  background: linear-gradient(180deg var(--in-oklab),
+    rgba(14, 17, 30, .42) 0%,
+    rgba(12, 15, 26, .34) 100%);
+  border-right: 1px solid rgba(255, 255, 255, .13);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, .06), 6px 0 28px rgba(0, 0, 0, .28);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, .54);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-switch {
+  background: rgba(255, 255, 255, .07);
+  border-color: rgba(255, 255, 255, .14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-btn.active {
+  background: color-mix(in oklab, var(--accent) 36%, rgba(255, 255, 255, .10));
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .14);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-item:hover {
+  background: rgba(255, 255, 255, .10);
+  border-color: rgba(255, 255, 255, .12);
+  color: #fff;
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-item.active {
+  background: color-mix(in oklab, var(--accent) 28%, rgba(255, 255, 255, .10));
+  border-color: color-mix(in oklab, var(--accent) 48%, rgba(255, 255, 255, .18));
+  color: #fff;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .12);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-item.active .conversation-open {
+  color: #fff;
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-group-count,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .conversation-group-count {
+  background: rgba(255, 255, 255, .10);
+  border-color: rgba(255, 255, 255, .12);
+  color: var(--sidebar-muted);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-search-input {
+  background: rgba(14, 17, 30, .48);
+  border-color: rgba(255, 255, 255, .15);
+  color: #fff;
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-footer .icon-button,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-row .icon-button,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-header-actions .icon-button {
+  color: var(--sidebar-muted);
+  background: rgba(255, 255, 255, .07);
+  border-color: rgba(255, 255, 255, .12);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-footer .icon-button:hover,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-mode-row .icon-button:hover,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .workspace-header-actions .icon-button:hover {
+  background: rgba(255, 255, 255, .15);
+  border-color: rgba(255, 255, 255, .24);
+  color: #fff;
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-studio-nav .studio-page[aria-current="page"],
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .sidebar-studio-nav .studio-page[aria-current="page"]:hover {
+  background: color-mix(in oklab, var(--accent) 30%, rgba(255, 255, 255, .08));
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .28);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .super-agent-new-task {
+  background: color-mix(in oklab, var(--accent) 26%, rgba(255, 255, 255, .06));
+  border-color: color-mix(in oklab, var(--accent) 52%, rgba(255, 255, 255, .14));
+  color: #fff;
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .super-agent-filters button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, .14);
+  color: #fff;
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar .super-agent-thread.active {
+  background: color-mix(in oklab, var(--accent) 26%, rgba(255, 255, 255, .08));
+  border-color: color-mix(in oklab, var(--accent) 50%, rgba(255, 255, 255, .16));
+  color: #fff;
+}
+
+/* ── 5. 全部浮层与下拉菜单统一动态纱窗玻璃面板 ── */
+.permission-mode-menu,
+.reasoning-menu,
+.composer-model-panel,
+.quick-msg-panel,
+.agent-help-popover,
+.agent-ability-popover,
+.kvmem-popover,
+.skill-popup,
+.file-popup,
+.text-context-menu,
+.image-context-menu,
+.conversation-menu,
+.sidebar-view-menu,
+.file-action-menu,
+.chat-status-popover,
+.wb-media-menu-panel {
+  border-radius: 16px;
+  border-color: var(--glass-pop-border);
+  background: var(--glass-pop-bg);
+  box-shadow: var(--glass-pop-shadow);
+  -webkit-backdrop-filter: blur(22px) saturate(1.34);
+  backdrop-filter: blur(22px) saturate(1.34);
+}
+.permission-mode-menu { padding: 6px; gap: 2px; display: flex; flex-direction: column; }
+.permission-mode-menu[hidden] { display: none; }
+.permission-mode-menu button,
+.text-context-menu button,
+.image-context-menu button,
+.conversation-menu button,
+.sidebar-view-menu button,
+.file-action-menu button { border-radius: 10px; transition: background var(--t-fast), color var(--t-fast); }
+.permission-mode-menu button { padding: 7px 10px; }
+.permission-mode-menu button:hover:not(:disabled) { background: color-mix(in oklab, var(--surface-2) 86%, transparent); }
+.permission-mode-menu button.is-active { background: color-mix(in oklab, var(--accent) 13%, transparent); }
+.composer-model-search { border-radius: 999px; padding: 0 12px; }
+.composer-model-option { border-radius: 9px; font-family: var(--font-mono); font-size: 11.5px; }
+
+/* ── 6. 全部模态弹窗（设置 / 任务 / Skill / MCP / 用量 / 确认框 / 工作台弹窗）：全局动态纱窗玻璃 + 胶囊控件 ── */
+dialog:not(.toast) {
+  border: 1px solid var(--glass-dialog-border);
+  border-radius: 22px;
+  background: var(--glass-dialog-bg);
+  box-shadow: var(--glass-dialog-shadow);
+  -webkit-backdrop-filter: blur(22px) saturate(1.36);
+  backdrop-filter: blur(22px) saturate(1.36);
+}
+dialog::backdrop {
+  background: var(--glass-backdrop-dim);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) dialog:not(.toast) {
+  --pill-bg: color-mix(in oklab, var(--surface) 54%, transparent);
+  --pill-bg-hover: color-mix(in oklab, var(--surface) 76%, transparent);
+  --muted: #3d445f;
+  -webkit-backdrop-filter: blur(15px) saturate(1.42);
+  backdrop-filter: blur(15px) saturate(1.42);
+  text-shadow: 0 1px 8px rgba(255, 255, 255, .45);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) dialog:not(.toast) {
+  --pill-bg: color-mix(in oklab, var(--surface) 48%, transparent);
+  --pill-bg-hover: color-mix(in oklab, var(--surface) 68%, transparent);
+  --muted: #c2cbe0;
+  -webkit-backdrop-filter: blur(15px) saturate(1.38);
+  backdrop-filter: blur(15px) saturate(1.38);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, .42);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) dialog:not(.toast) :is(
+  .primary-button,
+  .danger-button,
+  .control-button.primary,
+  .provider-scope-tabs button.active,
+  .appearance-theme-options .appearance-option:has(input:checked),
+  .update-proxy-option:has(input:checked),
+  .mcp-seg button.active,
+  .usage-seg button.active,
+  .usage-chip.active,
+  input,
+  select,
+  textarea,
+  code,
+  pre
+) {
+  text-shadow: none;
+}
+dialog.toast {
+  border-radius: 999px;
+  border: 1px solid var(--glass-pop-border);
+  background: var(--glass-pop-bg);
+  box-shadow: var(--glass-pop-shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(1.30);
+  backdrop-filter: blur(18px) saturate(1.30);
+}
+
+/* 设置弹窗内部：去掉不透明纯白/纯灰实底，让背景图柔和透出整个设置页 */
+.settings-dialog {
+  --set-r-card: 18px;
+  --set-r-ctl: 999px;
+  background: var(--glass-dialog-bg);
+}
+.settings-dialog .dialog-toolbar,
+.panel-dialog .dialog-toolbar,
+.provider-dialog .dialog-toolbar,
+.agent-dialog .dialog-toolbar,
+.sa-dialog .dlg-head {
+  background: var(--glass-dialog-bar-bg);
+  border-bottom-color: color-mix(in oklab, var(--glass-dialog-border) 68%, var(--line));
+}
+.settings-dialog .dialog-toolbar .icon-button,
+.panel-dialog .dialog-toolbar .icon-button,
+.sa-dialog .dlg-close {
+  border-radius: 999px;
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.settings-dialog .dialog-toolbar .icon-button:hover,
+.panel-dialog .dialog-toolbar .icon-button:hover,
+.sa-dialog .dlg-close:hover {
+  background: var(--pill-bg-hover);
+  border-color: var(--pill-border-hover);
+}
+.settings-dialog .settings-nav {
+  background: var(--glass-dialog-nav-bg);
+  border-right-color: color-mix(in oklab, var(--glass-dialog-border) 68%, var(--line));
+}
+@media (min-width: 761px) {
+  .settings-dialog .settings-nav {
+    background: var(--glass-dialog-nav-bg);
+  }
+  .settings-dialog .settings-search input {
+    border-radius: 999px;
+    border: 1px solid var(--pill-border);
+    background: var(--pill-bg);
+    box-shadow: var(--pill-shadow);
+  }
+  .settings-dialog .settings-search input:focus {
+    background: var(--pill-bg-hover);
+  }
+  .settings-dialog .settings-nav button {
+    border-radius: 999px;
+    padding: 0 13px;
+  }
+}
+.settings-dialog .settings-nav button {
+  border-radius: 999px;
+  transition: background var(--t-fast), color var(--t-fast), box-shadow var(--t-fast), border-color var(--t-fast);
+}
+.settings-dialog .settings-nav button:hover {
+  background: var(--pill-bg);
+}
+.settings-dialog .settings-nav button.active {
+  background: color-mix(in oklab, var(--accent) 14%, var(--pill-bg-hover));
+  box-shadow: 0 2px 10px rgba(var(--brand-500-rgb), .14), inset 0 1px 0 rgba(255, 255, 255, .72);
+}
+html[data-theme="dark"] .settings-dialog .settings-nav button.active {
+  background: color-mix(in oklab, var(--accent) 24%, rgba(255, 255, 255, .06));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .10);
+}
+.settings-dialog .settings-content {
+  background: transparent;
+}
+/* 修复 Skills 管理未选中技能时 #skillDetailCard[hidden] 与 #skillDetailEmpty 同屏显示的幽灵双卡片 bug */
+.skill-admin-detail[hidden] {
+  display: none;
+}
+.settings-dialog .settings-card,
+.settings-dialog .provider-card,
+.settings-dialog .provider-current,
+.settings-dialog .agent-card,
+.settings-dialog .toggle-row,
+.settings-dialog .field-grid .toggle-row,
+.settings-dialog .chat-font-sample,
+.settings-dialog .appearance-option,
+.settings-dialog .skin-option,
+.settings-dialog .appearance-model-skin-card,
+.settings-dialog .usage-kpi,
+.settings-dialog .usage-card,
+.settings-dialog .usage-requests,
+.settings-dialog .mcp-add-form,
+.settings-dialog .mcp-row,
+.settings-dialog .mcp-empty,
+.settings-dialog .skill-admin-list,
+.settings-dialog .skill-admin-detail,
+.settings-dialog .skill-detail-note,
+.settings-dialog .update-status,
+.settings-dialog .update-browser,
+.settings-dialog .update-proxy,
+.settings-dialog .connection-item,
+.settings-dialog .onebot-binding,
+.settings-dialog .onebot-binding-item,
+.settings-dialog .panel-empty,
+.panel-dialog .panel-item,
+.panel-dialog .panel-empty,
+.panel-dialog .task-item,
+.panel-dialog .skill-row,
+.sa-dialog fieldset {
+  background: var(--glass-card-bg);
+  border-color: var(--glass-card-border);
+  border-radius: 18px;
+  box-shadow: 0 2px 12px rgba(18, 22, 44, .05), inset 0 1px 0 rgba(255, 255, 255, .58);
+}
+html[data-theme="dark"] .settings-dialog .settings-card,
+html[data-theme="dark"] .settings-dialog .provider-card,
+html[data-theme="dark"] .settings-dialog .provider-current,
+html[data-theme="dark"] .settings-dialog .agent-card,
+html[data-theme="dark"] .settings-dialog .toggle-row,
+html[data-theme="dark"] .settings-dialog .field-grid .toggle-row,
+html[data-theme="dark"] .settings-dialog .chat-font-sample,
+html[data-theme="dark"] .settings-dialog .appearance-option,
+html[data-theme="dark"] .settings-dialog .skin-option,
+html[data-theme="dark"] .settings-dialog .appearance-model-skin-card,
+html[data-theme="dark"] .settings-dialog .usage-kpi,
+html[data-theme="dark"] .settings-dialog .usage-card,
+html[data-theme="dark"] .settings-dialog .usage-requests,
+html[data-theme="dark"] .settings-dialog .mcp-add-form,
+html[data-theme="dark"] .settings-dialog .mcp-row,
+html[data-theme="dark"] .settings-dialog .mcp-empty,
+html[data-theme="dark"] .settings-dialog .skill-admin-list,
+html[data-theme="dark"] .settings-dialog .skill-admin-detail,
+html[data-theme="dark"] .settings-dialog .skill-detail-note,
+html[data-theme="dark"] .settings-dialog .update-status,
+html[data-theme="dark"] .settings-dialog .update-browser,
+html[data-theme="dark"] .settings-dialog .update-proxy,
+html[data-theme="dark"] .settings-dialog .connection-item,
+html[data-theme="dark"] .settings-dialog .onebot-binding,
+html[data-theme="dark"] .settings-dialog .onebot-binding-item,
+html[data-theme="dark"] .settings-dialog .panel-empty,
+html[data-theme="dark"] .panel-dialog .panel-item,
+html[data-theme="dark"] .panel-dialog .panel-empty,
+html[data-theme="dark"] .panel-dialog .task-item,
+html[data-theme="dark"] .panel-dialog .skill-row,
+html[data-theme="dark"] .sa-dialog fieldset {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .07);
+}
+.settings-dialog .toggle-row,
+.settings-dialog .field-grid .toggle-row,
+.settings-dialog .skin-option,
+.settings-dialog .skill-detail-note {
+  border-radius: 15px;
+}
+.settings-dialog .provider-current {
+  padding: 12px 14px;
+  border: 1px solid var(--glass-card-border);
+}
+.settings-dialog .onebot-status > div {
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--pill-bg);
+  border: 1px solid var(--glass-card-border);
+}
+.settings-dialog .onebot-binding,
+.settings-dialog .onebot-binding-item {
+  padding: 12px 14px;
+  border: 1px solid var(--glass-card-border);
+  margin-bottom: 8px;
+}
+.settings-dialog .image-cache-row,
+.settings-dialog .storage-stat-row,
+.settings-dialog .connection-address {
+  border-radius: 15px;
+  background: var(--pill-bg);
+  border: 1px solid var(--glass-card-border);
+}
+.settings-dialog .panel-empty,
+.panel-dialog .panel-empty {
+  border: 1px dashed var(--glass-card-border);
+}
+
+/* Skills 管理列表行、芯片与弹出菜单 */
+.settings-dialog .skill-admin-list {
+  padding: 4px;
+}
+.settings-dialog .skill-admin-list > .hint {
+  display: block;
+  margin: 0;
+  padding: 8px 10px;
+}
+.settings-dialog .skill-admin-list > .panel-empty {
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.settings-dialog .skill-admin-list .skill-item {
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 1px solid color-mix(in oklab, var(--glass-card-border) 64%, var(--line));
+  border-radius: 12px;
+  box-shadow: none;
+  margin-bottom: 2px;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.settings-dialog .skill-admin-list .skill-item:last-child {
+  border-bottom-color: transparent;
+  margin-bottom: 0;
+}
+.settings-dialog .skill-admin-list .skill-item:hover {
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+}
+.settings-dialog .skill-admin-list .skill-item.selected {
+  background: color-mix(in oklab, var(--accent) 16%, var(--pill-bg-hover));
+  border-color: color-mix(in oklab, var(--accent) 44%, var(--pill-border));
+}
+html[data-theme="dark"] .settings-dialog .skill-admin-list .skill-item.selected {
+  background: color-mix(in oklab, var(--accent) 26%, rgba(255, 255, 255, .08));
+  border-color: color-mix(in oklab, var(--accent) 56%, rgba(255, 255, 255, .14));
+}
+.skill-detail-chips .chip {
+  border-radius: 999px;
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+  color: var(--text);
+}
+.skill-delete-menu,
+.skills-quick-more-menu,
+.usage-tooltip {
+  border-radius: 14px;
+  border: 1px solid var(--glass-pop-border);
+  background: var(--glass-pop-bg);
+  box-shadow: var(--glass-pop-shadow);
+  -webkit-backdrop-filter: blur(20px) saturate(1.36);
+  backdrop-filter: blur(20px) saturate(1.36);
+}
+.skill-delete-menu button,
+.skills-quick-more-menu button {
+  border-radius: 10px;
+}
+.skills-quick-list .skill-item .quick-desc-full {
+  border-radius: 12px;
+  background: var(--glass-card-bg);
+  border-color: var(--glass-card-border);
+}
+
+/* MCP 连接器 / 用量统计 / 软件更新：去不透明实底与直角分段控件 */
+.settings-dialog .mcp-cmd {
+  border-radius: 14px;
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+}
+.settings-dialog .mcp-tool-list code {
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+}
+.settings-dialog .mcp-seg,
+.settings-dialog .usage-seg,
+.settings-dialog .update-proxy-options {
+  border-radius: 999px;
+  padding: 3px;
+  gap: 2px;
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.settings-dialog .mcp-seg button,
+.settings-dialog .usage-seg button,
+.settings-dialog .update-proxy-option {
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  transition: background var(--t-fast), color var(--t-fast), box-shadow var(--t-fast);
+}
+.settings-dialog .mcp-seg button + button,
+.settings-dialog .usage-seg button + button {
+  border-left: 0;
+}
+.settings-dialog .mcp-seg button:hover:not(.active),
+.settings-dialog .usage-seg button:hover:not(.active),
+.settings-dialog .update-proxy-option:hover:not(:has(input:checked)) {
+  color: var(--text);
+  background: color-mix(in oklab, var(--surface) 42%, transparent);
+}
+.settings-dialog .mcp-seg button.active,
+.settings-dialog .usage-seg button.active,
+.settings-dialog .update-proxy-option:has(input:checked) {
+  background: var(--accent-solid);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 3px 10px var(--set-glow), inset 0 1px 0 rgba(255, 255, 255, .24);
+}
+.settings-dialog .usage-chip {
+  border-radius: 999px;
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.settings-dialog .usage-chip:hover {
+  background: var(--pill-bg-hover);
+  border-color: var(--pill-border-hover);
+}
+.settings-dialog .usage-chip.active {
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
+  color: #fff;
+  box-shadow: 0 3px 10px var(--set-glow);
+}
+html[data-theme="dark"] .settings-dialog .usage-chip.active {
+  color: #fff;
+}
+.settings-dialog .usage-sel {
+  border-radius: 999px;
+  padding: 5px 30px 5px 12px;
+  background-color: var(--pill-bg);
+  border-color: var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.settings-dialog .update-status {
+  gap: 0;
+}
+.settings-dialog .update-status > div,
+.settings-dialog .update-status p {
+  background: transparent;
+  border-bottom: 1px solid color-mix(in oklab, var(--glass-card-border) 68%, var(--line));
+}
+.settings-dialog .update-status > :last-child {
+  border-bottom: 0;
+}
+.settings-dialog .update-browser {
+  gap: 0;
+}
+.settings-dialog .update-side {
+  background: transparent;
+  border-right: 1px solid color-mix(in oklab, var(--glass-card-border) 68%, var(--line));
+}
+.settings-dialog .update-notes-panel {
+  background: transparent;
+}
+.settings-dialog .update-source {
+  background: color-mix(in oklab, var(--surface) 22%, transparent);
+  border-bottom-color: color-mix(in oklab, var(--glass-card-border) 68%, var(--line));
+}
+.settings-dialog .update-version-item {
+  border-radius: 12px;
+}
+.settings-dialog .update-version-item:hover {
+  background: var(--pill-bg);
+}
+.settings-dialog .update-version-item[aria-selected="true"] {
+  background: color-mix(in oklab, var(--accent) 16%, var(--pill-bg-hover));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.settings-dialog .update-version-badge {
+  border-radius: 999px;
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+}
+.update-float {
+  border-radius: 18px;
+  border-color: var(--glass-pop-border);
+  background: var(--glass-pop-bg);
+  box-shadow: var(--glass-pop-shadow);
+  -webkit-backdrop-filter: blur(20px) saturate(1.36);
+  backdrop-filter: blur(20px) saturate(1.36);
+}
+
+/* 外观页单选卡片（皮肤跟随方式 / 输入框放大样式 / 字体 / 配色皮肤）在通透玻璃底上的选中态高对比 */
+.settings-dialog :is(.appearance-skin-mode, .appearance-composer-expand-options, .appearance-font-options) .appearance-option:has(input:checked),
+.settings-dialog .skin-option:has(input:checked) {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 16%, var(--pill-bg-hover));
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 16%, transparent), var(--pill-shadow);
+}
+html[data-theme="dark"] .settings-dialog :is(.appearance-skin-mode, .appearance-composer-expand-options, .appearance-font-options) .appearance-option:has(input:checked),
+html[data-theme="dark"] .settings-dialog .skin-option:has(input:checked) {
+  border-color: color-mix(in oklab, var(--accent) 82%, #fff);
+  background: color-mix(in oklab, var(--accent) 28%, rgba(20, 24, 42, .52));
+}
+
+.settings-dialog .set-ico {
+  border-radius: 999px;
+}
+
+/* 弹窗内全部单行输入框、下拉、多行文本框统一方案 B 胶囊与柔圆角（含不在 <label> 内的控件） */
+dialog input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="color"]):not(.update-version-native)),
+dialog select:where(:not(.update-version-native)),
+.settings-dialog :is(label, div, section, form) input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="color"]):not(.update-version-native)),
+.settings-dialog :is(label, div, section, form) select:where(:not(.update-version-native)),
+.rename-conversation-dialog input {
+  border-radius: 999px;
+  border: 1px solid var(--pill-border);
+  background-color: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  color: var(--text);
+  font: inherit;
+  padding-left: 14px;
+  transition: border-color var(--t-fast), background-color var(--t-fast), box-shadow var(--t-fast);
+}
+dialog select:where(:not(.update-version-native)),
+.settings-dialog :is(label, div, section, form) select:where(:not(.update-version-native)) {
+  padding-right: 34px;
+  background-position: right 13px center;
+}
+dialog input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="color"]):not(.update-version-native)):focus,
+dialog select:where(:not(.update-version-native)):focus,
+.settings-dialog :is(label, div, section, form) input:where(:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="color"]):not(.update-version-native)):focus,
+.settings-dialog :is(label, div, section, form) select:where(:not(.update-version-native)):focus {
+  border-color: var(--accent);
+  background-color: var(--pill-bg-hover);
+}
+
+/* .search-field 整体胶囊化（Skills 管理搜索框 + 快速 Skill 弹窗），剥离内层 input 重复边框，放大镜稳落胶囊内部 */
+dialog label.search-field,
+.settings-dialog label.search-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--pill-border);
+  background: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  transition: border-color var(--t-fast), background-color var(--t-fast), box-shadow var(--t-fast);
+}
+dialog label.search-field:hover,
+.settings-dialog label.search-field:hover {
+  border-color: var(--pill-border-hover);
+  background: var(--pill-bg-hover);
+}
+dialog label.search-field:focus-within,
+.settings-dialog label.search-field:focus-within {
+  border-color: var(--accent);
+  background: var(--pill-bg-hover);
+  box-shadow: 0 0 0 3px var(--set-ring, color-mix(in oklab, var(--accent) 18%, transparent)), var(--pill-shadow);
+}
+dialog label.search-field svg,
+.settings-dialog label.search-field svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+}
+dialog label.search-field > input,
+.settings-dialog label.search-field > input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  background-color: transparent;
+  box-shadow: none;
+  outline: none;
+}
+dialog label.search-field > input:focus,
+.settings-dialog label.search-field > input:focus {
+  border: 0;
+  background: transparent;
+  background-color: transparent;
+  box-shadow: none;
+  outline: none;
+}
+
+/* 修复设置侧栏 / MCP / 软件更新搜索框：保留左侧放大镜图标占位与垂直居中 */
+.settings-dialog .settings-search .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.settings-dialog label.settings-search input#settingsSearch,
+.settings-dialog .mcp-toolbar .mcp-search input#mcpSearchInput,
+.settings-dialog .mcp-toolbar .mcp-search input {
+  margin-top: 0;
+  border-radius: 999px;
+  border: 1px solid var(--pill-border);
+  background-color: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  padding-left: 34px;
+  padding-right: 12px;
+}
+.settings-dialog .update-version-search input {
+  margin-top: 0;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid var(--pill-border);
+  background-color: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  padding-left: 32px;
+  padding-right: 10px;
+}
+.settings-dialog .settings-search svg,
+.settings-dialog .mcp-toolbar .mcp-search svg,
+.settings-dialog .update-version-search svg {
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* 弹窗内全部多行文本框（含「我的备注」#skillDetailNote、MCP JSON、预设提示词） */
+dialog textarea,
+.settings-dialog textarea,
+.settings-dialog .skill-detail-note textarea,
+.settings-dialog .mcp-json-area,
+.prompt-preset-dialog textarea {
+  border-radius: 16px;
+  border: 1px solid var(--pill-border);
+  background: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.55;
+  padding: 10px 14px;
+  transition: border-color var(--t-fast), background-color var(--t-fast), box-shadow var(--t-fast);
+}
+dialog textarea:focus,
+.settings-dialog textarea:focus,
+.settings-dialog .skill-detail-note textarea:focus,
+.settings-dialog .mcp-json-area:focus,
+.prompt-preset-dialog textarea:focus {
+  border-color: var(--accent);
+  background: var(--pill-bg-hover);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--set-ring, color-mix(in oklab, var(--accent) 18%, transparent)), var(--pill-shadow);
+}
+.settings-dialog .mcp-json-area,
+.settings-dialog .mcp-form-grid textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* 外观页「消息卡片不透明度」实时微缩预览块 */
+.message-card-opacity-preview {
+  position: relative;
+  overflow: hidden;
+  margin: 8px 0 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--glass-card-border);
+  background:
+    radial-gradient(circle at 18% 24%, color-mix(in oklab, var(--accent) 36%, transparent), transparent 56%),
+    radial-gradient(circle at 82% 76%, color-mix(in oklab, var(--brand-500, var(--accent)) 28%, transparent), transparent 58%),
+    linear-gradient(135deg var(--in-oklab),
+      color-mix(in oklab, var(--accent) 22%, var(--surface-2)) 0%,
+      color-mix(in oklab, var(--surface) 76%, var(--bg)) 100%);
+  min-height: 108px;
+}
+.message-card-opacity-preview > .model-skin-layer,
+.message-card-opacity-preview > .chat-bg-surface {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.message-card-opacity-preview > .model-skin-layer {
+  display: none;
+  background-image: var(--model-skin-image, none);
+  background-size: cover;
+  background-position: 50% 34%;
+}
+.message-card-opacity-preview > .chat-bg-surface {
+  display: none;
+  background-image: var(--chat-bg-image, none);
+  /* 这里只预览不透明度，取景预览在「调整取景」的同比例白板内。 */
+  background-size: cover;
+  background-position: center;
+  opacity: var(--chat-bg-opacity, 0.35);
+}
+html[data-model-skin="on"] .message-card-opacity-preview > .model-skin-layer { display: block; }
+html[data-chat-bg="on"]:not([data-model-skin="on"]) .message-card-opacity-preview > .chat-bg-surface { display: block; }
+.mco-preview-stack {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mco-preview-bubble {
+  max-width: 86%;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  -webkit-backdrop-filter: blur(12px) saturate(1.36);
+  backdrop-filter: blur(12px) saturate(1.36);
+  transition: background-color var(--t-fast);
+}
+.mco-preview-bubble.is-user {
+  align-self: flex-end;
+  border-radius: 14px 14px 4px 14px;
+  border: 1px solid color-mix(in oklab, var(--violet-line) 74%, rgba(255, 255, 255, .56));
+  background: color-mix(in oklab, var(--user-bubble) var(--msg-card-opacity, 50%), transparent);
+}
+.mco-preview-bubble.is-ai {
+  align-self: flex-start;
+  display: grid;
+  gap: 2px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, .62);
+  background: color-mix(in oklab, var(--surface) var(--msg-card-opacity, 50%), transparent);
+  box-shadow: 0 4px 14px rgba(18, 22, 44, .08);
+}
+.mco-preview-bubble.is-ai b { font-size: 12px; }
+.mco-preview-bubble.is-ai span { color: var(--muted); font-size: 11.5px; }
+html[data-theme="dark"] .mco-preview-bubble.is-ai {
+  border-color: rgba(255, 255, 255, .14);
+}
+html[data-theme="dark"] .mco-preview-bubble.is-user {
+  border-color: color-mix(in oklab, var(--violet-line) 56%, rgba(255, 255, 255, .14));
+}
+
+.settings-dialog .provider-scope-tabs,
+.settings-dialog .appearance-theme-options,
+.settings-dialog .agent-tabs {
+  border-radius: 999px;
+  padding: 4px;
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.settings-dialog .provider-scope-tabs button,
+.settings-dialog .appearance-theme-options .appearance-option,
+.settings-dialog .agent-tabs button {
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  border-color: transparent;
+}
+.settings-dialog .appearance-theme-options .appearance-option:has(input:checked),
+.settings-dialog .provider-scope-tabs button.active {
+  background: var(--accent-solid);
+  color: #fff;
+  box-shadow: 0 3px 10px var(--set-glow), inset 0 1px 0 rgba(255, 255, 255, .24);
+}
+.settings-dialog .control-button,
+.settings-dialog .primary-button,
+.settings-dialog .control-button.primary,
+.settings-dialog .danger-button,
+.settings-dialog .provider-card-copy,
+.panel-dialog .control-button,
+.panel-dialog .primary-button,
+.sa-dialog .control-button,
+.sa-dialog .primary-button {
+  border-radius: 999px;
+}
+.settings-dialog .control-button:not(.primary):not(.ghost) {
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.settings-dialog .control-button:not(.primary):not(.ghost):hover:not(:disabled) {
+  background: var(--pill-bg-hover);
+  border-color: var(--pill-border-hover);
+  box-shadow: var(--pill-shadow-hover);
+  transform: translateY(-.5px);
+}
+
+/* ── 7. 右侧文件 / 辅助对话面板（.file-panel / .aux-*）：动态纱窗玻璃 + 胶囊 ── */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .file-panel {
+  background: var(--glass-panel-bg);
+  border-left-color: var(--glass-dialog-border);
+  -webkit-backdrop-filter: blur(20px) saturate(1.36);
+  backdrop-filter: blur(20px) saturate(1.36);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .dock-groups,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .file-panel-top,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .file-view-toolbar,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .file-edit-foot,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .aux-follow,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .aux-chat-banner,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .aux-composer-shell {
+  background: color-mix(in oklab, var(--surface) 32%, transparent);
+  border-color: color-mix(in oklab, var(--glass-dialog-border) 68%, var(--line));
+}
+.dock-groups { padding: 6px 8px; gap: 6px; }
+.dock-group-button {
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 0 14px;
+}
+.dock-group-button[aria-selected="true"] {
+  border-color: var(--pill-border);
+  background: var(--pill-bg-hover);
+  color: var(--accent);
+  box-shadow: var(--pill-shadow);
+}
+.file-tab { border-radius: 999px; padding: 0 6px 0 12px; }
+.file-tab.active {
+  background: var(--pill-bg-hover);
+  border-color: var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+.file-panel-close,
+.aux-empty-start,
+.aux-composer .send-button { border-radius: 999px; }
+.aux-composer textarea {
+  border-radius: 16px;
+  border-color: var(--pill-border);
+  background: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+}
+.aux-chip {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 22px 0 10px;
+  border-radius: 999px;
+  border-color: var(--pill-border);
+  background-color: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  font-size: 11.5px;
+  font-weight: 500;
+  background-position: right 8px center;
+  background-size: 9px 6px;
+}
+
+/* ── 8. 工作台（.studio-view 全部 5 页）与任务总管（.super-agent-view）：全局动态纱窗玻璃 + 胶囊 ── */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-view {
+  background: transparent;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .studio-topbar,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-workspace-topbar,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageNovel .novel-page-head,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageWriter .writer-page-head {
+  background: color-mix(in oklab, var(--surface) 46%, transparent);
+  border-bottom-color: color-mix(in oklab, var(--glass-dialog-border) 66%, var(--line));
+  -webkit-backdrop-filter: blur(16px) saturate(1.36);
+  backdrop-filter: blur(16px) saturate(1.36);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .studio-cats,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .studio-detail,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .studio-result,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageLibrary .studio-library,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageLibrary .studio-list,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageLibrary .studio-actions,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageLibrary .studio-followup,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioSkillHistory,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .labeler-queue,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .labeler-config,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .labeler-results,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .labeler-config-foot,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-library,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-run-col,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-results-col,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-batch,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageNovel .novel-panel,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageWriter .writer-panel,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageNovel .wb-book-action-dock,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageWriter .wb-book-action-dock,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-detail-panel,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-side-panel,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-side-panel > .super-agent-section,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-metric,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-stage-body,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .content-zone {
+  background: var(--glass-card-bg);
+  border-color: var(--glass-card-border);
+  -webkit-backdrop-filter: blur(18px) saturate(1.32);
+  backdrop-filter: blur(18px) saturate(1.32);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .studio-row:where(:not(.active)),
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .labeler-dropzone,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .labeler-batch:where(:not(.active)),
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-workflow-card:where(:not(.active)),
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-task-card:where(:not(.is-selected)),
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-media-group,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .comfyui-batch-row,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .content-skill-history-row:where(:not(.active)) {
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+}
+.studio-cats,
+.studio-detail,
+.studio-result,
+.labeler-queue,
+.labeler-config,
+.labeler-results,
+.labeler-dropzone { border-radius: 18px; }
+.studio-view :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]), select),
+.studio-search input,
+.wb-media-tabs,
+.studio-pane-btn,
+.wb-resource-monitor,
+.studio-cat,
+.studio-chip,
+.labeler-result-tab,
+.labeler-tag,
+.comfyui-results-seg-btn,
+.novel-stages,
+.writer-stages,
+.novel-stage,
+.writer-stage,
+.novel-primary,
+.writer-primary,
+.wb-media-menu summary {
+  border-radius: 999px;
+}
+.studio-view :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]), select) {
+  border-color: var(--pill-border);
+  background-color: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+  padding-left: 12px;
+}
+.studio-view select { padding-right: 32px; background-position: right 11px center; }
+.studio-view textarea {
+  border-radius: 16px;
+  border-color: var(--pill-border);
+  background: var(--pill-bg);
+}
+.wb-media-tabs,
+.wb-resource-monitor {
+  border-color: var(--pill-border);
+  background-color: var(--pill-bg);
+  box-shadow: var(--pill-shadow);
+}
+.studio-row,
+.labeler-batch,
+.comfyui-workflow-card,
+.comfyui-task-card,
+.comfyui-media-group,
+.comfyui-batch-row { border-radius: 14px; }
+.wb-book-menu {
+  border-radius: 16px;
+  border-color: var(--glass-pop-border);
+  background: var(--glass-pop-bg);
+  box-shadow: var(--glass-pop-shadow);
+  -webkit-backdrop-filter: blur(22px) saturate(1.34);
+  backdrop-filter: blur(22px) saturate(1.34);
+}
+
+/* ── 9. 消息卡片透明度联动（--msg-card-opacity）、操作条、思考块、开始页卡片与通用按钮统一圆胶囊语言 ── */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card {
+  background: color-mix(in oklab, var(--surface) var(--msg-card-opacity, 50%), transparent);
+  border-color: rgba(255, 255, 255, .62);
+  box-shadow: 0 6px 22px rgba(18, 22, 44, .08), inset 0 1px 0 rgba(255, 255, 255, .68);
+  -webkit-backdrop-filter: blur(12px) saturate(1.36);
+  backdrop-filter: blur(12px) saturate(1.36);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card {
+  background: color-mix(in oklab, var(--surface) var(--msg-card-opacity, 50%), transparent);
+  border-color: rgba(255, 255, 255, .14);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .08);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-row.user:not(.is-editing) .message-body {
+  background: color-mix(in oklab, var(--user-bubble) var(--msg-card-opacity, 50%), transparent);
+  border-color: color-mix(in oklab, var(--violet-line) 68%, rgba(255, 255, 255, .58));
+  box-shadow: 0 5px 18px rgba(30, 33, 56, .08), inset 0 1px 0 rgba(255, 255, 255, .66);
+  -webkit-backdrop-filter: blur(12px) saturate(1.36);
+  backdrop-filter: blur(12px) saturate(1.36);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-row.user:not(.is-editing) .message-body {
+  background: color-mix(in oklab, var(--user-bubble) var(--msg-card-opacity, 50%), transparent);
+  border-color: color-mix(in oklab, var(--violet-line) 56%, rgba(255, 255, 255, .14));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .08);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .first-turn-card {
+  background: color-mix(in oklab, var(--surface) clamp(18%, calc(var(--msg-card-opacity, 50%) - 4%), 100%), transparent);
+  border-color: rgba(255, 255, 255, .56);
+  -webkit-backdrop-filter: blur(12px) saturate(1.34);
+  backdrop-filter: blur(12px) saturate(1.34);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .first-turn-card {
+  border-color: rgba(255, 255, 255, .13);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .reasoning-block,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .tool-run {
+  background: color-mix(in oklab, var(--surface-2) clamp(16%, calc(var(--msg-card-opacity, 50%) - 6%), 92%), transparent);
+  border-color: rgba(255, 255, 255, .52);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .reasoning-block,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .tool-run {
+  background: color-mix(in oklab, var(--surface-2) clamp(16%, calc(var(--msg-card-opacity, 50%) - 6%), 92%), transparent);
+  border-color: rgba(255, 255, 255, .12);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .starter-grid button,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .starter-grid .starter-add {
+  background: color-mix(in oklab, var(--surface) clamp(24%, calc(var(--msg-card-opacity, 50%) + 4%), 100%), transparent);
+  border-color: rgba(255, 255, 255, .60);
+  -webkit-backdrop-filter: blur(12px) saturate(1.34);
+  backdrop-filter: blur(12px) saturate(1.34);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .starter-grid button,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .starter-grid .starter-add {
+  border-color: rgba(255, 255, 255, .14);
+}
+/* 低透明度可读性保护：壁纸/模型皮肤模式下给消息文本补轻微柔光护字 */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-body,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-head,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-usage,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-actions,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-row.user:not(.is-editing) .message-body {
+  text-shadow: 0 1px 8px rgba(255, 255, 255, .56);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-usage,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-actions button {
+  color: color-mix(in oklab, var(--text) 74%, var(--muted));
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-body,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-head,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-usage,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-actions,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-row.user:not(.is-editing) .message-body {
+  text-shadow: 0 1px 6px rgba(0, 0, 0, .48);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card pre,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card code {
+  text-shadow: none;
+}
+
+.message-actions button {
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.message-row.user > .message-actions {
+  border-radius: 999px;
+  padding: 2px 6px;
+}
+.message-card .reasoning-block { border-radius: 14px; }
+.message-card .tool-run { border-radius: 13px; }
+.file-change-chip,
+.ft-chip,
+.message-usage-toggle { border-radius: 999px; }
+
+.starter-grid button,
+.starter-grid .starter-add {
+  border-radius: 18px;
+  box-shadow: var(--pill-shadow);
+  transition: transform var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast), background var(--t-fast);
+}
+.starter-grid button:hover,
+.starter-grid .starter-add:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--pill-shadow-hover);
+}
+
+.control-button,
+.primary-button,
+.danger-button,
+.mcp-button {
+  border-radius: 999px;
+  font-weight: 500;
+  transition: transform var(--t-fast), border-color var(--t-fast), background-color var(--t-fast), box-shadow var(--t-fast), color var(--t-fast);
+}
+.control-button { padding-left: 13px; padding-right: 13px; }
+.control-button.tiny { padding-left: 10px; padding-right: 10px; }
+.primary-button {
+  padding-left: 16px;
+  padding-right: 16px;
+  box-shadow: 0 3px 10px color-mix(in oklab, var(--accent-solid) 26%, transparent), inset 0 1px 0 rgba(255, 255, 255, .22);
+}
+.primary-button:hover:not(:disabled) { transform: translateY(-.5px); filter: brightness(1.04); }
+
+/* ── 手机窄屏下保持紧凑不溢出（保留既有全屏弹窗与触控契约） ── */
+@media (max-width: 760px) {
+  .composer-meta-left {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+  }
+  .composer-provider {
+    grid-column: auto;
+    grid-row: auto;
+    justify-self: auto;
+    margin-left: 0;
+  }
+  .composer-meta-more {
+    grid-column: auto;
+    grid-row: auto;
+  }
+  .composer-workspace,
+  .composer-provider,
+  .composer-model,
+  .permission-mode-button,
+  .composer-meta-left .deep-reasoning-button,
+  .composer-meta-more-button,
+  .composer-meta-right {
+    height: 26px;
+    min-height: 26px;
+  }
+  .composer-provider select:not([multiple]):not([size]),
+  .composer-model-trigger,
+  #composerWorkspaceSelect:not([multiple]):not([size]) {
+    height: 24px;
+    min-height: 24px;
+  }
+  .composer-provider select:not([multiple]):not([size]) {
+    max-width: min(148px, 40vw);
+  }
+  .composer-model-trigger {
+    max-width: min(176px, 46vw);
+  }
+  .composer-meta-right {
+    width: auto;
+    margin-left: auto;
+  }
+  .topbar .control-button,
+  .topbar .mcp-button,
+  .topbar .agent-ability-button {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .composer-wrap.is-expanded:not(.is-inline-edit) .composer .composer-input .expand-button[aria-pressed="true"] {
+    right: -90px;
+    height: 26px;
+    min-height: 26px;
+    padding: 0 9px 0 8px;
+  }
+  /* 回复期间编辑区占满整行，把收起按钮移回本行并给镜像与文本留出相同空间。 */
+  .composer-wrap.is-expanded:not(.is-inline-edit) .composer.is-running #expandComposer[aria-pressed="true"] {
+    right: 0;
+  }
+  .composer-wrap.is-expanded:not(.is-inline-edit) .composer.is-running .composer-input :is(#messageInput, #inputMirror) {
+    margin-right: 62px;
+  }
+  .composer-wrap.is-expanded:not(.is-inline-edit) .composer.is-running .composer-input #messageInput {
+    width: calc(100% - 62px);
+  }
+  /* 手机端抽屉侧栏需兼顾可读性与通透感 */
+  html:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar {
+    background: linear-gradient(180deg var(--in-oklab),
+      rgba(255, 255, 255, .74) 0%,
+      rgba(246, 248, 255, .66) 100%);
+    -webkit-backdrop-filter: blur(22px) saturate(1.42);
+    backdrop-filter: blur(22px) saturate(1.42);
+  }
+  html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .sidebar {
+    background: linear-gradient(180deg var(--in-oklab),
+      rgba(14, 17, 30, .78) 0%,
+      rgba(12, 15, 26, .72) 100%);
+  }
+  /* 手机端全屏弹窗保持 0 圆角贴边（权重压过 dialog:not(.toast)） */
+  dialog.settings-dialog,
+  dialog.panel-dialog,
+  dialog.provider-dialog,
+  dialog.agent-dialog,
+  dialog.onboarding-dialog,
+  .settings-dialog,
+  .panel-dialog,
+  .provider-dialog,
+  .agent-dialog,
+  .onboarding-dialog {
+    border-radius: 0;
+  }
+}
+
+/* ── 修复三则（审查后补丁）──
+   1. 空态文案（.connection-item）嵌在 .skill-admin-list 卡片里会出现双层边框：内层去框去底。
+   2. 「我的备注」块与 textarea 叠了多层半透底：块本身去底去框，只留 textarea 一层玻璃。
+   3. 消息卡低透明度时底部用量/耗时小字对比度不足：提高字色并补柔光护字。 */
+.settings-dialog .skill-admin-list > .connection-item {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 12px;
+  padding: 8px 10px;
+}
+.settings-dialog .skill-detail-note {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.settings-dialog .skill-detail-note textarea {
+  margin-top: 8px;
+  background: color-mix(in oklab, var(--surface) 82%, transparent);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-usage,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-usage * {
+  color: color-mix(in oklab, var(--text) 86%, var(--muted));
+  font-weight: 500;
+  text-shadow: 0 0 8px rgba(255, 255, 255, .92), 0 1px 3px rgba(255, 255, 255, .7);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-usage,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-usage * {
+  text-shadow: 0 0 8px rgba(0, 0, 0, .85), 0 1px 3px rgba(0, 0, 0, .7);
+}
+/* 低透明度下的用量/耗时小字（真实类名 .usage-line）：提高字色对比并补柔光护字 */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .usage-line,
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .usage-line * {
+  color: color-mix(in oklab, var(--text) 82%, var(--muted));
+  font-weight: 500;
+  text-shadow: 0 0 8px rgba(255, 255, 255, .95), 0 1px 3px rgba(255, 255, 255, .75);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .usage-line,
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .usage-line * {
+  text-shadow: 0 0 8px rgba(0, 0, 0, .9), 0 1px 3px rgba(0, 0, 0, .75);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-actions button {
+  color: color-mix(in oklab, var(--text) 84%, var(--muted));
+  font-weight: 500;
+  text-shadow: 0 0 8px rgba(255, 255, 255, .95), 0 1px 3px rgba(255, 255, 255, .75);
+}
+html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .message-card .message-actions button {
+  text-shadow: 0 0 8px rgba(0, 0, 0, .9), 0 1px 3px rgba(0, 0, 0, .75);
 }

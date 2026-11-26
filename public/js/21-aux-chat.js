@@ -289,8 +289,8 @@ function renderAuxTabs() {
 
 // 一条消息 → 主对话同款 DOM。id 一律置空：编辑/分支/删除/重新生成/新会话都是
 // 主对话的概念，在辅助窗里会误伤（messageElement 按 !temporary && message.id 显示它们）。
-function auxMessageRow(message, index) {
-  const element = messageElement({ ...message, id: '' }, false);
+function auxMessageRow(tab, message, index) {
+  const element = messageElement({ ...message, id: '' }, false, { auxConversationId: tab.id });
   const runs = Array.isArray(message.metadata?.tool_runs) ? message.metadata.tool_runs : [];
   // 流式期间的占位 run 还没有结果：toolRunMarkup 只认 success，会显示成「已执行」，
   // 这里按 pending 改写成「执行中」。run 结束后回填的真实消息不带 pending，自动恢复。
@@ -345,13 +345,15 @@ function renderAuxMessages() {
     return;
   }
   const fragment = document.createDocumentFragment();
-  tab.messages.forEach((message, index) => fragment.append(auxMessageRow(message, index)));
+  tab.messages.forEach((message, index) => fragment.append(auxMessageRow(tab, message, index)));
   body.replaceChildren(fragment);
   body.scrollTop = body.scrollHeight;
 }
 
 // 流式期间只更新「最后那条待完成回复」，不整表重绘（否则滚动位置和展开的工具卡都会丢）。
 function updatePendingRow(tab, reply, index) {
+  // 另一个标签的迟到流事件只更新其自己的缓存，不得改写当前标签同位置的正文。
+  if (activeTab() !== tab) return;
   const body = $('#auxChatMessages');
   const row = body?.querySelectorAll('.message-row')?.[index];
   if (!row) { renderAuxMessages(); return; }
@@ -363,14 +365,14 @@ function updatePendingRow(tab, reply, index) {
     // 工具卡是 <details>：结构变了就整行替换，不能只改正文。
     reply.__renderedRuns = signature;
     const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
-    row.replaceWith(auxMessageRow(reply, index));
+    row.replaceWith(auxMessageRow(tab, reply, index));
     if (atBottom) body.scrollTop = body.scrollHeight;
     return;
   }
   const answer = row.querySelector('.answer-content');
   if (answer) {
     answer.innerHTML = reply.content
-      ? markdown(reply.content)
+      ? markdown(reply.content, true, { genui: true, genuiStreaming: true })
       : '<span class="aux-thinking">思考中…</span>';
   }
 }
@@ -662,18 +664,26 @@ async function loadAuxMessages(tab) {
 
 // ---- 发送与轻量流式消费（独立实现，不碰主对话流） -----------------------------
 
-export async function sendAuxMessage() {
+export function sendGenuiAuxAction(text, conversationId) {
+  return sendAuxMessage({ cardText: text, cardConversationId: conversationId });
+}
+
+export async function sendAuxMessage({ cardText = '', cardConversationId = '' } = {}) {
   const input = $('#auxChatInput');
-  const text = String(input?.value || '').trim();
+  const text = String(cardConversationId ? cardText : (input?.value || '')).trim();
   if (!text) return;
   let tab = activeTab();
+  if (cardConversationId && (tab?.id !== cardConversationId || !filePanelState.open || dockGroup() !== 'aux')) {
+    toast('已切换辅助对话，请回到卡片所在的标签再操作');
+    return;
+  }
   if (!tab) {
     await createAuxChat();
     tab = activeTab();
     if (!tab) return;
   }
   if (auxChatState.sending) {
-    toast('上一条还在回答，等它说完');
+    toast(cardConversationId ? '辅助对话正在回复，操作未发送，请稍后再点卡片' : '上一条还在回答，等它说完');
     return;
   }
   const providerKey = auxProviderKey(tab);
@@ -682,17 +692,19 @@ export async function sendAuxMessage() {
     toast('请先在辅助对话底部选择供应商和模型');
     return;
   }
-  input.value = '';
-  autoGrowAuxInput();
+  if (!cardConversationId) {
+    input.value = '';
+    autoGrowAuxInput();
+  }
   tab.messages.push({ role: 'user', content: text });
   const reply = { role: 'assistant', content: '', pending: true, metadata: { tool_runs: [] } };
   reply.__renderedRuns = '';
   tab.messages.push(reply);
   renderAuxChat();
-  await streamAuxRun(tab, reply, text, providerKey, modelName);
+  await streamAuxRun(tab, reply, text, providerKey, modelName, { card: Boolean(cardConversationId) });
 }
 
-async function streamAuxRun(tab, reply, text, providerKey, modelName) {
+async function streamAuxRun(tab, reply, text, providerKey, modelName, { card = false } = {}) {
   auxChatState.sending = true;
   setAuxBusy(true);
   const controller = new AbortController();
@@ -714,6 +726,7 @@ async function streamAuxRun(tab, reply, text, providerKey, modelName) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `HTTP ${response.status}`);
     }
+    if (card && activeTab() === tab) toast('卡片操作已发送到辅助对话');
     // 轻量 NDJSON 消费：正文 / 工具事件 / 终态。工具事件落进 metadata.tool_runs，
     // 与主对话同形（toolMarkup 直接渲染），所以流式期间就能看见工具卡。
     const reader = response.body.getReader();
@@ -770,6 +783,7 @@ async function streamAuxRun(tab, reply, text, providerKey, modelName) {
       try { handleEvent(JSON.parse(buffer)); } catch (_) { /* 尾行不完整忽略 */ }
     }
     reply.pending = false;
+    if (failure) reply.metadata.partial = true;
     if (failure && !reply.content) reply.content = `（${failure}）`;
     else if (failure) reply.content += `\n\n（${failure}）`;
     // run 已落库：拉一次真实消息，工具卡 / 用量 / 媒体与主对话完全同源。
@@ -787,7 +801,7 @@ async function streamAuxRun(tab, reply, text, providerKey, modelName) {
         console.debug('[naiba] 辅助对话回填消息失败:', error.message);
       }
     }
-    renderAuxChat();
+    if (activeTab() === tab) renderAuxChat();
   } catch (error) {
     reply.pending = false;
     if (error.name === 'AbortError') {
@@ -796,7 +810,7 @@ async function streamAuxRun(tab, reply, text, providerKey, modelName) {
       reply.content = `（发送失败：${error.message}）`;
       toast(`辅助对话发送失败：${error.message}`);
     }
-    renderAuxChat();
+    if (activeTab() === tab) renderAuxChat();
   } finally {
     auxChatState.sending = false;
     setAuxBusy(false);

@@ -171,6 +171,18 @@ async function runViewport(browser, label, contextOptions, expectCoarse) {
     await sleep(120);
     const s8 = await page.evaluate(() => window.__probe.snap());
     check(`${label} ⑧ 长内容滚到底后，按钮中心 elementFromPoint 仍命中按钮自身`, s8.hitButton === true);
+    if (expectCoarse) {
+      const runningHit = await page.evaluate(async () => {
+        const { updateContextComposerLock } = await import('./js/03-media.js');
+        updateContextComposerLock(true);
+        try {
+          return window.__probe.snap().hitButton;
+        } finally {
+          updateContextComposerLock(false);
+        }
+      });
+      check(`${label} ⑧b 回复中输入框独占一行，收起键仍可点击`, runningHit === true);
+    }
 
     // ⑤：展开态清空 —— 回落到 expandedMin（真实下限），不是 39px。
     await page.fill('#messageInput', '');

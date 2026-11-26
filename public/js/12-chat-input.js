@@ -392,9 +392,13 @@ export function updateDeepReasoningButton() {
   btn.title = auto
     ? (inherited !== 'auto' ? `思考强度：跟随模型配置（${inheritedLabel}）` : '思考强度：跟随 API（自动）')
     : `思考强度：${label}`;
+  const shownLabel = auto && inherited !== 'auto' ? inheritedLabel : label;
+  const valueEl = $('#reasoningValue');
   const labelEl = $('#reasoningLabel');
-  if (labelEl) {
-    labelEl.textContent = auto && inherited !== 'auto' ? `思考 ${inheritedLabel}` : `思考 ${label}`;
+  if (valueEl) {
+    valueEl.textContent = shownLabel;
+  } else if (labelEl) {
+    labelEl.textContent = `思考 ${shownLabel}`;
   }
   // 菜单高亮当前等级（点开就能看到"现在用的是哪一档"）
   document.querySelectorAll('#reasoningMenu [data-reasoning-effort]').forEach((item) => {
@@ -409,19 +413,46 @@ export function toggleDeepReasoning() {
   if (state.chatRunId || state.abortController) return;
   const menu = $('#reasoningMenu');
   if (!menu) return;
-  const open = menu.hidden;
-  // 弹层挂到 body 并 fixed 定位：避免被 .composer-wrap 的 overflow 裁剪（教训 §九.27）。
-  if (open && menu.parentElement !== document.body) document.body.appendChild(menu);
-  menu.hidden = !open;
-  $('#deepReasoningButton')?.setAttribute('aria-expanded', String(open));
-  if (open) {
-    document.dispatchEvent(new CustomEvent('naiba:close-chat-status'));
-    updateDeepReasoningButton();
-    positionReasoningMenu();
+  if (!menu.hidden) {
+    closeReasoningMenu({ restoreFocus: true });
+    return;
   }
+  // 弹层挂到 body 并 fixed 定位：避免被 .composer-wrap 的 overflow 裁剪（教训 §九.27）。
+  if (menu.parentElement !== document.body) document.body.appendChild(menu);
+  menu.hidden = false;
+  $('#deepReasoningButton')?.setAttribute('aria-expanded', 'true');
+  document.dispatchEvent(new CustomEvent('naiba:close-chat-status'));
+  updateDeepReasoningButton();
+  positionReasoningMenu();
+  const items = [...menu.querySelectorAll('[role="menuitemradio"]')];
+  for (const item of items) item.tabIndex = -1;
+  (items.find(item => item.getAttribute('aria-checked') === 'true') || items[0])?.focus();
 }
 
-// 强度列表的定位（fixed + 按按钮对齐，夹在视口内；优先向上展开，贴顶则下翻）。
+export function handleReasoningMenuKey(event) {
+  const menu = $('#reasoningMenu');
+  if (!menu || menu.hidden) return;
+  if (event.key === 'Tab') {
+    closeReasoningMenu({ restoreFocus: true });
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeReasoningMenu({ restoreFocus: true });
+    return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const items = [...menu.querySelectorAll('[role="menuitemradio"]')];
+  if (!items.length) return;
+  const current = items.indexOf(document.activeElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+    : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+  items[next].focus();
+}
+
+// 强度列表的定位（fixed + 按底部思考胶囊左对齐，夹在视口内；优先向上展开，贴顶则下翻）。
 export function positionReasoningMenu() {
   const menu = $('#reasoningMenu');
   const btn = $('#deepReasoningButton');
@@ -430,7 +461,7 @@ export function positionReasoningMenu() {
   const menuRect = menu.getBoundingClientRect();
   const edge = 12;
   const left = Math.min(
-    Math.max(edge, rect.right - menuRect.width),
+    Math.max(edge, rect.left),
     Math.max(edge, window.innerWidth - menuRect.width - edge),
   );
   let top = rect.top - menuRect.height - 8;
@@ -441,11 +472,13 @@ export function positionReasoningMenu() {
   menu.style.top = `${Math.round(top)}px`;
 }
 
-export function closeReasoningMenu() {
+export function closeReasoningMenu({ restoreFocus = false } = {}) {
   const menu = $('#reasoningMenu');
   if (!menu || menu.hidden) return;
   menu.hidden = true;
-  $('#deepReasoningButton')?.setAttribute('aria-expanded', 'false');
+  const trigger = $('#deepReasoningButton');
+  trigger?.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) trigger?.focus({ preventScroll: true });
 }
 
 // ---- 审批模式上拉框（与思考强度列表同套路：挂 body + fixed 定位 + 夹在视口内）----
@@ -507,7 +540,7 @@ export async function setReasoningEffort(effort) {
   state.reasoningEffort = effort;
   state.deepReasoningEnabled = effort !== 'off';
   updateDeepReasoningButton();
-  closeReasoningMenu();
+  closeReasoningMenu({ restoreFocus: true });
   try {
     const updated = await api(`/api/conversations/${state.conversationId}/settings`, {
       method: 'POST',

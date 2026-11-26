@@ -216,9 +216,14 @@ export function renderMarkdownTable(rows) {
   return `<div class="table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${tbody}</tbody></table></div>`;
 }
 
+export function isGenuiFence(language) {
+  const token = String(language ?? '').trim().toLowerCase().replace(/[>,;:.!?]+$/, '');
+  return /^(?:json[ \t]+)?dsh-ui$/.test(token);
+}
+
 export function markdown(text, allowRichText = true, opts = null) {
   const codeBlocks = [];
-  const addCodeBlock = (language, rawCode) => {
+  const addCodeBlock = (language, rawCode, genui, closed) => {
     const index = codeBlocks.length;
     // 显式 ```naiba-choices 块是模型给出的结构化选择（见 naiba/core/choices.py）：有效块渲染成
     // 可读题目与选项，不让用户看到原始 JSON；无效块保持下面的普通代码块（不隐藏、不生成控件）。
@@ -228,6 +233,27 @@ export function markdown(text, allowRichText = true, opts = null) {
         codeBlocks.push(preview);
         return index;
       }
+    }
+    // 显式 ```dsh-ui 块：由 33-genui.js 懒加载 dsh-genui 运行时并挂载为互动 UI 卡片，
+    // 未加载前或 JSON 无法修复时自然回退为代码块。
+    if (opts?.genui && genui && (closed || opts.genuiStreaming)) {
+      const streaming = Boolean(opts.genuiStreaming);
+      const rawEscaped = escapeHtml(rawCode);
+      const fallback = streaming
+        ? '<div class="genui-streaming-card"><span class="genui-streaming-dot" aria-hidden="true"></span><span>正在生成互动卡片…</span></div>'
+        : `<div class="code-block"><div class="code-block-bar">` +
+          `<span class="code-lang">dsh-ui</span>` +
+          `<button type="button" class="code-copy" data-copy-code>复制</button>` +
+          `</div><pre><code data-language="dsh-ui">${rawEscaped}</code></pre></div>`;
+      codeBlocks.push(
+        `<div class="genui-slot${streaming ? ' is-streaming' : ''}" data-genui-fence data-genui-streaming="${streaming ? '1' : '0'}">` +
+        `<textarea class="genui-raw" hidden>${rawEscaped}</textarea>` +
+        `<div class="genui-diagnostic" role="alert" hidden></div>` +
+        `<div class="genui-mount"></div>` +
+        `<div class="genui-fallback">${fallback}</div>` +
+        `</div>`
+      );
+      return index;
     }
     const lang = escapeHtml(String(language || '').trim());
     // opts.highlight === false：流式尾块的代码块先不做语法高亮（04-messages.js）。尾块还在
@@ -246,9 +272,29 @@ export function markdown(text, allowRichText = true, opts = null) {
   };
   // 先在「未转义原文」上提取围栏代码块，把原始代码交给 highlightCode 着色，
   // 其余文本统一 escape；@CODE_x@ 占位符不含 HTML 特殊字符，escape 不受影响。
-  let safe = String(text ?? '')
-    .replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, language, code) => `\n@@CODE_${addCodeBlock(language, code)}@@\n`)
-    .replace(/```([^\n]*)\n([\s\S]*)$/, (_, language, code) => `\n@@CODE_${addCodeBlock(language, code)}@@`);
+  const raw = String(text ?? '');
+  const opening = /```([^\n]*)\n/g;
+  const closing = /^[ \t]*```[ \t]*\r?$/gm;
+  let safe = '';
+  let offset = 0;
+  let match;
+  while ((match = opening.exec(raw)) !== null) {
+    const start = match.index + match[0].length;
+    const language = match[1];
+    const lineStart = raw.lastIndexOf('\n', match.index - 1) + 1;
+    const genui = isGenuiFence(language) && /^[ \t]*$/.test(raw.slice(lineStart, match.index));
+    // 卡片只接受独立的闭合行。JSON 字符串里的三个反引号不能提前结束卡片。
+    closing.lastIndex = start;
+    const closeLine = genui ? closing.exec(raw) : null;
+    const end = genui ? (closeLine?.index ?? -1) : raw.indexOf('```', start);
+    const closed = end !== -1;
+    const code = raw.slice(start, closed ? end : raw.length);
+    safe += raw.slice(offset, match.index) + `\n@@CODE_${addCodeBlock(language, code, genui, closed)}@@`;
+    offset = closed ? end + (closeLine?.[0].length ?? 3) : raw.length;
+    opening.lastIndex = offset;
+    if (closed) safe += '\n';
+  }
+  safe += raw.slice(offset);
   safe = escapeHtml(safe);
   // 富文本恒开（原「富文本」开关已移除）：仅白名单标签按安全规则还原，其余保持纯文本。
   if (allowRichText) safe = restoreSafeHtml(safe);

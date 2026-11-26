@@ -116,6 +116,7 @@ async function settled(page, domain) {
 async function openCreate(page, guard) {
   await step(page, guard, 'open create', async () => {
     await page.locator('#superAgentCreate').click();
+    await page.locator('#superAgentLaunchDialog [data-launch-domain="writer"]').click();
     await field(page, 'Dialog').waitFor({ state: 'visible' });
     await settled(page, await field(page, 'Domain').inputValue());
     await page.waitForFunction(() => document.getElementById('superAgentCreateModel').value === 'probe');
@@ -123,7 +124,13 @@ async function openCreate(page, guard) {
 }
 async function chooseDomain(page, guard, domain, mode = 'chain', retry = false) {
   await step(page, guard, `choose ${domain} ${mode}`, async () => {
-    await field(page, 'Domain').selectOption(domain);
+    if (await field(page, 'Domain').inputValue() !== domain) {
+      const options = field(page, 'MixedOptions');
+      if (!await options.evaluate(el => el.open)) await options.locator('summary').click();
+      await field(page, 'ChooseNext').click();
+      await page.locator(`#superAgentLaunchDialog [data-launch-domain="${domain}"]`).click();
+      await page.waitForFunction(value => document.getElementById('superAgentCreateDomain').value === value, domain);
+    }
     await settled(page, domain);
     if (['writer', 'novel'].includes(domain)) {
       // Select by human-readable title; never fill an opaque book ID.
@@ -136,7 +143,6 @@ async function chooseDomain(page, guard, domain, mode = 'chain', retry = false) 
         await field(page, 'Part').selectOption('1');
         await field(page, 'From').fill('2');
         await field(page, 'Count').fill('2');
-        await field(page, 'Chapter').fill('2');
       } else if (domain === 'novel') {
         await field(page, 'ChapterStart').selectOption('1');
         await field(page, 'ChapterEnd').selectOption('2');
@@ -169,13 +175,13 @@ async function layout(page, guard, name) {
     const info = await page.evaluate(() => {
       const dialog = document.getElementById('superAgentCreateDialog');
       const rect = dialog.getBoundingClientRect();
-      const form = document.getElementById('superAgentCreateForm');
+      const body = dialog.querySelector('.dlg-body');
       const title = document.getElementById('superAgentCreateTitle').getBoundingClientRect();
       const close = document.getElementById('superAgentCreateClose').getBoundingClientRect();
-      const actions = form.querySelector('.writer-dialog-actions').getBoundingClientRect();
+      const actions = dialog.querySelector('.dlg-foot .foot-btns').getBoundingClientRect();
       return { left: rect.left, right: rect.right, width: innerWidth, height: rect.height, overflow: dialog.scrollWidth > dialog.clientWidth + 1,
         docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-        formOverflowY: getComputedStyle(form).overflowY, titleOverlap: title.right > close.left, actionsInside: actions.left >= rect.left - 1 && actions.right <= rect.right + 1 };
+        formOverflowY: getComputedStyle(body).overflowY, titleOverlap: title.right > close.left, actionsInside: actions.left >= rect.left - 1 && actions.right <= rect.right + 1 };
     });
     check(`${name}: no horizontal overflow/title overlap`, info.left >= -1 && info.right <= info.width + 1 && !info.overflow && !info.docOverflow && !info.titleOverlap, JSON.stringify(info));
     check(`${name}: scrolling form, contained buttons`, info.formOverflowY !== 'visible' && info.actionsInside);
@@ -275,9 +281,7 @@ async function browserCase(browser, viewport) {
     await field(page, 'Count').fill('0');
     await validation(page, guard, '1–999');
     await field(page, 'Count').fill('2');
-    await field(page, 'Chapter').fill('9');
-    await validation(page, guard, '本次拆章范围');
-    await field(page, 'Chapter').fill('2');
+    assert.equal(await field(page, 'Chapter').isVisible(), false, '整链沿用拆章范围，不选择单章');
     await field(page, 'Parts').fill('');
     await validation(page, guard, '部标题');
     await field(page, 'Parts').fill('第一部：起点\n第二部：转折');
@@ -304,7 +308,7 @@ async function browserCase(browser, viewport) {
     assert.equal(writer.nodes[0].status, 'ready');
     assert.ok(writer.nodes.slice(1).every((node) => node.status === 'blocked'));
     assert.deepEqual(writer.body.stage_requests.chapter_plan, { part_no: 1, from_no: 2, want_count: 2, extra_note: writer.body.goal });
-    assert.equal(writer.body.stage_requests.chapter_content.chapter_no, 2);
+    assert.deepEqual(writer.body.stage_requests.chapter_content, { from_no: 2, want_count: 2, extra_note: writer.body.goal });
     assert.equal(writer.body.stage_requests.outline.part_plan.length, 2);
     assert.equal(writer.body.model_name, 'probe');
     assert.equal(writer.body.provider_id, 'probe');
@@ -420,6 +424,7 @@ async function browserCase(browser, viewport) {
       if (viewport.name === 'mobile') await page.locator('#openSidebar').click();
       await page.locator('#openSuperAgent').click();
       await page.locator('#superAgentCreate').click();
+      await page.locator('#superAgentLaunchDialog [data-launch-domain="writer"]').click();
       await settled(page, 'writer');
       await field(page, 'Submit').click();
       await field(page, 'Error').filter({ hasText: '设置' }).waitFor();

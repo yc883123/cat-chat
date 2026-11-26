@@ -64,6 +64,10 @@ APPEARANCE_SKINS = frozenset(
 # manual = 模型变化不影响皮肤，用户自己在皮肤选择器里挑。
 APPEARANCE_SKIN_MODES = frozenset({"auto", "manual"})
 APPEARANCE_SKIN_MODE_DEFAULT = "auto"
+# 输入框放大态底色样式：frosted = 原有磨砂半透渐变；
+# fade_top = 下半部分不透明、上半部分渐变为顶部完全透明（底色与边框一起向上淡出）。
+APPEARANCE_COMPOSER_EXPAND_STYLES = frozenset({"frosted", "fade_top"})
+APPEARANCE_COMPOSER_EXPAND_STYLE_DEFAULT = "frosted"
 # 会话区（消息气泡/正文）字体：字号是像素整数，字体族只存枚举键，
 # 具体的 font-family 栈由前端常量映射（后端不碰 CSS，避免两端各写一份真相）。
 # 结构三档：跟随界面 / 衬线 / 圆润。
@@ -91,6 +95,13 @@ CHAT_FONT_FAMILY_CUSTOM_MAX = 100
 SOUND_VOLUME_MIN = 0
 SOUND_VOLUME_MAX = 100
 SOUND_VOLUME_DEFAULT = 60
+
+# ---- 对话消息卡片不透明度（appearance.message_card_opacity）----
+# 20-100 整数百分比，仅在启用模型皮肤或自定义背景时生效；默认 50%。
+# 校验口径与 chat_font_size / done_sound_volume 一致：加载期 clamp 兜底，写入路径显式报错。
+MESSAGE_CARD_OPACITY_MIN = 20
+MESSAGE_CARD_OPACITY_MAX = 100
+MESSAGE_CARD_OPACITY_DEFAULT = 50
 
 # ---- Skill 大小上限（设置项 skill_max_size_mb）----
 # 设置值 0 = 跟随下列内置默认（与引入该设置前散在 app.py / skills.install.py 里的
@@ -291,6 +302,21 @@ def clamp_sound_volume(value: Any) -> int:
     return max(SOUND_VOLUME_MIN, min(SOUND_VOLUME_MAX, parsed))
 
 
+def clamp_message_card_opacity(value: Any) -> int:
+    """消息卡片不透明度：能转成数值就夹回 20-100，转不动或布尔值一律回默认值。
+
+    与 clamp_sound_volume 同款约定：显示偏好越界不报错、静默夹回；
+    真正的"非法输入"由写入路径的 `_validated_message_card_opacity` 显式拦住。
+    """
+    if isinstance(value, bool):
+        return MESSAGE_CARD_OPACITY_DEFAULT
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return MESSAGE_CARD_OPACITY_DEFAULT
+    return max(MESSAGE_CARD_OPACITY_MIN, min(MESSAGE_CARD_OPACITY_MAX, parsed))
+
+
 def clamp_skill_max_size_mb(value: Any) -> int:
     """Skill 大小上限（MB）：0 = 内置默认；其余夹回 10~2048，转不动回 0。
 
@@ -397,6 +423,7 @@ def normalize_appearance(appearance: Any) -> dict[str, Any]:
     theme = str(merged.get("theme") or "").strip().lower()
     skin = str(merged.get("skin") or "").strip().lower()
     skin_mode = str(merged.get("skin_mode") or "").strip().lower()
+    composer_expand_style = str(merged.get("composer_expand_style") or "").strip().lower()
     family = str(merged.get("chat_font_family") or "").strip().lower()
     done_sound = merged.get("done_sound")
     tray_done_toast = merged.get("tray_done_toast")
@@ -405,6 +432,14 @@ def normalize_appearance(appearance: Any) -> dict[str, Any]:
         "skin": skin if skin in APPEARANCE_SKINS else "violet",
         # 跟随模式：非法/缺失一律回默认（auto），与皮肤回落口径一致。
         "skin_mode": skin_mode if skin_mode in APPEARANCE_SKIN_MODES else APPEARANCE_SKIN_MODE_DEFAULT,
+        "composer_expand_style": (
+            composer_expand_style
+            if composer_expand_style in APPEARANCE_COMPOSER_EXPAND_STYLES
+            else APPEARANCE_COMPOSER_EXPAND_STYLE_DEFAULT
+        ),
+        "message_card_opacity": clamp_message_card_opacity(
+            merged.get("message_card_opacity", MESSAGE_CARD_OPACITY_DEFAULT)
+        ),
         "chat_font_size": clamp_chat_font_size(merged.get("chat_font_size", CHAT_FONT_SIZE_DEFAULT)),
         "chat_font_family": family if family in APPEARANCE_CHAT_FONT_FAMILIES else "system",
         # 切换回非 custom 时保留用户输入过的串，避免"改一下又切回来"要重打一遍。
@@ -540,6 +575,8 @@ def default_config() -> dict[str, Any]:
         "appearance": {
             "theme": "system",
             "skin": "violet",
+            "composer_expand_style": APPEARANCE_COMPOSER_EXPAND_STYLE_DEFAULT,
+            "message_card_opacity": MESSAGE_CARD_OPACITY_DEFAULT,
             # 会话区字号/字体族：只影响 .message-body，不动全局 UI 与等宽字体。
             "chat_font_size": CHAT_FONT_SIZE_DEFAULT,
             "chat_font_family": "system",
@@ -2851,7 +2888,7 @@ class ConfigStore:
                             "theme", "skin",
                             "chat_font_size", "chat_font_family", "chat_font_family_custom",
                             "done_sound", "done_sound_volume", "tray_done_toast",
-                            "skin_mode",
+                            "skin_mode", "composer_expand_style", "message_card_opacity",
                         }
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
@@ -2877,6 +2914,15 @@ class ConfigStore:
                             if skin_mode not in APPEARANCE_SKIN_MODES:
                                 raise ValueError("皮肤跟随模式必须是 auto 或 manual")
                             merged["skin_mode"] = skin_mode
+                        if "composer_expand_style" in incoming:
+                            expand_style = str(incoming["composer_expand_style"] or "").strip().lower()
+                            if expand_style not in APPEARANCE_COMPOSER_EXPAND_STYLES:
+                                raise ValueError("输入框放大样式必须是 frosted 或 fade_top")
+                            merged["composer_expand_style"] = expand_style
+                        if "message_card_opacity" in incoming:
+                            merged["message_card_opacity"] = self._validated_message_card_opacity(
+                                incoming["message_card_opacity"]
+                            )
                         if "chat_font_size" in incoming:
                             merged["chat_font_size"] = self._validated_chat_font_size(
                                 incoming["chat_font_size"]
@@ -4377,6 +4423,24 @@ class ConfigStore:
         except (TypeError, ValueError):
             raise ValueError(hint) from None
         if not (SOUND_VOLUME_MIN <= parsed <= SOUND_VOLUME_MAX):
+            raise ValueError(hint)
+        return parsed
+
+    @staticmethod
+    def _validated_message_card_opacity(raw: Any) -> int:
+        """消息卡片不透明度（写入路径）：必须是 20-100 的整数。
+
+        与 `_validated_sound_volume` 同款口径：越界**报错**而不是夹回；
+        配置文件被手改的情况由加载路径的 clamp_message_card_opacity 兜底。
+        """
+        hint = f"消息卡片不透明度必须是 {MESSAGE_CARD_OPACITY_MIN}-{MESSAGE_CARD_OPACITY_MAX} 的整数"
+        if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+            raise ValueError(hint)
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(hint) from None
+        if not (MESSAGE_CARD_OPACITY_MIN <= parsed <= MESSAGE_CARD_OPACITY_MAX):
             raise ValueError(hint)
         return parsed
 

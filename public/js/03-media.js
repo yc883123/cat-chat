@@ -1036,7 +1036,7 @@ export function toolMarkup(runs = []) {
   return `<div class="tool-stack">${runs.map((run) => toolRunMarkup(run)).join('')}</div>`;
 }
 
-export function activityMarkup(activity = []) {
+export function activityMarkup(activity = [], markdownOptions = null) {
   if (!Array.isArray(activity) || !activity.length) return '';
   // 只渲染**最后一段正文**（prose）：更早的每一段都跟在某次工具调用前面，是模型"调用工具前的
   // 过程播报"（"我已定位根因 / 继续验证 / 现在补测试"），一轮能攒十来段近义废话，摞满一条回复
@@ -1058,7 +1058,7 @@ export function activityMarkup(activity = []) {
       if (requestStart) prevRequestIndex = Number(item.request_index || 0);
       if (item.type === 'reasoning') html += reasoningMarkup([item.text], markerClass);
       else if (item.type === 'tool' && item.run) html += toolRunMarkup(item.run, markerClass);
-      else if (item.type === 'prose') html += `<div class="stream-prose${markerClass}">${markdown(item.text)}</div>`;
+      else if (item.type === 'prose') html += `<div class="stream-prose${markerClass}">${markdown(item.text, true, markdownOptions)}</div>`;
     } catch (_) { /* 单个条目异常不影响整体 */ }
   });
   return html;

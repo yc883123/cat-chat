@@ -124,12 +124,12 @@ class ComfyUIFrontendAssets(unittest.TestCase):
                 super().__init__()
                 self.stack = []
                 self.parents = {}
-                self.type_cards = 0
+                self.type_cards = {}
 
             def handle_starttag(self, tag, attrs):
                 attrs = dict(attrs)
                 if attrs.get("class") and "type-card" in attrs["class"] and attrs.get("data-launch-domain"):
-                    self.type_cards += 1
+                    self.type_cards[attrs["data-launch-domain"]] = [node_id for _, node_id in self.stack if node_id]
                 if attrs.get("id") in {"superAgentLaunchCards", "superAgentCreateDomain"}:
                     self.parents[attrs["id"]] = list(self.stack)
                 if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
@@ -143,7 +143,11 @@ class ComfyUIFrontendAssets(unittest.TestCase):
 
         parser = DialogParents()
         parser.feed(html)
-        self.assertEqual(parser.type_cards, 5, "启动台应有 5 张类型卡")
+        self.assertEqual(set(parser.type_cards), {"writer", "novel", "chat", "job", "subagent"})
+        for domain, ancestors in parser.type_cards.items():
+            with self.subTest(domain=domain):
+                self.assertIn("superAgentLaunchDialog", ancestors)
+                self.assertNotIn("superAgentCreateForm", ancestors)
         launch_chain = [node_id for tag, node_id in parser.parents["superAgentLaunchCards"] if node_id]
         self.assertIn("superAgentLaunchDialog", launch_chain)
         self.assertNotIn("superAgentCreateForm", launch_chain)
@@ -159,8 +163,12 @@ class ComfyUIFrontendAssets(unittest.TestCase):
         # 交互：＋新建任务 → 启动台；选卡关启动台并路由。
         self.assertIn('function openLaunchDialog()', source)
         self.assertIn('$("#superAgentCreate")?.addEventListener("click", () => openLaunchDialog())', source)
-        self.assertIn('$("#superAgentLaunchDialog")?.close()', source)
-        self.assertIn('void openCreateDomainDialog({ domain })', source)
+        launch_handler = source.split('$("#superAgentLaunchDialog")?.addEventListener("click"', 1)[1].split(
+            '$("#superAgentCreateForm")?.addEventListener', 1
+        )[0]
+        self.assertIn('closest("[data-launch-domain]")', launch_handler)
+        self.assertIn("event.currentTarget.close()", launch_handler)
+        self.assertIn("openCreateDomainDialog({ domain: card.dataset.launchDomain })", launch_handler)
 
     def test_content_zone_structures_in_product_assets(self):
         # 六类内容区按预览稿结构落进产品资产（配方批次页已随配方线删除）。

@@ -2,6 +2,8 @@
 """Appearance settings defaults, migration and validation."""
 
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +26,10 @@ DEFAULTS = {
     "skin": "violet",
     # 皮肤跟随模型：默认自动（见 APPEARANCE_SKIN_MODE_DEFAULT）。
     "skin_mode": "auto",
+    # 输入框放大样式：默认沿用原有磨砂半透（见 APPEARANCE_COMPOSER_EXPAND_STYLE_DEFAULT）。
+    "composer_expand_style": "frosted",
+    # 消息卡片不透明度：20-100 整数百分比，默认 50%。
+    "message_card_opacity": 50,
     "chat_font_size": 15,
     "chat_font_family": "system",
     "chat_font_family_custom": "",
@@ -334,6 +340,191 @@ class AppearanceConfigTests(unittest.TestCase):
         for skin in APPEARANCE_SKINS:
             with self.subTest(skin=skin):
                 self.assertIn(skin, message)
+
+    # ---- 输入框放大样式（composer_expand_style） ----
+
+    def test_composer_expand_style_default_and_round_trip(self):
+        store = self._store()
+        self.assertEqual(store.data["appearance"]["composer_expand_style"], "frosted")
+        saved = store.update_settings({"appearance": {"composer_expand_style": "fade_top"}})
+        self.assertEqual(saved["appearance"]["composer_expand_style"], "fade_top")
+        self.assertEqual(
+            ConfigStore(self.path).data["appearance"]["composer_expand_style"], "fade_top"
+        )
+
+    def test_composer_expand_style_rejects_unknown_value(self):
+        store = self._store()
+        for payload in ("solid", "transparent", "", 1, None):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    store.update_settings({"appearance": {"composer_expand_style": payload}})
+
+    def test_unknown_composer_expand_style_is_normalized_on_load(self):
+        store = self._store({"appearance": {"composer_expand_style": "glass"}})
+        self.assertEqual(store.data["appearance"]["composer_expand_style"], "frosted")
+        store = self._store({"appearance": {"composer_expand_style": "FADE_TOP"}})
+        self.assertEqual(store.data["appearance"]["composer_expand_style"], "fade_top")
+
+    def test_composer_expand_style_partial_update_keeps_other_keys(self):
+        store = self._store()
+        store.update_settings({"appearance": {"theme": "dark", "skin": "ocean"}})
+        store.update_settings({"appearance": {"composer_expand_style": "fade_top"}})
+        appearance = store.data["appearance"]
+        self.assertEqual(appearance["theme"], "dark")
+        self.assertEqual(appearance["skin"], "ocean")
+        self.assertEqual(appearance["composer_expand_style"], "fade_top")
+
+    def test_composer_expand_style_frontend_wiring(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        css = (root / "public" / "styles.css").read_text(encoding="utf-8")
+        core = (root / "public" / "js" / "01-core.js").read_text(encoding="utf-8")
+        settings = (root / "public" / "js" / "09-settings.js").read_text(encoding="utf-8")
+        bind = (root / "public" / "js" / "15-bind-events.js").read_text(encoding="utf-8")
+        for value in ("frosted", "fade_top"):
+            self.assertIn(f'name="appearanceComposerExpandStyle" value="{value}"', html)
+        self.assertIn("dataset.composerExpandStyle", html)
+        self.assertIn("root.dataset.composerExpandStyle = next.composer_expand_style", core)
+        self.assertIn("configured?.composer_expand_style ?? local.composer_expand_style", core)
+        self.assertIn('input[name="appearanceComposerExpandStyle"]', settings)
+        self.assertIn('input[name="appearanceComposerExpandStyle"]', bind)
+        self.assertIn("composer_expand_style: 'frosted'", bind)
+        self.assertIn('html[data-composer-expand-style="fade_top"] .composer-wrap.is-expanded:not(.is-inline-edit) .composer::before', css)
+        self.assertIn("mask-image:", css)
+
+    # ---- 消息卡片不透明度（message_card_opacity） ----
+
+    def test_message_card_opacity_default_and_round_trip(self):
+        store = self._store()
+        self.assertEqual(store.data["appearance"]["message_card_opacity"], 50)
+        saved = store.update_settings({"appearance": {"message_card_opacity": 52}})
+        self.assertEqual(saved["appearance"]["message_card_opacity"], 52)
+        self.assertEqual(
+            ConfigStore(self.path).data["appearance"]["message_card_opacity"], 52
+        )
+        # 边界值必须放行（20 / 100 都在契约内）。
+        self.assertEqual(
+            store.update_settings({"appearance": {"message_card_opacity": 20}})["appearance"]["message_card_opacity"],
+            20,
+        )
+        self.assertEqual(
+            store.update_settings({"appearance": {"message_card_opacity": 100}})["appearance"]["message_card_opacity"],
+            100,
+        )
+
+    def test_message_card_opacity_rejects_invalid_values_on_update(self):
+        store = self._store()
+        for payload in (19, 101, 0, -10, 20.9, "52.4", float("inf"), float("nan"), True, False, "abc", None):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    store.update_settings({"appearance": {"message_card_opacity": payload}})
+
+    def test_message_card_opacity_invalid_values_clamped_on_load(self):
+        store = self._store({"appearance": {"message_card_opacity": 5}})
+        self.assertEqual(store.data["appearance"]["message_card_opacity"], 20)
+        store = self._store({"appearance": {"message_card_opacity": 180}})
+        self.assertEqual(store.data["appearance"]["message_card_opacity"], 100)
+        store = self._store({"appearance": {"message_card_opacity": "not-a-number"}})
+        self.assertEqual(store.data["appearance"]["message_card_opacity"], 50)
+        store = self._store({"appearance": {"message_card_opacity": True}})
+        self.assertEqual(store.data["appearance"]["message_card_opacity"], 50)
+        for payload in ("Infinity", "-Infinity", "1e999", "NaN"):
+            with self.subTest(payload=payload):
+                store = self._store({"appearance": {"message_card_opacity": payload}})
+                self.assertEqual(store.data["appearance"]["message_card_opacity"], 50)
+
+    def test_message_card_opacity_partial_update_keeps_other_keys(self):
+        store = self._store()
+        store.update_settings({"appearance": {"theme": "dark", "skin": "ocean"}})
+        store.update_settings({"appearance": {"message_card_opacity": 65}})
+        appearance = store.data["appearance"]
+        self.assertEqual(appearance["theme"], "dark")
+        self.assertEqual(appearance["skin"], "ocean")
+        self.assertEqual(appearance["message_card_opacity"], 65)
+
+    def test_message_card_opacity_frontend_wiring(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public" / "index.html").read_text(encoding="utf-8")
+        css = (root / "public" / "styles.css").read_text(encoding="utf-8")
+        core = (root / "public" / "js" / "01-core.js").read_text(encoding="utf-8")
+        settings = (root / "public" / "js" / "09-settings.js").read_text(encoding="utf-8")
+        bind = (root / "public" / "js" / "15-bind-events.js").read_text(encoding="utf-8")
+        self.assertIn('id="messageCardOpacity"', html)
+        self.assertIn('min="20" max="100" step="1"', html)
+        self.assertIn('id="messageCardOpacityValue"', html)
+        self.assertIn('id="messageCardOpacityPreview"', html)
+        self.assertIn("--msg-card-opacity", html)
+        self.assertIn("--msg-card-opacity", core)
+        self.assertIn("configured?.message_card_opacity ?? local.message_card_opacity", core)
+        self.assertIn("#messageCardOpacity", settings)
+        self.assertIn("#messageCardOpacity", bind)
+        self.assertIn("message_card_opacity: 50", bind)
+        self.assertIn("--msg-card-opacity", css)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 Node.js 验证外观保存顺序")
+    def test_frontend_save_queue_preserves_latest_preview_and_rolls_back_failure(self):
+        script = r"""
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const cache = new Map();
+globalThis.location = {search: ''};
+globalThis.localStorage = {
+  getItem: key => cache.get(key) ?? null,
+  setItem: (key, value) => cache.set(key, value),
+};
+globalThis.window = {matchMedia: () => ({matches: false})};
+globalThis.document = {
+  querySelector: () => null,
+  documentElement: {dataset: {}, style: {setProperty() {}, removeProperty() {}}},
+};
+const requests = [];
+globalThis.fetch = (url, options) => new Promise(resolve => {
+  requests.push({url, patch: JSON.parse(options.body).appearance, resolve});
+});
+
+const source = fs.readFileSync('public/js/01-core.js', 'utf8')
+  .replace(/^import .*;$/gm, '');
+const {state, saveAppearance, previewAppearancePatch} =
+  await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const opacity = () => state.appearance.message_card_opacity;
+const cached = () => JSON.parse(cache.get('naibaChatAppearance')).message_card_opacity;
+const turn = () => new Promise(resolve => setImmediate(resolve));
+
+const first = saveAppearance({message_card_opacity: 25});
+const second = saveAppearance({theme: 'dark', message_card_opacity: 95});
+previewAppearancePatch({message_card_opacity: 96});
+await turn();
+assert.deepEqual(requests.map(r => [r.url, r.patch]), [
+  ['/api/settings', {message_card_opacity: 25}],
+]);
+assert.equal(opacity(), 96);
+assert.equal(cache.has('naibaChatAppearance'), false);
+requests[0].resolve({ok: true, json: async () => ({appearance: {message_card_opacity: 25}})});
+await first;
+assert.equal(opacity(), 96);
+assert.equal(cached(), 25);
+await turn();
+assert.deepEqual(requests[1].patch, {theme: 'dark', message_card_opacity: 95});
+requests[1].resolve({ok: true, json: async () => ({appearance: {theme: 'dark', message_card_opacity: 95}})});
+await second;
+assert.equal(opacity(), 96);
+assert.equal(cached(), 95);
+
+const failure = saveAppearance({message_card_opacity: 33});
+await turn();
+requests[2].resolve({ok: false, status: 500, json: async () => ({error: 'fixture'})});
+await assert.rejects(failure, /fixture/);
+assert.equal(opacity(), 95);
+assert.equal(cached(), 95);
+assert.equal(state.appearance.theme, 'dark');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-"],
+            input=script, cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, encoding="utf-8", timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@
   "test_core_fsutil",
   "test_file_action_bridge",
   "test_folder_index",
+  "test_genui",
   "test_goals",
   "test_goal_continuous_and_status",
   "test_goal_recovery",

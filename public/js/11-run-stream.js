@@ -552,12 +552,35 @@ export async function resumeConversationRun(conversationId, { openGeneration = c
   }
 }
 
-export async function sendChatMessage(textOverride = '', { skipContextWarning = false } = {}) {
+export function sendGenuiChatAction(text, conversationId) {
+  return sendChatMessage(text, {
+    cardSource: { conversationId, openGeneration: conversationOpenGeneration() },
+  });
+}
+
+function canSendCardAction(source) {
+  if (!isConversationOpenCurrent(source.openGeneration, source.conversationId)) {
+    toast('已切换对话，请回到卡片所在的会话再操作');
+    return false;
+  }
+  if (goalDraftEnabled() || state.editingMessageId || state.messageEditPendingIds?.has(source.conversationId)) {
+    toast('请先完成消息编辑或退出目标草稿，再提交卡片操作');
+    return false;
+  }
+  if (state.chatRunId || state.abortController || state.taskSubmitting || state.cancelRequested || attachmentPrecheckPending) {
+    toast('当前对话正在处理请求，操作未发送，请稍后再点卡片');
+    return false;
+  }
+  return true;
+}
+
+export async function sendChatMessage(textOverride = '', { skipContextWarning = false, cardSource = null } = {}) {
+  if (cardSource && !canSendCardAction(cardSource)) return;
   if (state.messageEditPendingIds?.has(String(state.conversationId || ''))) return;
   if (guardGoalChat()) return;
   const goalMode = goalDraftEnabled();
   const input = $('#messageInput');
-  const inputText = String(input.value || '').trim();
+  const inputText = cardSource ? '' : String(input.value || '').trim();
   const goalDraftFiles = state.pendingFiles;
   const goalFilesSnapshot = goalMode ? JSON.stringify(state.pendingFiles) : '';
   const buttonText = String(textOverride || '').trim();
@@ -565,15 +588,15 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   const text = buttonText
     ? (inputText ? `${inputText}\n${buttonText}` : buttonText)
     : inputText;
-  const attachmentItems = attachmentChips();
-  const folderItems = folderChips();
+  const attachmentItems = cardSource ? [] : attachmentChips();
+  const folderItems = cardSource ? [] : folderChips();
   const attachments = attachmentItems.map(({ name, path, size, thumb_path }) => ({ name, path, size, thumb_path }));
   // 文件夹只带路径：索引在**发送那一刻**由后端现扫（见 app.folder_indexes_for_send），
   // 前端手上的那份只用于输入区占位与乐观气泡，不重复上传几百条清单。
   const folders = folderItems.map((item) => ({ path: item.path, name: item.name }));
   // 纯附件/纯文件夹轮次（只发文件、不写文字）合法：文字与载荷至少有一个才可发送。
   if ((!text && !attachments.length && !folders.length) || state.taskSubmitting || state.cancelRequested) return;
-  const uploadingFile = state.pendingFiles.find((file) => file.uploading);
+  const uploadingFile = cardSource ? null : state.pendingFiles.find((file) => file.uploading);
   if (uploadingFile) {
     toast(`请等待「${uploadingFile.name}」上传完成${uploadingFile.progress > 0 ? `（${uploadingFile.progress}%）` : ''}`);
     return;
@@ -582,7 +605,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     toast('请先在设置中检查模型，并在会话底部选择检测到的模型');
     return;
   }
-  if (!state.conversationId && !await createConversation()) return;
+  if (!state.conversationId && (cardSource || !await createConversation())) return;
   const selectionConversation = state.conversationId;
   const selectionOpenGeneration = conversationOpenGeneration();
   while (pendingConversationModelSave(selectionConversation)) {
@@ -590,7 +613,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     catch (error) { toast(`模型设置尚未保存：${error.message}`); return; }
     if (!isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
   }
-  if (guardGoalChat() || goalMode !== goalDraftEnabled() || !isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
+  if ((cardSource && !canSendCardAction(cardSource))
+      || guardGoalChat() || goalMode !== goalDraftEnabled() || !isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
   if (goalMode && !stripSkillReferences(text)) { toast('写下目标后再发送'); return; }
   if (state.chatRunId || state.abortController) {
     if (goalMode) return;
@@ -607,7 +631,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     if (warning) {
       showContextWarning(warning.percent, warning.threshold, {
         mode: 'send',
-        onContinue: () => { void sendChatMessage(textOverride, { skipContextWarning: true }); },
+        onContinue: () => { void sendChatMessage(textOverride, { skipContextWarning: true, cardSource }); },
       });
       return;
     }
@@ -674,22 +698,25 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   // 新消息提交使旧选择面板失效：先只隐藏（不清临时选择），请求被受理后才真正失效，
   // 被拒（网络错误 / 409）时把面板连答案一起还给用户（见 restoreRejectedSubmit）。
   beginChoiceSubmit();
-  const referencedIds = parseSkillReferences(text).map((tok) => tok.skill.id);
-  const messageText = stripSkillReferences(text);
+  // 卡片载荷是模型生成的交互数据，不从其中解析用户的 /Skill 引用。
+  const referencedIds = cardSource ? [] : parseSkillReferences(text).map((tok) => tok.skill.id);
+  const messageText = cardSource ? text : stripSkillReferences(text);
   const conversationId = state.conversationId;
   const openGeneration = conversationOpenGeneration();
   // 提交被拒时要原样还回去的完整草稿（含文件夹 chip）：只还 attachments 会静默吞掉文件夹。
-  const pendingSnapshot = state.pendingFiles.map((item) => ({ ...item }));
-  state.pendingFiles = [];
-  renderPendingFiles();
-  input.value = '';
-  // 发送后收回折叠态：内容已清空，留着大输入框没有意义（编辑态确认同样是这条路径）。
-  collapseComposerIfExpanded();
-  resizeTextarea();
-  renderInputMirror();
-  hideSkillPopup();
-  hideFilePopup();
-  closeQuickMessagePanel();
+  const pendingSnapshot = cardSource ? [] : state.pendingFiles.map((item) => ({ ...item }));
+  if (!cardSource) {
+    state.pendingFiles = [];
+    renderPendingFiles();
+    input.value = '';
+    // 发送后收回折叠态：内容已清空，留着大输入框没有意义（编辑态确认同样是这条路径）。
+    collapseComposerIfExpanded();
+    resizeTextarea();
+    renderInputMirror();
+    hideSkillPopup();
+    hideFilePopup();
+    closeQuickMessagePanel();
+  }
   if ($('#emptyState')) $('#emptyState').hidden = true;
   const optimisticUser = {
     role: 'user',
@@ -721,6 +748,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   // 而不是让一次网络抖动或 409 直接吞掉用户刚答好的选择。
   const restoreRejectedSubmit = () => {
     rollbackChoiceSubmit();
+    if (cardSource) return;
     if (!String(input.value || '').trim()) {
       input.value = text;
       resizeTextarea();
@@ -769,6 +797,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     // 请求已被受理：旧面板与其临时选择现在才真正失效（重试/换会话都不会再弹回来）。
     commitChoiceSubmit();
     requestAccepted = true;
+    if (cardSource && isConversationOpenCurrent(openGeneration, conversationId)) toast('卡片操作已发送到主对话');
     await consumeRunStream(response, row, conversationId, state.chatRunId, controller, runGeneration);
   } catch (error) {
     if (error.name !== 'AbortError' && isConversationOpenCurrent(openGeneration, conversationId)) {
@@ -790,6 +819,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
       } else {
         row.querySelector('.answer-content').innerHTML = `<p>请求失败：${escapeHtml(error.message)}</p>`;
         restoreRejectedSubmit();
+        if (cardSource) toast(`卡片操作发送失败：${error.message}`);
       }
     }
   } finally {

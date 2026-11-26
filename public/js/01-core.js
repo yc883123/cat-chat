@@ -25,6 +25,8 @@ export const state = {
   appearance: {
     theme: 'system',
     skin: 'violet',
+    composer_expand_style: 'frosted',
+    message_card_opacity: 50,
     chat_font_size: 15,
     chat_font_family: 'system',
     chat_font_family_custom: '',
@@ -247,6 +249,8 @@ export const MODEL_SKINS = {
 const SKINS = new Set([...COLOR_SKINS, ...Object.keys(MODEL_SKINS)]);
 const SKIN_MODES = new Set(['auto', 'manual']);
 export const SKIN_MODE_DEFAULT = 'auto';
+const COMPOSER_EXPAND_STYLES = new Set(['frosted', 'fade_top']);
+export const COMPOSER_EXPAND_STYLE_DEFAULT = 'frosted';
 // 上一次用过的配色皮肤：模型皮肤会盖住聊天背景，用户一旦去设背景就说明他想用背景，
 // 这时自动退回这个配色皮肤（而不是硬切紫藤，免得把用户挑的色相也一起改掉）。
 const LAST_COLOR_SKIN_KEY = 'naibaChatLastColorSkin';
@@ -373,6 +377,20 @@ function clampSoundVolume(value) {
   return Math.min(100, Math.max(0, volume));
 }
 
+const MSG_CARD_OPACITY_MIN = 20;
+const MSG_CARD_OPACITY_MAX = 100;
+const MSG_CARD_OPACITY_DEFAULT = 50;
+
+// 消息卡片不透明度 20-100（与后端 clamp_message_card_opacity 同口径；手改配置越界静默夹回）。
+function clampMessageCardOpacity(value) {
+  if (value === undefined || value === null || value === '' || typeof value === 'boolean') {
+    return MSG_CARD_OPACITY_DEFAULT;
+  }
+  const opacity = Math.trunc(Number(value));
+  if (!Number.isFinite(opacity)) return MSG_CARD_OPACITY_DEFAULT;
+  return Math.min(MSG_CARD_OPACITY_MAX, Math.max(MSG_CARD_OPACITY_MIN, opacity));
+}
+
 // 「有值且是数字」才算候选值：null / undefined / '' / 非数字一律视为"这次没传"，
 // 交给调用方回落到旧值或默认值（?? 只在 null/undefined 时回落，所以要先归一成 null）。
 function numericOrNull(value) {
@@ -404,6 +422,10 @@ function readStoredAppearance() {
       theme: THEMES.has(raw.theme) ? raw.theme : 'system',
       skin: SKINS.has(raw.skin) ? raw.skin : 'violet',
       skin_mode: SKIN_MODES.has(raw.skin_mode) ? raw.skin_mode : SKIN_MODE_DEFAULT,
+      composer_expand_style: COMPOSER_EXPAND_STYLES.has(raw.composer_expand_style)
+        ? raw.composer_expand_style
+        : COMPOSER_EXPAND_STYLE_DEFAULT,
+      message_card_opacity: clampMessageCardOpacity(raw.message_card_opacity),
       chat_font_size: clampMsgFontSize(raw.chat_font_size),
       chat_font_family: MSG_FONT_FAMILY_KEYS.has(raw.chat_font_family) ? raw.chat_font_family : 'system',
       chat_font_family_custom: typeof raw.chat_font_family_custom === 'string'
@@ -415,6 +437,8 @@ function readStoredAppearance() {
       theme: 'system',
       skin: 'violet',
       skin_mode: SKIN_MODE_DEFAULT,
+      composer_expand_style: COMPOSER_EXPAND_STYLE_DEFAULT,
+      message_card_opacity: MSG_CARD_OPACITY_DEFAULT,
       chat_font_size: MSG_FONT_SIZE_DEFAULT,
       chat_font_family: 'system',
       chat_font_family_custom: '',
@@ -428,7 +452,16 @@ function resolvedTheme(theme) {
     : theme;
 }
 
-export function applyAppearance(appearance = {}) {
+function cacheAppearance(appearance) {
+  // 只记已经确认的配色皮肤；保存失败或取消预览不会改变背景让位时的回退值。
+  if (COLOR_SKINS.includes(appearance.skin)) {
+    lastColorSkin = appearance.skin;
+    try { localStorage.setItem(LAST_COLOR_SKIN_KEY, appearance.skin); } catch (_) { /* storage disabled */ }
+  }
+  try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance)); } catch (_) { /* storage disabled */ }
+}
+
+export function applyAppearance(appearance = {}, { cache = true } = {}) {
   const previous = state.appearance || {};
   const next = {
     theme: THEMES.has(appearance.theme) ? appearance.theme : (THEMES.has(previous.theme) ? previous.theme : 'system'),
@@ -437,6 +470,16 @@ export function applyAppearance(appearance = {}) {
     skin_mode: SKIN_MODES.has(appearance.skin_mode)
       ? appearance.skin_mode
       : (SKIN_MODES.has(previous.skin_mode) ? previous.skin_mode : SKIN_MODE_DEFAULT),
+    composer_expand_style: COMPOSER_EXPAND_STYLES.has(appearance.composer_expand_style)
+      ? appearance.composer_expand_style
+      : (COMPOSER_EXPAND_STYLES.has(previous.composer_expand_style)
+        ? previous.composer_expand_style
+        : COMPOSER_EXPAND_STYLE_DEFAULT),
+    message_card_opacity: clampMessageCardOpacity(
+      numericOrNull(appearance.message_card_opacity)
+      ?? numericOrNull(previous.message_card_opacity)
+      ?? MSG_CARD_OPACITY_DEFAULT,
+    ),
     // 会话字体同样遵循「新值合法用新值 → 否则沿用旧值 → 再否则默认」，
     // 这样只传 theme/skin 的老调用点（设置面板、恢复默认）不会把字体悄悄重置。
     chat_font_size: clampMsgFontSize(
@@ -463,16 +506,13 @@ export function applyAppearance(appearance = {}) {
       : (typeof previous.tray_done_toast === 'boolean' ? previous.tray_done_toast : true),
   };
   state.appearance = next;
-  // 记住最近一次用过的配色皮肤：模型皮肤让位给聊天背景时退回这一个，而不是硬切紫藤。
-  if (COLOR_SKINS.includes(next.skin)) {
-    lastColorSkin = next.skin;
-    try { localStorage.setItem(LAST_COLOR_SKIN_KEY, next.skin); } catch (_) { /* storage disabled */ }
-  }
   const root = document.documentElement;
   const actualTheme = resolvedTheme(next.theme);
   root.dataset.theme = actualTheme;
   root.dataset.themeMode = next.theme;
   root.dataset.skin = next.skin;
+  root.dataset.composerExpandStyle = next.composer_expand_style;
+  document.body?.toggleAttribute?.('data-ds-dark-theme', actualTheme === 'dark');
   // 模型皮肤：在 html 上挂 --model-skin-image，由 styles.css 那一条规则统一铺到对话区。
   // 配色皮肤把变量清空（= none），所以两类皮肤互斥、不会叠在一起。
   // 用相对 URL（不带前导斜杠）而不是绝对路径：静态资源与页面同源，手机端经局域网访问时
@@ -490,15 +530,16 @@ export function applyAppearance(appearance = {}) {
   // 侧栏/按钮/设置弹窗与代码块的 --font-mono 都不受影响。
   root.style.setProperty('--msg-font-size', `${next.chat_font_size}px`);
   root.style.setProperty('--msg-font-family', resolveMsgFontFamily(next));
+  root.style.setProperty('--msg-card-opacity', `${next.message_card_opacity}%`);
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = actualTheme === 'dark' ? '#111522' : (next.skin === 'ocean' ? '#f0f7ff' : '#f4f5f2');
-  try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(next)); } catch (_) { /* storage disabled */ }
+  if (cache) cacheAppearance(next);
   return next;
 }
 
 export function initializeAppearance() {
   const initial = readStoredAppearance();
-  applyAppearance(initial);
+  confirmedAppearance = applyAppearance(initial);
   // 背景图先用本地缓存画出来（含上次的取景与图片比例，否则每次刷新都要等 bootstrap 才出现，
   // 而且几何未知时会先画 cover 再跳一下）；首屏可能还没有 token（未登录），此时 URL 取不到图
   // 也无妨——bootstrap 后 syncAppearanceFromBootstrap 会用服务端值重画一次。
@@ -509,13 +550,13 @@ export function initializeAppearance() {
   watchChatBackgroundGeometry();
   const media = window.matchMedia?.('(prefers-color-scheme: dark)');
   media?.addEventListener?.('change', () => {
-    if (state.appearance?.theme === 'system') applyAppearance(state.appearance);
+    if (state.appearance?.theme === 'system') applyAppearance(state.appearance, { cache: false });
   });
   return initial;
 }
 
-// 对话区尺寸变化的跟踪：侧栏/文件面板开合不会触发 window.resize，所以额外挂一个
-// ResizeObserver。编辑器打开期间**不刷新**（见 refreshChatBackgroundGeometry 的说明）。
+// 全屏背景跟随窗口尺寸。旧页面仍使用对话区背景层，其几何也会随侧栏开合变化。
+// 编辑器打开期间保持取景读数，关闭后按最新窗口尺寸重算。
 let chatBackgroundGeometryWatched = false;
 
 function watchChatBackgroundGeometry() {
@@ -524,7 +565,7 @@ function watchChatBackgroundGeometry() {
   const editorOpen = () => Boolean(document.getElementById('chatBackgroundDialog')?.open);
   const refresh = () => { if (!editorOpen()) refreshChatBackgroundGeometry(); };
   window.addEventListener('resize', refresh);
-  const target = $('.chat-backdrop');
+  const target = chatBackgroundLayer();
   if (target && typeof ResizeObserver === 'function') {
     new ResizeObserver(refresh).observe(target);
   }
@@ -540,6 +581,8 @@ export function syncAppearanceFromBootstrap(bootstrap) {
     // 旧版服务端没有 skin_mode → undefined → applyAppearance 退回本地缓存值，
     // 不会出现「连上旧版实例就重置成自动」。
     skin_mode: configured?.skin_mode ?? local.skin_mode,
+    composer_expand_style: configured?.composer_expand_style ?? local.composer_expand_style,
+    message_card_opacity: configured?.message_card_opacity ?? local.message_card_opacity,
     // 旧版服务端没有这三个键 → undefined → applyAppearance 退回本地缓存值，
     // 不会出现"连上旧版实例就重置字体"。
     chat_font_size: configured?.chat_font_size ?? local.chat_font_size,
@@ -550,6 +593,7 @@ export function syncAppearanceFromBootstrap(bootstrap) {
     done_sound_volume: configured?.done_sound_volume ?? local.done_sound_volume,
     tray_done_toast: configured?.tray_done_toast ?? local.tray_done_toast,
   });
+  confirmedAppearance = next;
   // 背景图与外观同一时机同步（同一个 settings 载荷，不必再等第二处调用）。
   // 内部自己做失效兜底，是 fire-and-forget，不阻塞首屏。
   void syncChatBackgroundFromBootstrap(bootstrap);
@@ -578,18 +622,51 @@ export async function selectSkinManually(skin) {
   return saveAppearance({ skin, skin_mode: 'manual' });
 }
 
-export async function saveAppearance(patch = {}) {
-  const next = applyAppearance({ ...state.appearance, ...patch });
-  try {
-    const result = await api('/api/settings', { method: 'POST', body: { appearance: next } });
-    const saved = result?.settings?.appearance || result?.appearance;
-    if (saved) applyAppearance(saved);
-    if (state.bootstrap?.settings) state.bootstrap.settings.appearance = saved || next;
-    return state.appearance;
-  } catch (error) {
-    // 乐观更新后端失败时仍保留本地选择，调用方负责提示用户。
-    throw error;
+let confirmedAppearance = null;
+let appearanceSaveTail = Promise.resolve();
+const pendingAppearancePatches = [];
+const appearancePreview = {};
+
+function renderAppearanceDraft() {
+  return applyAppearance(
+    Object.assign({}, confirmedAppearance, ...pendingAppearancePatches, appearancePreview),
+    { cache: false },
+  );
+}
+
+export function previewAppearancePatch(patch) {
+  confirmedAppearance ??= state.appearance;
+  Object.assign(appearancePreview, patch);
+  return renderAppearanceDraft();
+}
+
+export function saveAppearance(patch = {}) {
+  confirmedAppearance ??= state.appearance;
+  const next = applyAppearance(patch, { cache: false });
+  const payload = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined || !Object.hasOwn(next, key)) continue;
+    payload[key] = next[key];
+    delete appearancePreview[key];
   }
+  pendingAppearancePatches.push(payload);
+  // 后端按字段合并。串行写保证最后一次操作最后落库；界面继续展示较新的排队值或预览。
+  const write = appearanceSaveTail.then(async () => {
+    try {
+      const result = await api('/api/settings', { method: 'POST', body: { appearance: payload } });
+      const saved = result?.settings?.appearance || result?.appearance;
+      confirmedAppearance = { ...confirmedAppearance, ...payload, ...saved };
+      cacheAppearance(confirmedAppearance);
+      if (state.bootstrap?.settings) state.bootstrap.settings.appearance = confirmedAppearance;
+    } finally {
+      pendingAppearancePatches.shift();
+      // 请求失败时只移除这一笔，保留其他待保存改动和正在拖动的值。
+      renderAppearanceDraft();
+    }
+    return state.appearance;
+  });
+  appearanceSaveTail = write.catch(() => {});
+  return write;
 }
 
 // ---- 侧栏「分组与排序」偏好 ----
@@ -743,13 +820,18 @@ export function chatBackgroundImageAspect() {
   return chatBackgroundGeometry.imageAspect;
 }
 
-// 对话区盒子比例 r：量一次缓存起来。窗口/侧栏尺寸变化时由 refreshChatBackgroundGeometry
-// 刷新；**编辑器打开期间不刷新**（白板比例与滑杆上下限按打开时量到的 r 定格，避免调图中
-// 窗口一动取景就跟着跳——关掉重开即恢复精确）。
+function chatBackgroundLayer() {
+  return $('#appBackdrop') || $('.chat-backdrop') || $('#messages');
+}
+
+// 背景层、裁剪白板和设置缩略图共用实际铺图区域的比例。
+// 全屏层未显示时按视口预先计算，首次选图无需等待 ResizeObserver。
 export function refreshChatBackgroundGeometry() {
-  const element = $('.chat-backdrop') || $('#messages');
-  const rect = element?.getBoundingClientRect?.();
-  const aspect = rect && rect.height > 0 ? rect.width / rect.height : 0;
+  const layer = chatBackgroundLayer();
+  const rect = layer?.getBoundingClientRect?.();
+  const width = rect?.width || (layer?.id === 'appBackdrop' ? window.innerWidth : 0);
+  const height = rect?.height || (layer?.id === 'appBackdrop' ? window.innerHeight : 0);
+  const aspect = width > 0 && height > 0 ? width / height : 0;
   const changed = Math.abs(aspect - chatBackgroundGeometry.boxAspect) > 0.001;
   chatBackgroundGeometry.boxAspect = aspect;
   if (changed) applyChatBackground({});
@@ -760,7 +842,7 @@ export function chatBackgroundBoxAspect() {
   return chatBackgroundGeometry.boxAspect;
 }
 
-// 「填满」区域：图片内最大的、比例等于对话区比例（r）的居中矩形 = 旧模型 zoom=1 的观感。
+// 「填满」区域：图片内最大的、比例等于背景层比例（r）的居中矩形。
 // 取景框可自由改形状后，"填满"从"唯一的框形状"降级成一键预置，语义没变。
 export function chatBackgroundFillCrop() {
   const q = chatBackgroundGeometry.imageAspect;
@@ -852,9 +934,10 @@ function chatBackgroundFit(crop) {
   const r = chatBackgroundGeometry.boxAspect;
   if (!(q > 0) || !(r > 0)) return null;
   const regionAspect = q * crop.w / crop.h;
+  const fitWidth = regionAspect >= r;
   let sizeX;   // 图片的绘制宽度（相对对话区宽度的百分比）
   let sizeY;   // 图片的绘制高度（相对对话区高度的百分比）
-  if (regionAspect >= r) {
+  if (fitWidth) {
     // 取景块比对话区"更宽" → 按宽度顶满（高度自然不满，露出模糊底）。
     sizeX = 100 / crop.w;
     sizeY = sizeX * r / q;
@@ -869,7 +952,8 @@ function chatBackgroundFit(crop) {
   const positionY = Math.abs(denominatorY) > 1e-6
     ? 100 * (0.5 - (crop.y + crop.h / 2) * sizeY / 100) / denominatorY : 50;
   return {
-    size: `${sizeX.toFixed(2)}% ${sizeY.toFixed(2)}%`,
+    // 另一轴用原图比例换算，编辑器定格期间即使窗口变化也不会拉伸图片。
+    size: fitWidth ? `${sizeX.toFixed(2)}% auto` : `auto ${sizeY.toFixed(2)}%`,
     position: `${positionX.toFixed(2)}% ${positionY.toFixed(2)}%`,
     // 取景块形状正好等于对话区形状 → 铺满，不需要模糊底。
     covered: Math.abs(regionAspect - r) < 0.002,

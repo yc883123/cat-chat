@@ -21,6 +21,7 @@ const PANE_TITLES = {
 };
 
 let openKind = '';
+let openConversationId = '';
 let statusResizeObserver = null;
 let onOpenTaskCb = null;
 let onCancelTaskCb = null;
@@ -221,6 +222,7 @@ export function positionChatStatusPopover() {
 export function closeChatStatusPopover({ restoreFocus = false } = {}) {
   const previousKind = openKind;
   openKind = '';
+  openConversationId = '';
   const popover = $('#chatStatusPopover');
   const backdrop = $('#chatStatusBackdrop');
   if (popover) popover.hidden = true;
@@ -248,6 +250,7 @@ export function openChatStatusPopover(kind) {
   if (!trigger || trigger.hidden) return;
   if (typeof onCloseOtherMenusCb === 'function') onCloseOtherMenusCb();
   openKind = kind;
+  openConversationId = String(state.conversationId || '');
   const popover = $('#chatStatusPopover');
   const backdrop = $('#chatStatusBackdrop');
   if (!popover) return;
@@ -421,7 +424,7 @@ export function bindChatStatusEvents({ onOpenTask = null, onCancelTask = null, o
   window.addEventListener('scroll', positionChatStatusPopover, true);
 
   document.addEventListener('naiba:conversation-changed', () => {
-    closeChatStatusPopover();
+    if (openKind && String(state.conversationId || '') !== openConversationId) closeChatStatusPopover();
     renderChatStatusBar();
   });
   document.addEventListener('naiba:goal-changed', renderChatStatusBar);

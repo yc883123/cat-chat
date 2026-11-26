@@ -1302,7 +1302,16 @@ export function bindSuperAgentEvents() {
     if (viewState.selectedId) void loadDetail(viewState.selectedId); else renderEmptyDetail();
   });
   $("#superAgentCreate")?.addEventListener("click", () => openLaunchDialog());
-  $("#superAgentLaunchDialog")?.addEventListener("click", (event) => { if (event.target.closest("[data-launch-close]")) $("#superAgentLaunchDialog").close(); });
+  $("#superAgentLaunchDialog")?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-launch-close]")) {
+      event.currentTarget.close();
+      return;
+    }
+    const card = event.target.closest("[data-launch-domain]");
+    if (!card) return;
+    event.currentTarget.close();
+    void openCreateDomainDialog({ domain: card.dataset.launchDomain });
+  });
   $("#superAgentCreateForm")?.addEventListener("submit", (event) => {
     if (event.submitter?.value === "cancel") return;
     void createDomainThread(event);
@@ -1326,17 +1335,9 @@ export function bindSuperAgentEvents() {
     const approval = event.target.closest("[data-super-approval]");
     if (approval) void resolveApproval(approval.dataset.superApproval || "", approval.dataset.superApprovalId || "");
   });
-  // 启动台 B（修复 B3）：类型卡在独立 dialog 里，按用途分组；选卡只路由到对应
-  // 表单（5 类 → 新建表单弹窗），不创建任务、不产生费用。隐藏的类型 select
-  // 继续当真源，路由后由表单弹窗照常加载。
-  $("#superAgentLaunchCards")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-launch-domain]");
-    if (!card) return;
-    const domain = card.dataset.launchDomain;
-    $("#superAgentLaunchDialog")?.close();
-    const select = $("#superAgentCreateDomain");
-    if (select) select.value = domain;
-    void openCreateDomainDialog({ domain });
+  $("#superAgentCreateChooseNext")?.addEventListener("click", () => {
+    if (createModelState.submitting) return;
+    openLaunchDialog();
   });
   $("#superAgentCreateDomain")?.addEventListener("change", () => void loadCreateResources());
   $("#superAgentCreateMode")?.addEventListener("change", renderCreateMode);

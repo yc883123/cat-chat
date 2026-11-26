@@ -211,15 +211,16 @@ class ChatFontFrontendTests(unittest.TestCase):
         self.assertIn("$('#chatFontPick')?.addEventListener('change'", bind)
         preview = bind[bind.index("const previewAppearance"):bind.index("const commitAppearance")]
         self.assertNotIn("saveAppearance", preview)
-        self.assertIn("applyAppearance(appearanceFormValues())", preview)
+        self.assertIn("previewAppearancePatch(appearanceFields(key))", preview)
         # 「确定」那条路径必须真的落库
         commit = bind[bind.index("const commitAppearance"):bind.index("$$('input[name=\"appearanceTheme\"")]
-        self.assertIn("await saveAppearance(values)", commit)
+        self.assertIn("const write = saveAppearance(values)", commit)
+        self.assertIn("await write", commit)
 
     def test_reset_covers_font_keys(self):
         bind = self._bind()
         reset = bind[bind.index("appearanceReset?.addEventListener"):]
-        reset = reset[:reset.index("catch (error)")]
+        reset = reset[:reset.index("\n  });")]
         for needle in ("chat_font_size: 15", "chat_font_family: 'system'", "chat_font_family_custom: ''"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, reset)

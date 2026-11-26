@@ -117,13 +117,15 @@ class ContextRingRefreshTests(unittest.TestCase):
             )
 
     def test_inline_percent_label_sits_right_of_reasoning(self) -> None:
-        """「思考 自动」右侧的实时百分比：与圆环同源、同配色阈值。"""
+        """底栏「思考 自动」胶囊右侧的实时百分比：与圆环同源、同配色阈值。"""
         html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
         self.assertEqual(html.count('id="contextPercentLabel"'), 1, "百分比标签必须存在且 id 唯一")
-        right = html[html.index('class="composer-meta-right"'):]
+        meta = html[html.index('class="composer-meta"'):]
+        meta = meta[: meta.index("</section>")]
+        self.assertLess(meta.index('id="reasoningLabel"'), meta.index('id="contextPercentLabel"'),
+                        "百分比要排在「思考 自动」胶囊右侧")
+        right = meta[meta.index('class="composer-meta-right"'):]
         right = right[: right.index("</div>")]
-        self.assertLess(right.index('id="reasoningLabel"'), right.index('id="contextPercentLabel"'),
-                        "百分比要排在「思考 自动」右侧")
         self.assertLess(right.index('id="contextPercentLabel"'), right.index('id="runtimeStatus"'),
                         "百分比排在运行状态之前")
         media = _read("03-media.js")

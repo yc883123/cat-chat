@@ -225,7 +225,10 @@ export async function jobWaitAction(waitId, action) {
   }
 }
 
-export function messageElement(message, temporary = false) {
+export function messageElement(message, temporary = false, {
+  auxConversationId = '',
+  genuiMessageId = message.id,
+} = {}) {
   if (message.role === 'session') return sessionDividerElement(message);
   const row = document.createElement('article');
   row.className = `message-row ${message.role}`;
@@ -262,8 +265,16 @@ export function messageElement(message, temporary = false) {
     const abortedBadge = metadata.aborted
       ? '<span class="aborted-badge">已中止</span>'
       : metadata.partial ? '<span class="aborted-badge">未完成</span>' : '';
+    // 只有已收尾的助手正文能接上卡片操作，思考、隐藏副本及未完成回复保留为代码。
+    const genuiConversationId = String(auxConversationId || state.conversationId || '');
+    const allowGenui = message.role === 'assistant' && !temporary && !message.pending
+      && !metadata.aborted && !metadata.partial && genuiConversationId && (auxConversationId || genuiMessageId);
+    if (allowGenui) {
+      row.dataset.genuiConversationId = genuiConversationId;
+      row.dataset.genuiMessageId = String(genuiMessageId || '');
+    }
     const activity = Array.isArray(metadata.activity) ? metadata.activity : [];
-    const activityHtml = activity.length ? activityMarkup(activity) : '';
+    const activityHtml = activity.length ? activityMarkup(activity, { genui: allowGenui }) : '';
     const activityHasProse = activity.some((item) => item && item.type === 'prose');
     const reasoningToolHtml = activityHtml || (reasoningMarkup(metadata.reasoning) + toolMarkup(metadata.tool_runs));
     // 当 activity 已内嵌正文（prose 条目）时，正文按时间交错展示，不再在末尾重复渲染；
@@ -312,7 +323,7 @@ export function messageElement(message, temporary = false) {
         <div class="message-body">
           ${skillMarkup(metadata.skills)}
           ${reasoningToolHtml}
-          <div class="answer-content" data-raw="" ${hideBottomContent ? 'style="display:none"' : ''}>${temporary ? '' : markdown(message.content)}</div>
+          <div class="answer-content" data-raw="" ${hideBottomContent ? 'style="display:none"' : ''}>${temporary ? '' : markdown(message.content, true, { genui: allowGenui && !hideBottomContent })}</div>
           ${temporary ? '' : truncationNotice(metadata.truncated)}
           ${temporary ? '' : jobWaitMarkup(metadata.job_wait)}
           ${temporary ? '' : sourcesMarkup(metadata.sources)}
@@ -1153,9 +1164,11 @@ function appendStreamHtml(element, st, html) {
 
 function renderStreamingMarkdown(element, raw) {
   const st = streamRenderState(element, raw);
+  const genui = element.matches('.answer-content, .stream-prose');
+  const markdownOptions = { genui, genuiStreaming: genui };
   const prevSegStart = st.segStart;
   for (const [start, end] of scanMarkdownBlocks(raw, st)) {
-    appendStreamHtml(element, st, markdown(raw.slice(start, end)));
+    appendStreamHtml(element, st, markdown(raw.slice(start, end), true, markdownOptions));
   }
   if (st.segStart !== prevSegStart) st.stableCache = raw.slice(0, st.segStart);
 
@@ -1167,7 +1180,7 @@ function renderStreamingMarkdown(element, raw) {
     && Date.now() - st.lastTailAt < STREAM_TAIL_THROTTLE_MS) return;
   st.lastTailAt = Date.now();
   st.tailRendered = tailRaw;
-  st.tail.innerHTML = markdown(tailRaw, true, STREAM_TAIL_OPTS);
+  st.tail.innerHTML = markdown(tailRaw, true, { ...STREAM_TAIL_OPTS, ...markdownOptions });
 }
 
 // 流式正文渲染入口（调用方与签名保持 09b3de0d 以来的形态）：把 raw 记到 dataset 供
@@ -1215,7 +1228,7 @@ export function moveBottomProseInline(row, answer) {
   streamingRenderStates.delete(answer);
   streamingRenderStates.delete(seg);
   seg.dataset.raw = bottomRaw;
-  seg.innerHTML = markdown(bottomRaw);
+  seg.innerHTML = markdown(bottomRaw, true, { genui: true, genuiStreaming: true });
   answer.dataset.raw = '';
   answer.replaceChildren();
 }

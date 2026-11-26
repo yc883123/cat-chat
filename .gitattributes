@@ -10,3 +10,5 @@ presets/creative-prompt-kit/** -text
 naiba/super_agent/recipe_assets/** -text
 # 预设由转换器按 LF 生成，Windows checkout 必须保持字节可复现。
 public/studio/*.json text eol=lf
+# GenUI 资源按引入字节验指纹，保持上游行尾和空白。
+public/vendor/genui/**/*.js -text -whitespace

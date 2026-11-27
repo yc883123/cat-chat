@@ -188,4 +188,44 @@ function quickScenario({ buttonRect, panelWidth = 320, panelHeight = 194, viewpo
   cases += 1;
 }
 
+// ---- 镜像层滚动同步：textarea 滚到哪，可见文字层就跟到哪（否则光标与文字错行）----
+const syncCode = fn(fs.readFileSync(path.join(root, 'public', 'js', '13-skill-refs.js'), 'utf8').replace(/\r\n/g, '\n'), 'syncComposerMirrorScroll');
+
+function syncScenario({ inputScrollTop, mirrorScrollTop }) {
+  const input = { scrollTop: inputScrollTop };
+  const mirror = { scrollTop: mirrorScrollTop };
+  const document = {
+    querySelector(selector) {
+      if (selector === '#messageInput') return input;
+      if (selector === '#inputMirror') return mirror;
+      return null;
+    },
+  };
+  const sync = new Function('$', `return (${syncCode});`)(selector => document.querySelector(selector));
+  return { sync, input, mirror };
+}
+
+// 10. 镜像落后输入框（程序化改值 / 补滚动漏一次）→ 跟到同值。
+{
+  const { sync, input, mirror } = syncScenario({ inputScrollTop: 150, mirrorScrollTop: 0 });
+  sync();
+  assert.equal(mirror.scrollTop, input.scrollTop);
+  cases += 1;
+}
+
+// 11. 已经同值 → 保持不变（幂等，不来回抖）。
+{
+  const { sync, input, mirror } = syncScenario({ inputScrollTop: 88, mirrorScrollTop: 88 });
+  sync();
+  assert.equal(mirror.scrollTop, 88);
+  cases += 1;
+}
+
+// 12. 输入框/镜像缺失时不抛错（切换视图期间）。
+{
+  const sync = new Function('$', `return (${syncCode});`)(() => null);
+  sync();
+  cases += 1;
+}
+
 console.log(`composer popup layer: ${cases} cases passed`);

@@ -88,7 +88,17 @@ export function renderInputMirror() {
   const value = input.value;
   // 空内容时用一个零宽字符撑起镜像层；非空时只放原文本（不额外追加零宽字符，避免影响换行）。
   mirror.innerHTML = value ? highlightComposerRefsHtml(value) : '\u200b';
-  mirror.scrollTop = input.scrollTop;
+  syncComposerMirrorScroll();
+}
+
+// 镜像层（可见文字）与 textarea（画光标的那层）必须逐像素同底：只靠滚动事件，在
+// 程序化改值 / 光标跳转 / 粘贴后由浏览器补滚动的时序里可能漏一次，一旦错开就表现为
+// 「光标和文字不在同一行」（2026-11-27 报障）。输入、滚动、光标移动、聚焦都重同步一次。
+export function syncComposerMirrorScroll() {
+  const mirror = $('#inputMirror');
+  const input = $('#messageInput');
+  if (!mirror || !input) return;
+  if (mirror.scrollTop !== input.scrollTop) mirror.scrollTop = input.scrollTop;
 }
 
 // 当前光标所在的那个 <(^|\s)/name…> token；无效时返回 null。
@@ -245,6 +255,12 @@ export function insertTextAtCursor(text, { trailingSpace = true } = {}) {
   input.setSelectionRange(newCursor, newCursor);
   resizeTextarea();
   renderInputMirror();
+  // setSelectionRange 不负责滚动：内容超过输入框上限时（长快捷消息插到末尾），光标会落在
+  // 可视区外，看起来像「光标不见了」。只在光标确实在末尾时滚到底，再同步一次镜像层。
+  if (newCursor === input.value.length && input.scrollHeight > input.clientHeight) {
+    input.scrollTop = input.scrollHeight;
+    syncComposerMirrorScroll();
+  }
   // 快捷消息 / 技能引用都走这里：改完必须通知输入管线，否则发送按钮不会刷新为可发送。
   notifyComposerChanged(input);
   return newCursor;

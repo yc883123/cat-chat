@@ -111,4 +111,81 @@ let cases = 0;
   cases += 1;
 }
 
+// ---- 快捷消息面板：同一类问题（在 .composer-wrap 层叠上下文里被侧栏/输入框盖住）----
+const quickCode = fn(fs.readFileSync(path.join(root, 'public', 'js', '12-chat-input.js'), 'utf8').replace(/\r\n/g, '\n'), 'positionQuickMessagePanel');
+
+function quickScenario({ buttonRect, panelWidth = 320, panelHeight = 194, viewport = { width: 1056, height: 711 }, columnLeft = 300, inBody = false, hidden = false }) {
+  const counts = { append: 0 };
+  const body = { id: 'body', appendChild(node) { counts.append += 1; node.parentElement = this; return node; } };
+  const wrapper = { id: 'composer-meta-more', parentElement: body };
+  const panel = {
+    hidden,
+    parentElement: inBody ? body : wrapper,
+    offsetWidth: panelWidth,
+    offsetHeight: panelHeight,
+    style: {},
+  };
+  const button = { getBoundingClientRect: () => buttonRect };
+  const document = {
+    body,
+    querySelector(selector) {
+      if (selector === '#quickMessagePanel') return panel;
+      if (selector === '#quickMessageButton') return button;
+      if (selector === '.messages') return columnLeft == null ? null : { getBoundingClientRect: () => ({ left: columnLeft }) };
+      return null;
+    },
+  };
+  const window = { innerWidth: viewport.width, innerHeight: viewport.height };
+  const position = new Function('$', 'document', 'window', `return (${quickCode});`)(
+    selector => document.querySelector(selector),
+    document,
+    window,
+  );
+  return { position, panel, counts, body };
+}
+
+// 6. 窄窗口下按钮靠左：先挂 body，且左边不越过对话列左缘（原来会横跨侧栏、被侧栏盖住）。
+{
+  const { position, panel, counts, body } = quickScenario({ buttonRect: { top: 671, bottom: 699, left: 308, right: 396 } });
+  position(panel);
+  assert.equal(panel.parentElement, body, 'quick message panel must be re-parented to document.body');
+  assert.equal(counts.append, 1);
+  assert.equal(panel.style.left, '300px');
+  assert.equal(panel.style.top, '471px');
+  cases += 1;
+}
+
+// 7. 已经挂在 body：不重复搬动。
+{
+  const { position, panel, counts, body } = quickScenario({ buttonRect: { top: 671, bottom: 699, left: 308, right: 396 }, inBody: true });
+  position(panel);
+  assert.equal(panel.parentElement, body);
+  assert.equal(counts.append, 0);
+  cases += 1;
+}
+
+// 8. 手机窄屏（没有对话列可用）：退回视口夹取，不出现负数坐标。
+{
+  const { position, panel, body } = quickScenario({
+    buttonRect: { top: 640, bottom: 668, left: 16, right: 104 },
+    viewport: { width: 375, height: 760 },
+    columnLeft: null,
+  });
+  position(panel);
+  assert.equal(panel.parentElement, body);
+  assert.equal(panel.style.left, '8px');
+  cases += 1;
+}
+
+// 9. 隐藏状态：不动 DOM、不写坐标。
+{
+  const { position, panel, counts } = quickScenario({ buttonRect: { top: 671, bottom: 699, left: 308, right: 396 }, hidden: true });
+  const parent = panel.parentElement;
+  position(panel);
+  assert.equal(panel.parentElement, parent);
+  assert.equal(counts.append, 0);
+  assert.equal(panel.style.top, undefined);
+  cases += 1;
+}
+
 console.log(`composer popup layer: ${cases} cases passed`);

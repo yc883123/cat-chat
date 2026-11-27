@@ -257,17 +257,25 @@ export function closeQuickMessagePanel() {
 }
 
 // 面板固定定位：右对齐按钮、优先向上展开，贴边时夹在视口内（不依赖 composer 的 overflow）。
+// 定位前必须先挂到 body：它原来在 .composer-wrap 里，而那个容器是 z-index:2 的层叠上下文，
+// 面板自己的 z-index:40 只在这个上下文内部有效 —— 对外整体仍低于侧栏（z-index:20）和
+// 输入框磨砂层，窄窗口下按钮靠左时面板一半被侧栏/输入框盖住（2026-11-27 报障）。
+// 与 @ / Skill 弹层同一套路；左侧下限取对话列左缘，不横跨到侧栏上。
 export function positionQuickMessagePanel() {
   const panel = $('#quickMessagePanel');
   const button = $('#quickMessageButton');
   if (!panel || !button || panel.hidden) return;
+  if (panel.parentElement !== document.body) document.body.appendChild(panel);
   const rect = button.getBoundingClientRect();
   const width = panel.offsetWidth;
   const height = panel.offsetHeight;
   const margin = 8;
   let top = rect.top - height - 6;
   if (top < margin) top = Math.min(rect.bottom + 6, window.innerHeight - height - margin);
-  const left = Math.max(margin, Math.min(rect.right - width, window.innerWidth - width - margin));
+  const columnLeft = document.querySelector('.messages')?.getBoundingClientRect().left ?? margin;
+  const minLeft = Math.max(margin, Math.round(columnLeft));
+  const rightBound = Math.max(minLeft, window.innerWidth - width - margin);
+  const left = Math.max(minLeft, Math.min(rect.right - width, rightBound));
   panel.style.top = `${Math.max(margin, top)}px`;
   panel.style.left = `${left}px`;
 }

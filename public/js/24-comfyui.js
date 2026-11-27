@@ -471,7 +471,7 @@ export function bindComfyuiEvents() {
   }
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiTaskList")?.addEventListener("change", onTaskClearToggle);
-  $("#comfyuiBatchList")?.addEventListener("change", onBatchClearToggle);
+  $("#comfyuiBatchList")?.addEventListener("click", onBatchClearToggle);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#studioPageComfyui")?.addEventListener("click", (event) => {
     const button = event.target.closest?.("[data-comfyui-history-more]");
@@ -4304,13 +4304,12 @@ function onBatchClearToggle(event) {
   if (!box || !comfyui.batchClearMode) return;
   const id = String(box.dataset.comfyuiBatchCheck || "");
   const wrap = box.closest(".comfyui-batch-row-wrap");
-  if (comfyui.batchClearRequest || !clearableBatchIds().includes(id)) {
-    box.checked = comfyui.batchClearSelection.has(id);
-    return;
-  }
-  if (box.checked) comfyui.batchClearSelection.add(id);
+  if (comfyui.batchClearRequest || !clearableBatchIds().includes(id)) return;
+  const next = box.getAttribute("aria-checked") !== "true";
+  box.setAttribute("aria-checked", next ? "true" : "false");
+  if (next) comfyui.batchClearSelection.add(id);
   else comfyui.batchClearSelection.delete(id);
-  wrap?.classList.toggle("is-selected", box.checked);
+  wrap?.classList.toggle("is-selected", next);
   renderBatchClearBar();
 }
 
@@ -7221,7 +7220,9 @@ function batchHistoryRowMarkup(row) {
     // 勾选框放在行按钮外面（button 里不能嵌表单控件）；在跑批次不给勾选框。
     const selectable = comfyui.batchClearMode && !batchRowRunning(row) && !batch.deletingBatches.has(rawId);
     const selected = comfyui.batchClearSelection.has(rawId);
-    const check = selectable ? `<label class="comfyui-batch-row-check"><input type="checkbox" data-comfyui-batch-check="${id}"${selected ? " checked" : ""}${comfyui.batchClearRequest ? " disabled" : ""}><span>选择这个批次</span></label>` : "";
+    // 勾选框用 button + role="checkbox"，不用 <label><input>：全局 `label input` 是 40px 高的
+    // 文本框造型，手机/旧缓存下会把勾选框撑成一大块白框，把卡片挤歪（2026-11-27 报障）。
+    const check = selectable ? `<button type="button" class="comfyui-batch-row-check" role="checkbox" aria-checked="${selected ? "true" : "false"}" aria-label="选择这个批次" data-comfyui-batch-check="${id}"${comfyui.batchClearRequest ? " disabled" : ""}><span class="comfyui-batch-check-box" aria-hidden="true"></span><span class="comfyui-batch-check-text">选择这个批次</span></button>` : "";
     return `<div class="comfyui-batch-row-wrap${comfyui.batchClearMode && selected ? " is-selected" : ""}">
       ${check}
       <button type="button" class="comfyui-batch-row${cls === "fail" ? " is-failed" : ""}" data-batch-open="${id}">

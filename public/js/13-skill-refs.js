@@ -131,7 +131,9 @@ export function positionComposerPopup(popup) {
   // 只拿布局坐标，只看 window.innerHeight 会把上半截顶出可视屏幕 ⇒ 以「当前真正可见的区域」
   // （vv.offsetTop ~ vv.offsetTop + vv.height）为参照；桌面无偏移时两套坐标重合，行为不变。
   const vv = window.visualViewport;
+  const vvLeft = vv ? vv.offsetLeft : 0;
   const vvTop = vv ? vv.offsetTop : 0;
+  const viewportWidth = Number(vv ? vv.width : window.innerWidth) || 0;
   const vvBottom = vvTop + (vv ? vv.height : window.innerHeight);
   // 先摘上一轮的内联 maxHeight 再读 CSS 上限：内联值若留着会把 getComputedStyle 的读数
   // 钉死在上一轮的约束上，键盘收起时弹层就再也长不回去了。
@@ -152,8 +154,24 @@ export function positionComposerPopup(popup) {
   let top = (above >= below) ? rect.top - ph - gap : rect.bottom + gap;
   // 兜底：夹取范围随可视视口走，弹层不许溢出到可视屏幕之外。
   top = Math.max(vvTop + 8, Math.min(top, vvBottom - ph - 8));
-  popup.style.left = `${Math.max(8, rect.left)}px`;
-  popup.style.width = `${rect.width}px`;
+  // 横向也按可视视口夹：只看输入框左边缘的话，输入框靠右时弹层右半截会顶出手机屏幕
+  // （2026-11-27 报障：@ / Skill 弹层显示不全）。手机上输入框本身只有 160 多像素宽，
+  // 直接用 rect.width 会把 Skill 名/目录名截得只剩几个字，所以窄屏保留 320 的阅读下限，
+  // 再用可视视口宽度封顶；两者冲突时以看得全为准。拿不到视口宽度时保持旧行为（测试桩/老环境）。
+  if (viewportWidth > 0) {
+    const maxWidth = Math.max(0, viewportWidth - 16);
+    const narrow = viewportWidth <= 760;
+    const width = Math.min(narrow ? Math.max(rect.width, 320) : rect.width, maxWidth);
+    const left = Math.min(Math.max(rect.left, vvLeft + 8), vvLeft + Math.max(0, viewportWidth - width - 8));
+    // 窄屏由 JS 给出实际宽度，CSS 的 320 最小宽要一起让位；宽屏还原给样式表。
+    if (narrow) popup.style.minWidth = "0px";
+    else popup.style.removeProperty("min-width");
+    popup.style.left = `${left}px`;
+    popup.style.width = `${width}px`;
+  } else {
+    popup.style.left = `${Math.max(8, rect.left)}px`;
+    popup.style.width = `${rect.width}px`;
+  }
   popup.style.top = `${top}px`;
 }
 

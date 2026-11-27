@@ -440,8 +440,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .workspace-empty { color: var(--sidebar-muted); font-size: 12px; padding: 16px; text-align: center; }
 .conversation-time { color: var(--sidebar-muted); font-size: 10px; flex: none; }
 .composer-workspace { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 2px 4px 2px 6px; }
-.composer-workspace-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; color: var(--accent); }
-#composerWorkspaceSelect { border: 0; outline: 0; background-color: var(--surface); color: var(--accent); font-size: 11px; font-weight: 600; padding: 2px 20px 2px 6px; border-radius: var(--r-xs); max-width: 150px; }
+.composer-workspace-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; color: var(--amber); }
+#composerWorkspaceSelect { border: 0; outline: 0; background-color: var(--surface); color: var(--amber); font-size: 11px; font-weight: 600; padding: 2px 20px 2px 6px; border-radius: var(--r-xs); max-width: 150px; }
 
 .icon-button { width: 36px; height: 36px; border: 0; border-radius: var(--r-md); background: transparent; color: inherit; display: inline-grid; place-items: center; font-size: 19px; flex: none; transition: var(--t-fast); }
 .icon-button:hover { background: var(--surface-2); }
@@ -646,13 +646,14 @@ html[data-theme="dark"] .reasoning-menu {
   height: 20px;
   display: block;
   border-radius: 50%;
-  background: conic-gradient(var(--accent) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 16%, transparent) 0);
-  -webkit-mask-image: radial-gradient(farthest-side, transparent calc(100% - 2.8px), #000 calc(100% - 2.2px));
-  mask-image: radial-gradient(farthest-side, transparent calc(100% - 2.8px), #000 calc(100% - 2.2px));
+  background: conic-gradient(var(--accent) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 19%, transparent) 0);
+  /* 环宽 3.6px：原先只有 2.2px，在 20px 的小尺寸上看着像一根发丝，百分比涨了也看不出来。 */
+  -webkit-mask-image: radial-gradient(farthest-side, transparent calc(100% - 4.4px), #000 calc(100% - 3.6px));
+  mask-image: radial-gradient(farthest-side, transparent calc(100% - 4.4px), #000 calc(100% - 3.6px));
   position: relative;
 }
-.context-usage-ring.warning { background: conic-gradient(var(--warning) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 16%, transparent) 0); }
-.context-usage-ring.danger { background: conic-gradient(var(--danger) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 16%, transparent) 0); }
+.context-usage-ring.warning { background: conic-gradient(var(--warning) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 19%, transparent) 0); }
+.context-usage-ring.danger { background: conic-gradient(var(--danger) calc(var(--context-percent) * 1%), color-mix(in oklab, var(--text) 19%, transparent) 0); }
 .context-usage-popover {
   position: fixed;
   left: 12px;
@@ -1987,7 +1988,7 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .permission-mode-button[aria-expanded="true"] { border-color: var(--line-strong); background: var(--surface-2); color: var(--text); }
 .permission-mode-button:disabled { opacity: .5; cursor: not-allowed; }
 .permission-mode-prefix { color: var(--muted); }
-.permission-mode-value { color: var(--accent); font-weight: 600; }
+.permission-mode-value { color: var(--amber); font-weight: 600; }
 /* 「完全访问」用红色提示风险（与旧的红色高亮同源） */
 .permission-mode-button[data-mode="full"] .permission-mode-value { color: var(--red); }
 .permission-mode-caret { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -5562,6 +5563,21 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .studio-copy-button.is-copied { opacity: 1; }
 .studio-copy-button:hover, .studio-copy-button:focus-visible { background: var(--surface-2); border-color: var(--line); color: var(--text); }
 .studio-copy-button.is-copied { color: var(--accent); }
+/* 手机没有 hover：复制按钮不能靠「悬停才显形」，否则常态只有 38% 透明度，几乎看不见（2026-11-27 报障）。
+   粗指针 / 窄屏下默认给玻璃底和描边、完全不透明；桌面仍保持轻浮层。 */
+@media (hover: none), (max-width: 760px) {
+  .studio-result-body .studio-copy-button,
+  .studio-body-preview summary .studio-copy-button {
+    opacity: 1;
+    color: var(--text);
+    background: var(--pill-bg);
+    border-color: var(--pill-border);
+    box-shadow: var(--pill-shadow);
+  }
+  /* 手机上按钮被触控规格撑到 40px 高（§8 的 button/summary min-height），
+     正文顶部要多让出它的高度，否则复制胶囊压住第一行字。 */
+  .studio-result-body .studio-result-stream { padding-top: 54px; }
+}
 
 /* 历史产出：作为右侧结果栏的一种模式显示，自己滚动 */
 .studio-history { flex: 1; min-height: 0; overflow-y: auto; padding: 8px var(--s-4) var(--s-4); display: flex; flex-direction: column; gap: 6px; }
@@ -6114,7 +6130,7 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-clear-count { font-size: 12px; font-weight: 600; }
 .comfyui-clear-note { flex: 1 1 180px; font-size: 11px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
 .comfyui-task-select { display: flex; align-items: center; gap: 6px; min-height: 44px; margin: -6px 0 -4px; font-size: 12px; color: var(--muted); cursor: pointer; }
-.comfyui-task-select input[type="checkbox"] { display: inline-block; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; cursor: pointer; }
+.comfyui-task-select input[type="checkbox"] { flex: none; display: inline-block; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 3px; background: none; accent-color: var(--accent); cursor: pointer; }
 .comfyui-task-card.is-selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--violet-line); }
 .comfyui-task-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
 .comfyui-task-card { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 8px 10px; display: grid; gap: 4px; }
@@ -6188,9 +6204,15 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-batch-row-wrap { display: flex; align-items: stretch; gap: 6px; }
 .comfyui-batch-row-wrap .comfyui-batch-row { flex: 1 1 auto; min-width: 0; }
 .comfyui-batch-row-wrap.is-selected .comfyui-batch-row { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--violet-line); }
-.comfyui-batch-row-check { flex: none; display: flex; align-items: center; gap: 6px; margin: 0; padding: 0 2px; font-size: 12px; color: var(--muted); cursor: pointer; }
-.comfyui-batch-row-check input[type="checkbox"] { display: inline-block; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; cursor: pointer; }
-.comfyui-batch-row-check span { max-width: 5.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 批次勾选：button + 自绘方框。刻意不用 <label><input>——全局 `label input` 是 40px 高、
+   100% 宽、白底圆角的文本框造型，会把勾选框撑成一大块白框把卡片挤歪（2026-11-27 报障）。 */
+.comfyui-batch-row-check { flex: none; display: flex; align-items: center; gap: 6px; margin: 0; padding: 0 2px; min-width: 0; max-width: 46%; border: 0; background: none; font: inherit; font-size: 12px; color: var(--muted); text-align: left; cursor: pointer; }
+.comfyui-batch-row-check:disabled { opacity: .55; cursor: not-allowed; }
+.comfyui-batch-check-box { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface); line-height: 1; }
+.comfyui-batch-check-box::after { content: "✓"; font-size: 12px; font-weight: 700; color: #fff; opacity: 0; }
+.comfyui-batch-row-check[aria-checked="true"] .comfyui-batch-check-box { border-color: var(--accent-solid); background: var(--accent-solid); }
+.comfyui-batch-row-check[aria-checked="true"] .comfyui-batch-check-box::after { opacity: 1; }
+.comfyui-batch-check-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .comfyui-batch-row-edit { flex: none; padding: 0 10px; font: inherit; font-size: 11.5px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); cursor: pointer; }
 .comfyui-batch-row-edit:hover, .comfyui-batch-row-edit:focus-visible { border-color: var(--violet-line); background: var(--surface-2); }
 .comfyui-batch-meta { display: block; font-size: 10.5px; color: var(--muted); }
@@ -9838,7 +9860,7 @@ html[data-theme="dark"]:is([data-chat-bg="on"], [data-model-skin="on"]) .compose
   border: 0;
   border-radius: 999px;
   background-color: transparent;
-  color: var(--accent);
+  color: var(--amber);
   font-size: 12px;
   font-weight: 600;
   padding: 0 20px 0 2px;
@@ -9985,7 +10007,7 @@ html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-model-trigger {
   height: 13px;
   flex: none;
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--amber);
   stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -10009,7 +10031,7 @@ html:is([data-chat-bg="on"], [data-model-skin="on"]) .composer-model-trigger {
 .composer-meta-left .deep-reasoning-button .reasoning-value {
   font-size: 12px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--amber);
 }
 .composer-meta-left .deep-reasoning-button[data-reasoning-effort="off"] .reasoning-value {
   color: var(--muted);
@@ -10590,6 +10612,8 @@ dialog.toast {
   border-radius: 999px;
   border: 1px solid var(--glass-pop-border);
   background: var(--glass-pop-bg);
+  /* 玻璃底是浅色的：文字必须跟随主题前景色，不能再沿用 .toast 的白字（亮色下白底白字）。 */
+  color: var(--text);
   box-shadow: var(--glass-pop-shadow);
   -webkit-backdrop-filter: blur(18px) saturate(1.30);
   backdrop-filter: blur(18px) saturate(1.30);
@@ -11432,6 +11456,36 @@ html:is([data-chat-bg="on"], [data-model-skin="on"]) .content-skill-history-row:
   box-shadow: var(--glass-pop-shadow);
   -webkit-backdrop-filter: blur(22px) saturate(1.34);
   backdrop-filter: blur(22px) saturate(1.34);
+}
+
+/* ── 8.1 反馈圈出来的几处实底块（2026-11-27）──
+   只有这几处：任务总管右栏「下一步 / 最近产物」、织书台阶段条与「查看说明」「上传设定集」。
+   - 任务总管右栏：父面板已经刷过一层玻璃，子卡片再刷一层 38% 会叠成深色实底；
+     这里只留一层薄雾 + 发丝描边，和旁边面板同一档透明度。
+   - 织书台阶段条：「设定/大纲/章节/正文」的底色被 ID 选择器钉成实底，改成玻璃胶囊，
+     当前阶段只在胶囊里提亮一档，不再铺一条实底长条。
+   - 两个按钮同理，从实底换成玻璃胶囊。 */
+html:is([data-chat-bg="on"], [data-model-skin="on"]) .super-agent-side-panel > .super-agent-section {
+  background: color-mix(in oklab, var(--surface) 18%, transparent);
+  border: 1px solid var(--glass-card-border);
+  border-radius: 13px;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageWriter .writer-stages {
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  box-shadow: var(--pill-shadow);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageWriter .writer-stage.active {
+  background: var(--pill-bg-hover);
+  color: var(--violet-deep);
+  box-shadow: var(--pill-shadow);
+}
+html:is([data-chat-bg="on"], [data-model-skin="on"]) #studioPageWriter :is(#writerAsideBtn, #writerImportSettingsBtn) {
+  background: var(--pill-bg);
+  border-color: var(--pill-border);
+  box-shadow: var(--pill-shadow);
 }
 
 /* ── 9. 消息卡片透明度联动（--msg-card-opacity）、操作条、思考块、开始页卡片与通用按钮统一圆胶囊语言 ── */

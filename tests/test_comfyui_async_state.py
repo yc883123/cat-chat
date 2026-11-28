@@ -12,15 +12,16 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import { buildBatchConvertRequest, BATCH_H3_REFERENCE_TEMPLATE } from './public/js/24a-comfyui-convert.js';
+import * as draftCodec from './public/js/24b-comfyui-draft.js';
 const defer=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j;});return {promise,resolve,reject};};
 const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 const timers=new Map(),messages=[],root={dataset:{comfyuiPane:'batch'}};
 let timer=0,page='comfyui',open=true;
-const context=vm.createContext({console,FormData,File,URLSearchParams,buildBatchConvertRequest,BATCH_H3_REFERENCE_TEMPLATE,
+const context=vm.createContext({console,FormData,File,URLSearchParams,buildBatchConvertRequest,BATCH_H3_REFERENCE_TEMPLATE,...draftCodec,
   setTimeout:fn=>{timers.set(++timer,fn);return timer;},clearTimeout:id=>timers.delete(id),
   setInterval:fn=>{timers.set(++timer,fn);return timer;},clearInterval:id=>timers.delete(id),
   document:{querySelector:()=>null,querySelectorAll:()=>[]},
-  localStorage:{getItem:()=>null,setItem(){}},state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},
+  window:{confirm:()=>true},localStorage:{getItem:()=>null,setItem(){},removeItem(){}},state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},
   $:selector=>selector==='#studioPageComfyui'?root:null,toast:text=>messages.push(text),
   currentStudioPage:()=>page,isStudioOpen:()=>open,api:async()=>({})});
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
@@ -30,7 +31,8 @@ vm.runInContext(source+`
   globalThis.p={batch,startBatchPolling,stopBatchPolling,batchConvert,batchConvertAll,
     histories,loadHistoryPage,mergeHistoryRows,forgetHistoryRows,refreshActiveTasks,
     comfyui,selectWorkflow,submitTask,openRerunSnapshot,dropRerunDraft,
-    changeBatchMediaPorts,onBatchChange,onBatchClick,submitBatch,batchUploadTiles,loadBatchWorkflowDetail,
+    changeBatchMediaPorts,onBatchChange,onBatchClick,onBatchInput,submitBatch,batchUploadTiles,loadBatchWorkflowDetail,
+    openBatchForEdit,cancelBatchHistoryEdit,exitBatchHistoryEdit,ensureBatchDraft,addBatchScheme,loadBatchDraft,flushBatchDraft,scheduleBatchDraftSave,clearBatchDraft,checkBatchRestoredFiles,
     setWait(fn){batchWaitStudioTask=fn;}};
 `,context);
 const p=context.p;

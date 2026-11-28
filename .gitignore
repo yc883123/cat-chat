@@ -300,6 +300,8 @@ verify/claude-cache-diagnostic/*
 !verify/_serve_labeler_retry.py
 !verify/labeler_retry_smoke.cjs
 !verify/chat_composer_layout_smoke.cjs
+!verify/release_ui_smoke.py
+!verify/comfyui_draft_smoke.cjs
 !verify/comfyui_navigation_smoke.cjs
 !verify/comfyui_history_smoke.cjs
 !verify/_serve_comfyui_history.py

@@ -274,11 +274,12 @@ assert.equal(new Set(sigs).size,5, '五类内容区结构应互异：'+sigs.join
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},removeAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
 const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[{model_key:'prov',name:'P',model:'m1'}]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[{model_key:'prov',name:'P',model:'m1'}]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/batches')return {batch:{id:'cfb-x1'}};
   return {};}};
 async function make(name,sourceText,exportsLine){
@@ -479,6 +480,7 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],toasts=[],slotValues={};
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],className:'',classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(name,value){this[name]=String(value);},getAttribute(name){return this[name];},removeAttribute(){},addEventListener(){},append(...items){this.children.push(...items);},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{},remove(){}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
@@ -508,7 +510,7 @@ const snapshot={source_task_id:'done',workflow_id:'cw-1',workflow_name:'原任�
   media_skip:[{node_id:'9',field_name:'audio'}],
   shots:3,unload_after:true,created_at:1000,finished_at:2000};
 const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,Date,document:documentStub,window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[],media_exts:{exts:{}}}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.thumb_path||record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[],media_exts:{exts:{}}}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.thumb_path||record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
   const method=String(options?.method||'GET').toUpperCase();
   requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/tasks/done/rerun-snapshot')return {snapshot};
@@ -647,6 +649,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8')
   .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],writes=[],messages=[];
 function makeNode(tag='div'){
   let text='',value='';
@@ -797,11 +800,12 @@ assert.equal(p.renderSlot(original.params[2]).querySelector('[data-comfyui-slot]
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],className:'',classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(name,value){this[name]=String(value);},removeAttribute(){},addEventListener(){},append(...items){this.children.push(...items);},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
 const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,URLSearchParams,Date,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
   const method=String(options?.method||'GET').toUpperCase();
   requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/tasks'&&method==='POST')return {task:{id:'ct-single'}};
@@ -935,12 +939,13 @@ assert.equal(batchElapsedText({active:false,started_at:1000},99999999),'耗时�
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(){},removeAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
 let failSubmit=false;
 const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{
   const method=String(options?.method||'GET').toUpperCase();
   requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/tasks'&&method==='POST'){
@@ -1128,11 +1133,12 @@ assert.equal(toggle.checked,false,'成功后复位，不受批量草稿影响');
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map();
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},append(node){this.children.push(node)},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
 const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:()=>{},state:{},localFileUrl:path=>path,api:async()=>({})};
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:()=>{},state:{},localFileUrl:path=>path,api:async()=>({})};
 async function make(name,sourceText,exportsLine){
   const byMod=new Map();
   for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)){
@@ -1271,11 +1277,12 @@ assert.ok(legacy.restoreWarning.includes('旧版'));
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
 const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});if(path==='/api/comfyui/batches')return {batch:{id:'cfb-x'}};return {};}};
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});if(path==='/api/comfyui/batches')return {batch:{id:'cfb-x'}};return {};}};
 async function make(sourceText,exportsLine){
   const byMod=new Map();
   for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)) byMod.set(match[2],match[1].split(',').map(n=>n.trim()).filter(Boolean));
@@ -1343,6 +1350,7 @@ assert.match(oldScheme.restoreWarning,/没有版本基线/);
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],className:'',classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(name,value){this[name]=String(value);},getAttribute(name){return this[name];},removeAttribute(){},addEventListener(){},append(...items){this.children.push(...items);},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{},remove(){}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
@@ -1350,7 +1358,7 @@ const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clea
   document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}}},
   window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)},
   failWorkflow:false,workflowGate:null});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},
   localFileUrl:path=>path,attachmentThumbUrl:record=>record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,
   api:async(path,options)=>{
     requests.push({path,method:String(options?.method||'GET')});
@@ -1421,6 +1429,7 @@ assert.ok(requests.some(row=>row.path==='/api/comfyui/tasks/done/rerun'&&row.met
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const requests=[],toasts=[],saved=[];
 function makeEl(tag='div'){
   const el={tagName:tag.toUpperCase(),className:'',dataset:{},attributes:{},children:[],disabled:false,hidden:false,
@@ -1443,7 +1452,7 @@ const $=key=>{if(!nodes.has(key))nodes.set(key,makeEl());return nodes.get(key)};
 const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,CSS:{escape:v=>String(v)},
   document:{createElement:tag=>makeEl(tag),getElementById:()=>null,querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}}},
   window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null}});
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:m=>toasts.push(String(m)),
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:m=>toasts.push(String(m)),
   state:{token:'tok1'},localFileUrl:p=>'/api/file?path='+encodeURIComponent(p),attachmentThumbUrl:r=>r.path,
   mediaKind:(_u,n)=>/\.mp4$/.test(n)?'video':/\.wav$/.test(n)?'audio':'image',
   isPywebview:()=>false,
@@ -1489,6 +1498,7 @@ assert.equal(saved.length,1);assert.equal(requests.length,1);
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],
   className:'',classList:{add(){},remove(){},toggle(){}},setAttribute(){},getAttribute(){return '';},removeAttribute(){},
@@ -1531,7 +1541,7 @@ let apiImpl=async(path,opts)=>{
   if(path==='/api/comfyui/batches'&&opts?.method==='POST')return {batch:{id:'cfb-new',title:'新批',items:[]}};
   return {workflows:[wfA,wfB],batches:[]};
 };
-const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:m=>toasts.push(String(m)),
+const values={...draftCodec,createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:m=>toasts.push(String(m)),
   state:{conversations:[],activeConversationId:'',providerModelCatalogs:{},bootstrap:{model_profiles:[],media_exts:{exts:{image:['.png'],audio:['.wav'],video:['.mp4']}}}},
   localFileUrl:p=>p,attachmentThumbUrl:r=>r.path,mediaKind:()=> 'image',isPywebview:()=>false,saveLocalFile:()=>false,
   currentStudioPage:()=>studioPage,isStudioOpen:()=>studioOpen,

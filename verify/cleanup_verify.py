@@ -43,6 +43,7 @@ KEEP = {
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "_serve_labeler_retry.py", "labeler_retry_smoke.cjs",
     "chat_composer_layout_smoke.cjs",
+    "release_ui_smoke.py", "comfyui_draft_smoke.cjs",
     "comfyui_navigation_smoke.cjs",
     "comfyui_history_smoke.cjs", "_serve_comfyui_history.py",
     "comfyui_chat_config_smoke.cjs", "comfyui_chat_config_smoke.py", "_serve_chat_config_smoke.py",

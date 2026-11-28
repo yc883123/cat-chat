@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.8.3-beta
-  RELEASE_TAG: v4.8.3-beta
+  RELEASE_VERSION: 4.8.4-beta
+  RELEASE_TAG: v4.8.4-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.8.3-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.8.4-beta-windows-x64
   # 旧名包：只为兼容留存文档 / 教程 / 口口相传的旧下载链接，内容与 `PACKAGE_NAME` 等价；
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.8.3-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.8.4-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -130,7 +130,7 @@ jobs:
         run: |
           # 发布前必须让打包产物真的跑一次：--self-check 会导入 PDF/视频/子代理等全部重依赖，
           # 缺 DLL/扩展会在这里复现。用超时等待，避免导入失败时 PyInstaller 的弹窗挂住 CI。
-          $proc = Start-Process -FilePath "dist\naiba-chat.exe" -ArgumentList "--self-check" -PassThru
+          $proc = Start-Process -FilePath "dist\naiba-chat.exe" -ArgumentList "--self-check" -WindowStyle Hidden -PassThru
           if (-not $proc.WaitForExit(180000)) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             throw "打包产物自检超时（很可能在导入阶段弹出了错误窗口），禁止发布"
@@ -139,6 +139,39 @@ jobs:
             throw "打包产物自检失败（exit $($proc.ExitCode)）：exe 缺少运行文件，禁止发布"
           }
           Write-Host "打包产物自检通过（--self-check exit 0）"
+
+      - name: Install packaged UI test dependency
+        shell: pwsh
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          # 锁定与本机验收一致的 Playwright；浏览器使用 runner 已有 Edge，不安装或改写系统浏览器。
+          npm install --prefix "${{ runner.temp }}\cat-chat-ui-deps" --no-save --package-lock=false --ignore-scripts playwright@1.63.0
+          exit $LASTEXITCODE
+
+      - name: Smoke test packaged UI
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          NODE_PATH: ${{ runner.temp }}\cat-chat-ui-deps\node_modules
+          NAIBA_SMOKE_BROWSER_CHANNEL: msedge
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -u verify/release_ui_smoke.py --exe dist/naiba-chat.exe --node "$((Get-Command node).Source)" --artifacts verify/release-ui-artifacts
+          exit $LASTEXITCODE
+
+      - name: Upload packaged UI failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-ui-failure-${{ github.run_id }}
+          # 仅上传门禁日志与截图；隔离 config.json、chat.db、临时浏览器资料不属于此目录。
+          path: |
+            verify/release-ui-artifacts/*.log
+            verify/release-ui-artifacts/*.png
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Create update manifest
         shell: pwsh
@@ -182,11 +215,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.8.3 Beta release
+      - name: Publish 4.8.4 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.8.3 Beta
+          name: Cat Chat 4.8.4 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -196,15 +229,13 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.8.3 Beta：手机端弹层、清除与提示可见性修复
+            Cat Chat 4.8.4 Beta：更新重启修复、贴签匠正文一致与批量草稿恢复
 
-            - 修复手机端批量生成结果进入「清除」后，勾选框被全局输入框样式撑成大块白框、把批次卡片挤出屏幕的问题；勾选改为自绘小方框，位置和触控都稳定。
-            - 修复手机端输入框 @ 文件引用和 / Skill 弹层超出屏幕右侧、显示不全的问题；弹层按可视视口夹取宽度和位置，窄屏也能看全名称。
-            - 修复手机端提词库结果区「复制」按钮常态几乎透明、看不清的问题；窄屏下改为带玻璃底的常显按钮，并让出正文首行。
-            - 修复壁纸或模型皮肤下通知 Toast 白底白字、文字不可见的问题；提示文字改为跟随主题前景色。
-            - 上下文占用圆环加粗到 3.6px，小尺寸下进度更容易辨认；底栏「未分组 / 思考级别 / 审批档位」改用和「整理上下文」同款的明橙色。
-            - 统一壁纸 / 模型皮肤下工作台与任务总管的玻璃底：任务总管右栏卡片、织书台阶段条与「查看说明 / 上传设定集」按钮改为毛玻璃，不再出现深色实底块。
-            - 修复快捷消息面板被侧栏和输入框盖住的问题。
-            - 修复输入框光标与可见文字错行的两条路径。
+            - 修复自动更新点「立即重启」后，旧引导进程卡在临时文件清理弹窗、导致新版无法替换的问题；等待正常退出后仅结束身份核实一致的旧进程。
+            - 更新包先暂存并校验，再原子替换，旧版只备份一次；替换或启动失败会保留更新包并明确提示，启动观察完成后才确认成功。
+            - 贴签匠结果预览、逐图 TXT、LoRA 训练包与缓存复用采用同一份已采纳正文，保留换行，避免模型的「已写入完成」等回执被当作标注；旧记录缺正文时保留原标签和描述并标明。
+            - 贴签匠运行中读取结果临时失败会重新拉取，切换任务后旧请求不再覆盖当前结果；本地保存失败不重新调用模型，缺少 TXT 正文的旧缓存由用户主动重试。
+            - 造梦机批量表单自动保存草稿并在刷新后恢复；补充指认、逐条补充值与跳过素材状态一并保存，历史批次的临时编辑不会覆盖普通草稿。
+            - 发布流程增加正式 EXE 的界面检查，覆盖基础页面与长工具对话输入区；检查失败阻止发布，并保留截图和日志，新增回归接入现有四分片测试。
 
-            Cat Chat 4.8.3 Beta Windows build。保留原有更新协议和双名称发布文件。
+            Cat Chat 4.8.4 Beta Windows build。保留原有更新协议和双名称发布文件。

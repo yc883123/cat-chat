@@ -28,6 +28,10 @@ from naiba.comfyui import (
     MAX_SHOTS,
 )
 from naiba.comfyui import stepmeter
+from naiba.comfyui.image_container import (
+    container_inputs, is_image_container_field, validate_selected,
+)
+from naiba.comfyui.params import apply_overrides
 from naiba.comfyui.store import ComfyUIStoreError, now_ms
 from naiba.core.contracts import COMFYUI_SUBMISSIONS_KEY
 from naiba.core.media_types import media_kind_of
@@ -287,7 +291,7 @@ class ComfyUIJobManager:
     def _validate_overrides(self, entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
         """overrides 只认扫描出的槽位；值按槽位类型保真转换，转不动直接拒绝。"""
         if raw is None:
-            return []
+            raw = []
         if not isinstance(raw, list):
             raise ComfyUITaskError("overrides 必须是数组")
         params = entry.get("params") or []
@@ -314,6 +318,11 @@ class ComfyUIJobManager:
                     "不接受文本值"
                 )
             value = item.get("value")
+            if is_image_container_field((entry.get("prompt") or {}).get(node_id), field_name):
+                if not isinstance(value, str):
+                    raise ComfyUITaskError("ImageContainer selected_json 必须是 JSON 字符串")
+                out.append({"node_id": node_id, "field_name": field_name, "value": value})
+                continue
             field_type = str(slot.get("field_type") or "text")
             if field_type == "seed":
                 # seed：空值 = 每次随机（不留覆盖）；给了就按数字校验。
@@ -364,6 +373,15 @@ class ComfyUIJobManager:
                 "node_id": node_id, "field_name": field_name,
                 "value": "" if value is None else str(value),
             })
+        # Validate exactly what the runner will submit, including untouched defaults.
+        # Keep the original JSON text in the snapshot; parsing is validation only.
+        effective = apply_overrides(entry.get("prompt") or {}, out, randomize_seeds=False)
+        try:
+            for _node_id, inputs, field_name in container_inputs(effective):
+                validate_selected(inputs[field_name], Path(self.app.paths.data_dir),
+                                  max_bytes=MEDIA_INPUT_MAX_BYTES)
+        except ValueError as exc:
+            raise ComfyUITaskError(str(exc)) from None
         return out
 
     def _validate_media_inputs(self, entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:

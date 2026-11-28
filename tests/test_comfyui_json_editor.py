@@ -47,7 +47,9 @@ const context=vm.createContext({
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8')
   .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(source+`\nglobalThis.p={jsonEditorRowsAreLora,jsonEditorEntryMarkup,
-  jsonEditorEntryWheel,jsonEditorEntryChanged,attachCandidateCombo,comfyJsonEditor};`,context);
+  jsonEditorEntryWheel,jsonEditorEntryChanged,attachCandidateCombo,comfyJsonEditor,
+  isImageContainerSlot,imageContainerRows,imageContainerReferences,imageContainerValueError,
+  imageContainerManagedPath,checkImageContainerFiles,imageContainerMissingPaths,defaultVisibleKeys};`,context);
 const p=context.p;
 const loraRows=[{name:'moss/x.safetensors',strength_model:1,strength_clip:1,sha256:'abc',enabled:true}];
 const presetRows=[{text:'女孩',weight:1.6,enabled:true}];
@@ -135,6 +137,46 @@ assert.equal(p.comfyJsonEditor.rows[0].sha256,'abc','输入过程中不能抹哈
 p.jsonEditorEntryChanged({target,type:'change'});
 assert.equal(p.comfyJsonEditor.rows[0].sha256,'');
 assert.equal(hash.value,'');
+""")
+
+    def test_image_container_exact_match_and_ordered_references(self):
+        self.run_case(r"""
+const slot={class_type:'ImageContainer',field_name:'selected_json'};
+assert.equal(p.isImageContainerSlot(slot),true);
+assert.ok(p.defaultVisibleKeys([{...slot,node_id:'42',field_type:'text'}]).has('42|selected_json'),
+  '导入节点后默认显示选图入口，不要求手动启用参数');
+assert.equal(p.isImageContainerSlot({...slot,field_name:'pool_json'}),false);
+assert.equal(p.isImageContainerSlot({...slot,class_type:'OtherNode'}),false);
+const old={name:'old.png',subfolder:'images',type:'input',custom:{keep:true}};
+const rows=[old,{name:'new.png',_cat_chat_media:{path:'managed-new.png'}}];
+assert.equal(JSON.stringify(p.imageContainerRows(JSON.stringify(rows))),JSON.stringify(rows));
+assert.equal(p.imageContainerReferences(slot,JSON.stringify(rows))[0].path,'managed-new.png');
+assert.equal(p.imageContainerReferences({...slot,field_name:'pool_json'},JSON.stringify(rows)).length,0);
+assert.equal(p.imageContainerRows('').length,0);
+assert.equal(p.imageContainerValueError([]),'','清空选择必须合法');
+assert.equal(p.imageContainerValueError(rows),'');
+assert.equal(p.imageContainerValueError([{name:'x',type:''}]),'','兼容插件的空来源默认值');
+assert.notEqual(p.imageContainerValueError(Array(7).fill(old)),'');
+assert.notEqual(p.imageContainerValueError([{name:''}]),'');
+p.imageContainerMissingPaths.add('managed-new.png');
+assert.match(p.imageContainerValueError(rows),/失效/);
+assert.equal(p.imageContainerValueError([old]),'','移除失效图后可继续使用其他图片');
+""")
+
+    def test_image_container_preview_only_accepts_managed_paths(self):
+        self.run_case(r"""
+context.state.bootstrap={data_location:{data_dir:'/sandbox/data'}};
+assert.equal(p.imageContainerManagedPath('/sandbox/data/uploads/new.png'),true);
+for (const path of ['https://example.invalid/tracker.png','/sandbox/secret.png',
+  '/sandbox/data/uploads/../../secret.png','/sandbox/data/uploads-other/new.png']) {
+  assert.equal(p.imageContainerManagedPath(path),false,path);
+}
+context.api=async()=>{throw new Error('外部地址不得发送到文件接口');};
+(async()=>{
+ const missing=await p.checkImageContainerFiles([{path:'https://example.invalid/tracker.png'}]);
+ assert.equal(missing.length,1);
+ assert.ok(p.imageContainerMissingPaths.has(missing[0]));
+})().catch((error)=>{console.error(error);process.exitCode=1;});
 """)
 
     def test_dialog_wiring_present(self):

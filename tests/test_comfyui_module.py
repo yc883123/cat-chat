@@ -28,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from naiba.comfyui import client as comfyui_client  # noqa: E402
 from naiba.comfyui import PARAMS_SCHEMA_VERSION  # noqa: E402
+from naiba.comfyui.image_container import (  # noqa: E402
+    parse_selected, prepare_selected, validate_selected,
+)
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError  # noqa: E402
 from naiba.comfyui.params import apply_overrides, enrich_slots, media_kind_of_field, scan_params  # noqa: E402
 from naiba.comfyui.runner import ComfyUIRunner  # noqa: E402
@@ -113,6 +116,117 @@ class _FakeResponse:
 
     def __exit__(self, *args):
         return False
+
+
+def _container_prompt(value="[]", class_type="ImageContainer"):
+    return {"40": {"class_type": class_type, "inputs": {
+        "selected_json": value, "pool_json": "not interpreted", "unselected_output": "none",
+    }}}
+
+
+def _container_pick(path):
+    return {"name": "old.png", "subfolder": "old", "type": "output",
+            "future": {"keep": True}, "_cat_chat_media": {
+                "path": str(path), "name": path.name, "thumb_path": "",
+            }}
+
+
+class ImageContainerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        (self.dir / "uploads").mkdir()
+        self.image = self.dir / "uploads" / "pick.png"
+        self.image.write_bytes(b"PNG")
+
+    def test_empty_one_six_and_over_limit(self):
+        native = {"name": "remote.png", "subfolder": "refs", "type": "temp"}
+        for count in (0, 1, 6):
+            text = json.dumps([native] * count)
+            self.assertEqual(validate_selected(text, self.dir), [native] * count)
+            upload = mock.Mock()
+            self.assertEqual(prepare_selected(text, self.dir, upload), text)
+            upload.assert_not_called()
+        upload = mock.Mock()
+        self.assertEqual(prepare_selected("", self.dir, upload), "")
+        upload.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "最多选择 6"):
+            validate_selected(json.dumps([native] * 7), self.dir)
+
+    def test_invalid_structure_native_paths_and_types(self):
+        values = (None, [], "null", "{}", "[", "[1]", '[{}]',
+                  '[{"name": 1}]', '[{"name":"../secret.png"}]',
+                  '[{"name":"/secret.png"}]', '[{"name":"x.png","type":"other"}]',
+                  json.dumps([{"name": "x.png", "subfolder": "../escape"}]),
+                  json.dumps([{"name": "x.png", "subfolder": "C:\\secret"}]),
+                  json.dumps([{"name": "x.png", "_cat_chat_media": None}]),
+                  json.dumps([{"name": "x.png", "_cat_chat_media": {"path": 123}}]))
+        for value in values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_selected(value)
+
+    def test_managed_path_type_size_and_metadata_validation(self):
+        outside = self.dir / "outside.png"
+        outside.write_bytes(b"PNG")
+        wrong_kind = self.dir / "uploads" / "audio.wav"
+        wrong_kind.write_bytes(b"WAV")
+        for path in (outside, self.dir / "uploads" / "missing.png", wrong_kind,
+                     self.dir / "uploads" / ".." / "outside.png"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                validate_selected(json.dumps([_container_pick(path)]), self.dir)
+        with self.assertRaisesRegex(ValueError, "超过单文件上限"):
+            validate_selected(json.dumps([_container_pick(self.image)]), self.dir, max_bytes=2)
+        pick = _container_pick(self.image)
+        pick["_cat_chat_media"]["thumb_path"] = []
+        with self.assertRaises(ValueError):
+            validate_selected(json.dumps([pick]), self.dir)
+
+    def test_native_empty_type_defaults_and_nested_relative_names_preserved(self):
+        entries = [
+            {"name": "nested/remote.png"},
+            {"name": "remote.png", "type": "", "subfolder": "refs/deep"},
+            {"name": "remote.png", "type": None, "subfolder": None},
+            {"name": "nested\\remote.png", "subfolder": "refs\\deep", "type": "output"},
+        ]
+        text = json.dumps(entries, indent=2)
+        upload = mock.Mock()
+        self.assertEqual(validate_selected(text, self.dir), entries)
+        self.assertEqual(prepare_selected(text, self.dir, upload), text)
+        upload.assert_not_called()
+        for invalid in (False, 0, [], {}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_selected(json.dumps([{"name": "a.png", "type": invalid}]))
+
+    def test_thumbnail_must_be_managed_existing_image_and_within_size_limit(self):
+        outside = self.dir / "outside.png"
+        outside.write_bytes(b"PNG")
+        audio = self.dir / "uploads" / "sound.wav"
+        audio.write_bytes(b"WAV")
+        thumbnail = self.dir / "uploads" / "thumb.webp"
+        thumbnail.write_bytes(b"THUMBNAIL")
+        pick = _container_pick(self.image)
+        for bad in (str(outside), str(audio), str(self.dir / "uploads" / "missing.webp"),
+                    str(self.dir / "uploads" / ".." / "outside.png"),
+                    "https://example.test/tracker.png", "http://127.0.0.1:8188/private.png"):
+            pick["_cat_chat_media"]["thumb_path"] = bad
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "缩略图"):
+                validate_selected(json.dumps([pick]), self.dir)
+        pick["_cat_chat_media"]["thumb_path"] = str(thumbnail)
+        text = json.dumps([pick])
+        self.assertEqual(validate_selected(text, self.dir), [pick])
+        with self.assertRaisesRegex(ValueError, "缩略图超过单文件上限"):
+            validate_selected(text, self.dir, max_bytes=4)
+        for empty in ("",):
+            pick["_cat_chat_media"]["thumb_path"] = empty
+            self.assertEqual(validate_selected(json.dumps([pick]), self.dir), [pick])
+
+    def test_native_references_never_read_host_paths(self):
+        text = '[ {"name":"not-on-this-host.png","future":[1],"type":"output"} ]'
+        with mock.patch("naiba.comfyui.image_container.is_uploads_path") as check, \
+             mock.patch.object(Path, "stat", side_effect=AssertionError("host read")):
+            self.assertEqual(validate_selected(text, self.dir), json.loads(text))
+        check.assert_not_called()
 
 
 class CheckpointNamesTests(unittest.TestCase):
@@ -997,6 +1111,111 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("HTTP 500 boom", done["error"])
         self.assertEqual(fake.submitted, [], "上传失败不提交该段，也不回退旧文件名")
 
+    def test_image_container_upload_copy_cache_native_mix_and_resubmit(self):
+        uploads = self.dir / "uploads"
+        uploads.mkdir()
+        image = uploads / "pick.png"
+        image.write_bytes(b"PNG")
+        native = {"name": "remote.png", "subfolder": "refs", "type": "temp", "opaque": 42}
+        default = json.dumps([native])
+        selected = json.dumps([native, _container_pick(image), _container_pick(image)])
+        prompt = _container_prompt(default)
+        prompt["30"] = {"class_type": "LoadImage", "inputs": {"image": "base.png"}}
+        prompt["41"] = {"class_type": "OtherJsonNode", "inputs": {"selected_json": selected}}
+        overrides = [{"node_id": "40", "field_name": "selected_json", "value": selected}]
+        media = [{"node_id": "30", "field_name": "image", "path": str(image.resolve()),
+                  "media": "image"}]
+        task = self._make_task(shots=2, prompt=prompt, overrides=overrides, media_inputs=media)
+        fake = _FakeComfy(drop_after_submit=True)
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            with mock.patch.object(comfyui_client, "upload_media",
+                                   return_value=("nested/refs/renamed.png", "")) as upload:
+                self.runner._run_task(task["id"])
+        done = self.store.get_task(task["id"])
+        self.assertEqual(done["status"], "failed")  # Deliberately lost twice.
+        self.assertEqual(len(fake.submitted), 2, "initial submission and wait resubmission")
+        upload.assert_called_once_with(self.runner._base_url(), str(image.resolve()))
+        for record in fake.submitted:
+            graph = record["workflow"]
+            entries = json.loads(graph["40"]["inputs"]["selected_json"])
+            self.assertEqual(entries[0], native)
+            for entry in entries[1:]:
+                self.assertEqual(entry, {"name": "renamed.png", "subfolder": "nested/refs",
+                                         "type": "input", "future": {"keep": True}})
+            self.assertEqual(graph["30"]["inputs"]["image"], "nested/refs/renamed.png")
+            self.assertEqual(graph["41"]["inputs"]["selected_json"], selected)
+            self.assertEqual(graph["40"]["inputs"]["pool_json"], "not interpreted")
+        self.assertEqual(prompt["40"]["inputs"]["selected_json"], default)
+        self.assertEqual(overrides[0]["value"], selected)
+        self.assertEqual(done["input"]["prompt"], prompt)
+        self.assertEqual(done["input"]["overrides"], overrides)
+
+    def test_image_container_multiple_shots_reuse_upload(self):
+        image = self.dir / "uploads" / "pick.png"
+        image.parent.mkdir()
+        image.write_bytes(b"PNG")
+        fake = _FakeComfy()
+        task = self._make_task(shots=2, prompt=_container_prompt(
+            json.dumps([_container_pick(image)])))
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            with mock.patch.object(comfyui_client, "upload_media", return_value=("new.png", "")) as upload:
+                self.runner._run_task(task["id"])
+        self.assertEqual(self.store.get_task(task["id"])["status"], "completed")
+        self.assertEqual(len(fake.submitted), 2)
+        self.assertEqual(upload.call_count, 1)
+
+    def test_image_container_upload_failure_does_not_submit_old_image(self):
+        image = self.dir / "uploads" / "pick.png"
+        image.parent.mkdir()
+        image.write_bytes(b"PNG")
+        for result in (("", "HTTP 500 boom"), ("../escape.png", "")):
+            task = self._make_task(shots=1, prompt=_container_prompt(
+                json.dumps([_container_pick(image)])))
+            fake = _FakeComfy()
+            with fake.patch() as patcher:
+                fake.wire(patcher)
+                with mock.patch.object(comfyui_client, "upload_media", return_value=result):
+                    self.runner._run_task(task["id"])
+            done = self.store.get_task(task["id"])
+            self.assertEqual(done["status"], "failed")
+            self.assertIn("节点 40 · selected_json", done["error"])
+            self.assertEqual(fake.submitted, [])
+
+    def test_image_container_cancellation_between_uploads(self):
+        images = [self.dir / "uploads" / name for name in ("one.png", "two.png")]
+        images[0].parent.mkdir()
+        for image in images:
+            image.write_bytes(b"PNG")
+        prompt = _container_prompt(json.dumps([_container_pick(image) for image in images]))
+        task = self._make_task(shots=1, prompt=prompt)
+        fake = _FakeComfy()
+
+        def upload_first(_base, _path):
+            self.runner._cancel_events[task["id"]].set()
+            return "new.png", ""
+
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            with mock.patch.object(comfyui_client, "upload_media", side_effect=upload_first) as upload:
+                self.runner._run_task(task["id"])
+        self.assertEqual(upload.call_count, 1)
+        self.assertEqual(fake.submitted, [])
+        self.assertEqual(self.store.get_task(task["id"])["status"], "cancelled")
+
+    def test_image_container_empty_selection_no_upload(self):
+        for value in ("", "[]"):
+            fake = _FakeComfy()
+            task = self._make_task(shots=1, prompt=_container_prompt(value))
+            with fake.patch() as patcher:
+                fake.wire(patcher)
+                with mock.patch.object(comfyui_client, "upload_media") as upload:
+                    self.runner._run_task(task["id"])
+            upload.assert_not_called()
+            self.assertEqual(self.store.get_task(task["id"])["status"], "completed")
+            self.assertEqual(fake.submitted[0]["workflow"]["40"]["inputs"]["selected_json"], value)
+
     def test_history_error_status_fails_task(self):
         fake = _FakeComfy(history_status="error")
         task = self._make_task(shots=1)
@@ -1242,6 +1461,98 @@ class JobsTests(unittest.TestCase):
         target = uploads / name
         target.write_bytes(data)
         return target
+
+    def test_image_container_validates_effective_defaults_and_overrides(self):
+        image = self._make_upload("pick.png")
+        text = json.dumps([_container_pick(image)], indent=2)
+        prompt = _container_prompt(text)
+        entry = self.store.save_workflow({
+            "id": self.store.new_workflow_id(), "name": "container",
+            "prompt": prompt, "params": scan_params(prompt),
+        })
+        task = self.jobs.submit({"workflow_id": entry["id"]})
+        self.assertEqual(task["input"]["prompt"], prompt)
+        self.assertEqual(task["input"]["overrides"], [])
+        override = {"node_id": "40", "field_name": "selected_json", "value": "[]"}
+        # Explicit clearing replaces the invalid frozen default before validation.
+        prompt["40"]["inputs"]["selected_json"] = "invalid json"
+        entry = {**entry, "prompt": prompt}
+        self.assertEqual(self.jobs._validate_overrides(entry, [override]), [override])
+        self.assertEqual(self.jobs.submit({"overrides": [override]}, entry_override=entry)
+                         ["input"]["overrides"], [override])
+        for raw in (None, [], [{**override, "value": "{}"}], [{**override, "value": []}]):
+            with self.subTest(raw=raw), self.assertRaises(ComfyUITaskError):
+                self.jobs._validate_overrides(entry, raw)
+        # Effective last override wins, matching apply_overrides exactly.
+        self.assertEqual(self.jobs._validate_overrides(entry, [
+            {**override, "value": "invalid"}, override,
+        ])[-1], override)
+        with mock.patch("naiba.comfyui.jobs.MEDIA_INPUT_MAX_BYTES", 2):
+            with self.assertRaises(ComfyUITaskError):
+                self.jobs._validate_overrides(entry, [{**override, "value": text}])
+
+    def test_image_container_rerun_revalidates_snapshot_and_edited_selection(self):
+        image = self._make_upload("rerun.png")
+        text = json.dumps([_container_pick(image)])
+        prompt = _container_prompt()
+        entry = self.store.save_workflow({
+            "id": self.store.new_workflow_id(), "name": "container rerun",
+            "prompt": prompt, "params": scan_params(prompt),
+        })
+        original = {"node_id": "40", "field_name": "selected_json", "value": text}
+        task = self._completed_task(entry, overrides=[original])
+        image.unlink()
+        # Missing historical media remains editable; reading is not execution.
+        snapshot = self.jobs.rerun_snapshot(task["id"])
+        self.assertEqual(snapshot["overrides"], [original])
+        before = len(self.store.list_tasks(limit=100))
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(task["id"], {"overrides": snapshot["overrides"]})
+        self.assertEqual(len(self.store.list_tasks(limit=100)), before)
+        replacement = self._make_upload("replacement.png")
+        edited = {**original, "value": json.dumps([_container_pick(replacement)])}
+        created = self.jobs.submit_rerun(task["id"], {"overrides": [edited]})
+        self.assertEqual(created["input"]["overrides"], [edited])
+        self.assertEqual(self.store.get_task(task["id"])["input"]["overrides"], [original])
+        # The default snapshot path gets the same validation even without overrides.
+        prompt = _container_prompt(json.dumps([_container_pick(replacement)]))
+        default_entry = self.store.save_workflow({
+            "id": self.store.new_workflow_id(), "name": "default rerun",
+            "prompt": prompt, "params": scan_params(prompt),
+        })
+        default_task = self._completed_task(default_entry)
+        replacement.unlink()
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(default_task["id"], {})
+        cleared = self.jobs.submit_rerun(default_task["id"], {
+            "overrides": [{**original, "value": "[]"}],
+        })
+        self.assertEqual(cleared["input"]["overrides"][0]["value"], "[]")
+
+    def test_image_container_thumbnail_checked_in_default_and_override(self):
+        image = self._make_upload("thumb-main.png")
+        outside = self.dir / "outside.png"
+        outside.write_bytes(b"PNG")
+        pick = _container_pick(image)
+        pick["_cat_chat_media"]["thumb_path"] = str(outside)
+        value = json.dumps([pick])
+        prompt = _container_prompt(value)
+        entry = {"prompt": prompt, "params": scan_params(prompt)}
+        with self.assertRaisesRegex(ComfyUITaskError, "缩略图"):
+            self.jobs._validate_overrides(entry, None)
+        entry["prompt"] = _container_prompt()
+        with self.assertRaisesRegex(ComfyUITaskError, "缩略图"):
+            self.jobs._validate_overrides(entry, [{
+                "node_id": "40", "field_name": "selected_json", "value": value,
+            }])
+
+    def test_image_container_does_not_validate_other_json_or_pool(self):
+        for kind in ("ImageContainer", "OtherJsonNode"):
+            prompt = _container_prompt("[]" if kind == "ImageContainer" else "not json", kind)
+            entry = {"prompt": prompt, "params": scan_params(prompt)}
+            self.assertEqual(self.jobs._validate_overrides(entry, None), [])
+            override = {"node_id": "40", "field_name": "pool_json", "value": "still not json"}
+            self.assertEqual(self.jobs._validate_overrides(entry, [override]), [override])
 
     def test_media_inputs_accepted_into_snapshot(self):
         entry = self._media_entry()
@@ -2122,6 +2433,36 @@ class ServiceApiTests(unittest.TestCase):
         for status in ("completed", "cancelled"):
             self.service.store.update_task(task["id"], status=status)
             self.assertEqual(self.service.referenced_upload_paths(), set(), status)
+
+    def test_image_container_references_protect_snapshot_and_override(self):
+        from naiba.core.paths import normalized_path_key
+
+        uploads = self.dir / "uploads"
+        uploads.mkdir(exist_ok=True)
+        paths = [uploads / name for name in ("default.png", "override.png", "thumb.webp")]
+        for path in paths:
+            path.write_bytes(b"PNG")
+        default = _container_pick(paths[0])
+        override = _container_pick(paths[1])
+        override["_cat_chat_media"]["thumb_path"] = str(paths[2])
+        prompt = _container_prompt(json.dumps([default]))
+        prompt["41"] = {"class_type": "OtherJsonNode", "inputs": {
+            "selected_json": json.dumps([_container_pick(uploads / "ignored.png")]),
+        }}
+        task = self.service.store.create_task({
+            "prompt": prompt, "shots": 1, "overrides": [
+                {"node_id": "40", "field_name": "selected_json", "value": json.dumps([override])},
+                {"node_id": "40", "field_name": "pool_json", "value": json.dumps([
+                    _container_pick(uploads / "pool-ignored.png")])},
+            ],
+        })
+        expected = {normalized_path_key(path) for path in paths}
+        for status in ("queued", "running", "failed", "interrupted"):
+            self.service.store.update_task(task["id"], status=status)
+            self.assertEqual(self.service.referenced_upload_paths(), expected)
+        for status in ("completed", "cancelled"):
+            self.service.store.update_task(task["id"], status=status)
+            self.assertEqual(self.service.referenced_upload_paths(), set())
 
     def test_outputs_folder_button_wired_in_ui(self):
         root = Path(__file__).resolve().parents[1]

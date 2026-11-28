@@ -6240,6 +6240,18 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .cbm-json-param-cell { flex-direction: column; align-items: flex-start; gap: 4px; padding: 6px 8px; min-width: 140px; }
 .cbm-json-param-cell .cbm-json-helper { flex-basis: auto; }
 
+/* ImageContainer 复用媒体格，列表只补数量、清空和输出排序。 */
+.comfyui-image-container { min-width: 0; width: 100%; }
+.comfyui-image-container-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.comfyui-image-container-toolbar > span { margin-right: auto; font-size: 12px; color: var(--muted); }
+.comfyui-image-container .comfyui-media-tiles { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+.comfyui-image-container-hint { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.comfyui-image-container-order { display: flex; justify-content: center; gap: 8px; padding: 2px; }
+.comfyui-image-container-order button { background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 10px; cursor: pointer; }
+.comfyui-image-container-order button:disabled { opacity: .35; cursor: default; }
+[data-image-container-source] { min-width: 200px; }
+@media (max-width: 760px) { [data-image-container-source] { min-width: 0; width: 100%; } }
+
 /* JSON 参数共享弹窗：桌面双栏，手机单列滚动 */
 .comfyui-json-dialog { max-width: 920px; width: min(94vw, 920px); max-height: min(88vh, 760px); overflow: hidden; }
 .comfyui-json-dialog .comfyui-import-form { min-height: 0; }

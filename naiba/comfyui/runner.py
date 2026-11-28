@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import threading
 import traceback
+from pathlib import Path
 from typing import Any
 
 from naiba.comfyui import MAX_FILES_PER_SHOT, MAX_RESUBMIT, MAX_SHOTS, SHOT_TIMEOUT_SECONDS
 from naiba.comfyui import client
 from naiba.comfyui import stepmeter
+from naiba.comfyui.image_container import container_inputs, prepare_selected
 from naiba.comfyui.params import apply_overrides, media_kind_of_field
 from naiba.comfyui.schema import NodeSchemaProvider, input_is_optional
 from naiba.comfyui.store import now_ms
@@ -213,7 +215,9 @@ class ComfyUIRunner:
                 if not prompt_id or not self._resume_submitted(base, prompt_id):
                     workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
                     self._remove_unselected_optional_media(workflow, media_inputs, base, media_skip)
-                    media_error = self._apply_media(base, workflow, media_inputs, media_upload_cache)
+                    media_error = self._apply_media(
+                        base, workflow, media_inputs, media_upload_cache, cancel_event,
+                    )
                     if cancel_event.is_set():
                         break
                     if media_error:
@@ -437,6 +441,7 @@ class ComfyUIRunner:
         workflow: dict[str, Any],
         media_inputs: list[dict[str, Any]],
         upload_cache: dict[str, str],
+        cancel_event: threading.Event | None = None,
     ) -> str:
         """把媒体输入上传 ComfyUI 并回填进工作流副本（计划 §5.2）。
 
@@ -446,6 +451,20 @@ class ComfyUIRunner:
         - 上传失败返回带媒体类型/节点/字段的错误说明，调用方按该段失败处理；
           **不回退旧文件名继续提交**。
         """
+        def upload(path: str) -> str:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ValueError("用户取消")
+            reference = upload_cache.get(path)
+            if reference is None:
+                reference, reason = client.upload_media(base, path)
+                if not reference:
+                    raise ValueError(reason or "未收到上传文件名")
+                upload_cache[path] = reference
+            # A cancellation during the request must prevent the next upload/submit.
+            if cancel_event is not None and cancel_event.is_set():
+                raise ValueError("用户取消")
+            return reference
+
         for item in media_inputs:
             node_id = str(item.get("node_id") or "")
             field_name = str(item.get("field_name") or "")
@@ -456,13 +475,17 @@ class ComfyUIRunner:
                     or field_name not in node["inputs"]:
                 return (f"{media} 输入（节点 {node_id} · {field_name}）"
                         "不在这份工作流里，无法回填")
-            reference = upload_cache.get(path)
-            if reference is None:
-                reference, reason = client.upload_media(base, path)
-                if not reference:
-                    return (f"{media} 上传失败（节点 {node_id} · {field_name}）：{reason}")
-                upload_cache[path] = reference
-            node["inputs"][field_name] = reference
+            try:
+                node["inputs"][field_name] = upload(path)
+            except ValueError as exc:
+                return f"{media} 上传失败（节点 {node_id} · {field_name}）：{exc}"
+        for node_id, inputs, field_name in container_inputs(workflow):
+            try:
+                inputs[field_name] = prepare_selected(
+                    inputs[field_name], Path(self.app.paths.data_dir), upload,
+                )
+            except ValueError as exc:
+                return f"image 上传失败（节点 {node_id} · {field_name}）：{exc}"
         return ""
 
     @staticmethod
@@ -600,7 +623,7 @@ class ComfyUIRunner:
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
                 self._remove_unselected_optional_media(workflow, media_inputs, base, media_skip)
                 media_error = self._apply_media(
-                    base, workflow, media_inputs, media_upload_cache,
+                    base, workflow, media_inputs, media_upload_cache, cancel_event,
                 )
                 if cancel_event.is_set():
                     return False, [], "用户取消"

@@ -85,6 +85,76 @@ class ComfyUIBatchesTests(unittest.TestCase):
         return {"title": "验收批次", "unload_after": False,
                 "schemes": [dict(self.scheme)], **overrides}
 
+    def test_image_container_preflight_checks_defaults_and_scheme_overrides(self):
+        from naiba.comfyui.params import scan_params
+
+        self.prompt["40"] = {"class_type": "ImageContainer", "inputs": {
+            "selected_json": '[{"name":"old.png","type":"input"}]',
+        }}
+        self.store.save_workflow({"id": "cw-batch", "name": "批量测试流",
+                                  "prompt": self.prompt, "params": scan_params(self.prompt)})
+        # Fixed container selection is shared by every item, preserved byte for byte.
+        selected = '[ {"name":"remote.png","subfolder":"refs","type":"output","extra":1} ]'
+        override = {"node_id": "40", "field_name": "selected_json", "value": selected}
+        batch = self.batches.create(self.body(schemes=[dict(self.scheme, overrides=[override])]))
+        task = self.store.get_task(batch["items"][0]["task_id"])
+        self.assertIn(override, task["input"]["overrides"])
+        count = len(self.store.list_tasks(limit=100))
+        for bad in ("{}", json.dumps([{"name": "too-many.png"}] * 7),
+                    '[{"name":"x.png","_cat_chat_media":{"path":"../outside.png"}}]'):
+            with self.subTest(bad=bad), self.assertRaises(ComfyUIBatchError):
+                self.batches.create(self.body(schemes=[dict(
+                    self.scheme, overrides=[{**override, "value": bad}],
+                )]))
+            self.assertEqual(len(self.store.list_tasks(limit=100)), count)
+        self.prompt["40"]["inputs"]["selected_json"] = "invalid default"
+        self.store.save_workflow({"id": "cw-batch", "name": "批量测试流",
+                                  "prompt": self.prompt, "params": scan_params(self.prompt)})
+        with self.assertRaises(ComfyUIBatchError):
+            self.batches.create(self.body())
+        self.assertEqual(len(self.store.list_tasks(limit=100)), count)
+        # Empty selection can explicitly replace the invalid default in a batch.
+        cleared = self.batches.create(self.body(schemes=[dict(
+            self.scheme, overrides=[{**override, "value": "[]"}],
+        )]))
+        self.assertEqual(len(cleared["items"]), 1)
+
+    def test_image_container_extra_override_uses_final_value_validation(self):
+        from naiba.comfyui.params import scan_params
+
+        self.prompt["40"] = {"class_type": "ImageContainer", "inputs": {"selected_json": "[]"}}
+        self.store.save_workflow({"id": "cw-batch", "name": "批量测试流",
+                                  "prompt": self.prompt, "params": scan_params(self.prompt)})
+        mapping = dict(self.mapping, extra_points=[{
+            "id": "container", "kind": "spare",
+            "slot": {"node_id": "40", "field_name": "selected_json"},
+        }])
+        fixed = {"node_id": "40", "field_name": "selected_json", "value": "invalid fixed"}
+        final = '[{"name":"nested/remote.png","type":"","subfolder":null}]'
+        scheme = dict(self.scheme, overrides=[fixed], mapping=mapping, items=[
+            self._item("合法覆盖", extras={"40|selected_json": final}),
+        ])
+        batch = self.batches.create(self.body(schemes=[scheme]))
+        task = self.store.get_task(batch["items"][0]["task_id"])
+        values = [row["value"] for row in task["input"]["overrides"]
+                  if row["node_id"] == "40" and row["field_name"] == "selected_json"]
+        self.assertEqual(values, ["invalid fixed", final])
+        count = len(self.store.list_tasks(limit=100))
+        managed = self.root / "uploads" / "main.png"
+        managed.parent.mkdir()
+        managed.write_bytes(b"PNG")
+        bad_thumb = json.dumps([{"name": "main.png", "_cat_chat_media": {
+            "path": str(managed), "name": managed.name,
+            "thumb_path": "https://example.test/track.png",
+        }}])
+        for bad in ("{}", json.dumps([{"name": "a.png"}] * 7), bad_thumb):
+            bad_scheme = dict(scheme, overrides=[{**fixed, "value": "[]"}], items=[
+                self._item("非法覆盖", extras={"40|selected_json": bad}),
+            ])
+            with self.subTest(bad=bad), self.assertRaises(ComfyUIBatchError):
+                self.batches.create(self.body(schemes=[bad_scheme]))
+            self.assertEqual(len(self.store.list_tasks(limit=100)), count)
+
     def test_items_merge_overrides_and_unmapped_values_are_dropped(self):
         batch = self.batches.create(self.body(schemes=[dict(self.scheme, items=[
             self._item("条目一", prompt="场景A", duration_seconds=8, resolution="848x480"),

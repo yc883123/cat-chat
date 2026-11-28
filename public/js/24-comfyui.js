@@ -1174,7 +1174,7 @@ const MEDIA_ACCEPT = {
 function slotRank(slot) {
   if (ROLE_ORDER[slot.role] !== undefined) return ROLE_ORDER[slot.role];
   // 媒体输入排在无角色参数之前（计划 §4：媒体参数放在用户容易找到的位置）。
-  if (MEDIA_FIELD_TYPES.has(slot.field_type)) return 4;
+  if (MEDIA_FIELD_TYPES.has(slot.field_type) || isImageContainerSlot(slot)) return 4;
   return 5;
 }
 
@@ -1229,7 +1229,7 @@ function defaultVisibleKeys(slots) {
   const set = new Set();
   for (const slot of slots) {
     if (DEFAULT_VISIBLE_ROLES.has(slot.role) || slot.field_type === "seed"
-        || MEDIA_FIELD_TYPES.has(slot.field_type) || slot.field_name === "steps") {
+        || MEDIA_FIELD_TYPES.has(slot.field_type) || isImageContainerSlot(slot) || slot.field_name === "steps") {
       set.add(slotKey(slot));
     }
   }
@@ -1992,6 +1992,192 @@ function refreshJsonParamHolder(holder) {
 
 // 共享弹窗状态：每次打开都从明确来源重新读，不把临时编辑写进别处。
 const comfyJsonEditor = { target: null, kind: "array", rows: [], objectValue: null };
+const imageContainerMissingPaths = new Set();
+const imageContainerCheckedPaths = new Set();
+
+function isImageContainerSlot(slot) {
+  return slot?.class_type === "ImageContainer" && slot?.field_name === "selected_json";
+}
+
+function jsonEditorIsImages() {
+  return isImageContainerSlot(comfyJsonEditor.target?.slot);
+}
+
+function imageContainerRows(value) {
+  if (!String(value ?? "").trim()) return [];
+  try { const rows = JSON.parse(value); return Array.isArray(rows) ? rows : []; }
+  catch (_) { return []; }
+}
+
+function imageContainerReferences(slot, value) {
+  if (!isImageContainerSlot(slot)) return [];
+  return imageContainerRows(value).flatMap((row) => {
+    const ref = row?._cat_chat_media;
+    return ref && typeof ref.path === "string" && ref.path ? [ref] : [];
+  });
+}
+
+function imageContainerValueError(value) {
+  if (!Array.isArray(value)) return "图片选择必须是数组；不选图片请使用 []";
+  if (value.length > 6) return "最多选择 6 张图片";
+  for (const row of value) {
+    if (!row || typeof row !== "object" || Array.isArray(row)
+        || typeof row.name !== "string" || !row.name.trim()) return "每张图片都需要文件名";
+    if (row.type != null && !["", "input", "temp", "output"].includes(row.type)) return "图片来源须为 input、temp 或 output";
+    if (row._cat_chat_media !== undefined) {
+      const ref = row._cat_chat_media;
+      if (!ref || typeof ref.path !== "string" || !ref.path) return "上传图片的引用不完整，请重新选择";
+      if (imageContainerMissingPaths.has(ref.path)) return "有图片已失效，请替换或移除后再应用";
+    }
+  }
+  return "";
+}
+
+function imageContainerManagedPath(path) {
+  const root = String(state.bootstrap?.data_location?.data_dir || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  const value = String(path || "").replaceAll("\\", "/");
+  if (!root || value.split("/").some((part) => part === ".." || part === ".")) return false;
+  const normalize = (text) => /^[a-z]:\//i.test(root) ? text.toLowerCase() : text;
+  return normalize(value).startsWith(normalize(`${root}/uploads/`));
+}
+
+async function checkImageContainerFiles(refs) {
+  const paths = [...new Set(refs.map((ref) => ref.path))];
+  if (!paths.length) return [];
+  const invalid = paths.filter((path) => !imageContainerManagedPath(path));
+  const managed = paths.filter(imageContainerManagedPath);
+  const payload = managed.length ? await api("/api/uploads/check", { method: "POST", body: { paths: managed } }) : { missing: [] };
+  if (!Array.isArray(payload?.missing)) throw new Error("素材检查未返回有效结果");
+  const missing = new Set([...payload.missing, ...invalid]);
+  for (const path of paths) {
+    if (missing.has(path)) { imageContainerMissingPaths.add(path); imageContainerCheckedPaths.delete(path); }
+    else { imageContainerMissingPaths.delete(path); imageContainerCheckedPaths.add(path); }
+  }
+  return [...missing];
+}
+
+function renderImageContainer(target) {
+  const holder = document.createElement("div");
+  holder.className = "comfyui-image-container";
+  holder.dataset.imageContainer = "1";
+  const slot = target.slot;
+  const initial = (target.kind === "single" ? initialFieldValue(slot, target.key) : jsonTargetValue(target)) || "[]";
+  if (target.kind === "single") {
+    const hidden = document.createElement("input");
+    hidden.type = "hidden";
+    hidden.dataset.comfyuiSlot = target.key;
+    hidden.value = initial;
+    holder.append(hidden);
+  }
+  const controls = document.createElement("div");
+  holder.append(controls);
+  let busy = false;
+  const active = () => holder.isConnected && (target.kind === "single"
+    ? comfyui.detail?.params?.includes(slot)
+    : batchSchemeOf(target.scheme.id) === target.scheme && (!target.item || target.scheme.items.includes(target.item)));
+  const read = () => imageContainerRows(target.kind === "single" ? holder.querySelector("input")?.value : jsonTargetValue(target));
+  const write = (rows) => {
+    const text = JSON.stringify(rows);
+    jsonTargetAssign(target, text);
+    if (target.kind === "single") {
+      holder.querySelector("input").value = text;
+      updateDraftHint();
+    } else scheduleBatchDraftSave();
+    draw();
+  };
+  const upload = async (files, index) => {
+    if (busy || comfyui.uploadingSlot || !files.length) return;
+    const bad = files.find((file) => !fileMatchesMediaKind(file, "image"));
+    if (bad) { toastMediaKindMismatch(bad, "image"); return; }
+    const rows = read();
+    const adding = index === rows.length;
+    if (files.length > (adding ? 6 - rows.length : 1)) { toast(adding ? "最多选择 6 张图片" : "替换时请选择一张图片"); return; }
+    busy = true;
+    const lock = `image-container:${slotKeyOf(slot)}`;
+    comfyui.uploadingSlot = lock;
+    draw();
+    try {
+      for (const file of files) {
+        const picked = await uploadManagedMedia(file);
+        if (!active()) return;
+        const row = { ...(adding ? {} : rows[index]), name: picked.name, subfolder: "", type: "input", _cat_chat_media: picked };
+        if (adding) rows.push(row); else rows[index] = row;
+        imageContainerMissingPaths.delete(picked.path);
+        imageContainerCheckedPaths.add(picked.path);
+        write(rows);
+      }
+    } catch (error) { if (active()) toast(`上传失败：${error.message}`); }
+    finally {
+      if (comfyui.uploadingSlot === lock) comfyui.uploadingSlot = "";
+      busy = false;
+      if (active()) draw();
+    }
+  };
+  const draw = () => {
+    controls.replaceChildren();
+    const rows = read();
+    const toolbar = document.createElement("div");
+    toolbar.className = "comfyui-image-container-toolbar";
+    const count = document.createElement("span");
+    count.textContent = rows.length ? `${rows.length}/6 张图片` : "未选择图片";
+    const clear = document.createElement("button");
+    clear.type = "button"; clear.className = "control-button tiny"; clear.textContent = "清空选择";
+    clear.disabled = busy || !rows.length;
+    clear.addEventListener("click", () => write([]));
+    const raw = document.createElement("button");
+    raw.type = "button"; raw.className = "control-button tiny"; raw.textContent = "编辑原始 JSON";
+    raw.disabled = busy;
+    raw.addEventListener("click", () => openJsonParamEditor(target));
+    toolbar.append(count, clear, raw);
+    const tiles = document.createElement("div");
+    tiles.className = "comfyui-media-tiles";
+    for (let index = 0; index < Math.min(6, rows.length + 1); index += 1) {
+      const row = rows[index];
+      const ref = row?._cat_chat_media;
+      const checked = Boolean(ref && imageContainerCheckedPaths.has(ref.path));
+      const problem = Boolean(ref && imageContainerMissingPaths.has(ref.path));
+      const pseudo = { ...slot, default: row ? row.name : "", media_optional: true,
+        label: `图片输出 ${index + 1}`, connections: [{ target_field: `图片 ${index + 1}` }] };
+      const tile = renderMediaTile(pseudo, `${slotKeyOf(slot)}:${index}`, "image", {
+        picked: ref ? { path: checked ? ref.path : "", thumb_path: checked ? ref.path : "", name: ref.name || row.name, available: checked } : null, problem, busy,
+        multiple: !row, upload: (files) => upload(files, index),
+        clear: () => { const next = read(); next.splice(index, 1); write(next); },
+      });
+      if (row && rows.length > 1) {
+        const reorder = document.createElement("div");
+        reorder.className = "comfyui-image-container-order";
+        for (const [delta, text] of [[-1, "↑"], [1, "↓"]]) {
+          const button = document.createElement("button");
+          button.type = "button"; button.textContent = text;
+          button.setAttribute("aria-label", `图片 ${index + 1} ${delta < 0 ? "上移" : "下移"}`);
+          button.disabled = busy || index + delta < 0 || index + delta >= rows.length;
+          button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const next = read(); [next[index], next[index + delta]] = [next[index + delta], next[index]]; write(next);
+          });
+          reorder.append(button);
+        }
+        tile.append(reorder);
+      }
+      tiles.append(tile);
+    }
+    const hint = document.createElement("small");
+    hint.className = "comfyui-image-container-hint";
+    hint.textContent = "点选或拖入图片；清除后不选图片，后续输出会前移。图片选择不包含在另存配置中。";
+    controls.append(toolbar, tiles, hint);
+  };
+  draw();
+  void checkImageContainerFiles(imageContainerReferences(slot, initial)).then(() => { if (active()) draw(); }).catch(() => {});
+  return holder;
+}
+
+async function uploadManagedMedia(file) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const payload = await api("/api/comfyui/media", { method: "POST", body: form });
+  if (!payload.path) throw new Error("上传没有返回文件引用");
+  return { path: String(payload.path), name: String(payload.name || file.name), thumb_path: String(payload.thumb_path || "") };
+}
 
 function jsonSlotFromKey(detail, key) {
   const [nodeId, ...rest] = String(key || "").split("|");
@@ -2054,8 +2240,9 @@ function jsonTargetWrite(target, text) {
     const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(target.key)}"]`);
     if (input) {
       input.value = text;
-      const holder = input.closest(".comfyui-json-param");
-      if (holder) refreshJsonParamHolder(holder);
+      const holder = input.closest(".comfyui-json-param, .comfyui-image-container");
+      if (isImageContainerSlot(target.slot) && holder) holder.replaceWith(renderImageContainer(target));
+      else if (holder) refreshJsonParamHolder(holder);
     }
     updateDraftHint();
     return;
@@ -2067,7 +2254,8 @@ function openJsonParamEditor(target) {
   const dialog = $("#comfyuiJsonDialog");
   if (!dialog) return;
   const value = jsonTargetValue(target);
-  const info = jsonParamInfo(value);
+  const images = isImageContainerSlot(target.slot);
+  const info = jsonParamInfo(images && !value.trim() ? "[]" : value);
   if (!info) {
     toast("这个参数现在不是合法 JSON，先用普通输入框改回来");
     return;
@@ -2083,7 +2271,7 @@ function openJsonParamEditor(target) {
   $("#comfyuiJsonListTitle").textContent = info.kind === "object" ? "字段列表" : (preset ? "预设列表" : "列表");
   const add = $("#comfyuiJsonAdd");
   if (add) {
-    add.hidden = info.kind !== "array";
+    add.hidden = images || info.kind !== "array";
     add.textContent = "＋ 添加项目";
   }
   const error = $("#comfyuiJsonError");
@@ -2158,6 +2346,10 @@ function jsonEditorEntryMarkup(row, index, rows) {
 function renderJsonEditorEntries() {
   const host = $("#comfyuiJsonEntries");
   if (!host) return;
+  if (jsonEditorIsImages()) {
+    host.innerHTML = '<p class="comfyui-json-empty">在右侧编辑图片引用。选图、替换和清除可在媒体格中操作；不选图片请填 []。</p>';
+    return;
+  }
   if (comfyJsonEditor.kind === "object") {
     host.innerHTML = '<p class="comfyui-json-empty">这是 JSON 对象：在右侧原始 JSON 里增删字段，应用后按原结构写回。</p>';
     return;
@@ -2192,6 +2384,10 @@ function jsonEditorValidateRaw() {
   const apply = $("#comfyuiJsonApply");
   if (!raw || !box) return null;
   const checked = jsonEditableValue(raw.value);
+  if (checked.ok && jsonEditorIsImages()) {
+    const message = imageContainerValueError(checked.value);
+    if (message) { checked.ok = false; checked.message = message; }
+  }
   if (checked.ok) {
     box.className = "comfyui-json-validation";
     box.textContent = Array.isArray(checked.value) ? "JSON 格式正确，对象数组结构可识别" : "JSON 格式正确，对象结构可识别";
@@ -2301,7 +2497,7 @@ function renderSlot(slot) {
   const isMedia = slot.control === "media" || MEDIA_FIELD_TYPES.has(type);
   const key = `${slot.node_id}|${slot.field_name}`;
   // JSON 行里有按钮：不能再包在 <label> 里（交互内容不能嵌 label）。
-  const jsonRow = !isMedia && type === "text" && Boolean(jsonParamInfo(savedDraft(key) ?? slot.default ?? ""));
+  const jsonRow = !isMedia && type === "text" && (isImageContainerSlot(slot) || Boolean(jsonParamInfo(savedDraft(key) ?? slot.default ?? "")));
   const wrap = document.createElement(isMedia || jsonRow ? "div" : "label");
   wrap.className = "comfyui-param" + (isMedia ? " comfyui-param-media" : "");
   const title = document.createElement("span");
@@ -2313,6 +2509,10 @@ function renderSlot(slot) {
   wrap.dataset.paramKey = key;
   if (isMedia) {
     wrap.append(renderMediaPicker(slot, key));
+    return wrap;
+  }
+  if (isImageContainerSlot(slot)) {
+    wrap.append(renderImageContainer({ kind: "single", key, slot }));
     return wrap;
   }
   if (type === "bool") {
@@ -2542,11 +2742,11 @@ function toggleMediaSkip(key) {
   rerenderParamForm();
 }
 
-function renderMediaTile(slot, key, kind) {
-  const picked = comfyui.mediaSelection.get(key) || null;
-  const skipped = comfyui.mediaSkipped.has(key);
+function renderMediaTile(slot, key, kind, binding = null) {
+  const picked = binding ? binding.picked : comfyui.mediaSelection.get(key) || null;
+  const skipped = binding ? false : comfyui.mediaSkipped.has(key);
   // 再次生成的原任务文件可能已被清理：失效态必须显式提示，不能退回工作流原值。
-  const problem = Boolean(comfyui.rerun?.unavailable?.has(key)) || picked?.available === false;
+  const problem = binding ? binding.problem : Boolean(comfyui.rerun?.unavailable?.has(key)) || picked?.available === false;
   const status = mediaSlotStatus(slot, picked, skipped, problem);
   // 「沿用原文件」的槽按实块渲染（占位图标 + 原文件名），不是虚线空块（§3.4）。
   const keepOriginal = !skipped && !picked && !problem && status.cls === "keep";
@@ -2564,12 +2764,17 @@ function renderMediaTile(slot, key, kind) {
   file.type = "file";
   file.accept = MEDIA_ACCEPT[kind] || "";
   file.hidden = true;
-  file.addEventListener("change", () => void onMediaPicked(slot, key, file));
+  file.addEventListener("change", () => {
+    if (!binding) { void onMediaPicked(slot, key, file); return; }
+    const selected = [...(file.files || [])];
+    file.value = "";
+    if (selected.length) void binding.upload(selected);
+  });
 
   const badge = document.createElement("span");
   badge.className = "t-status" + (status.cls ? ` ${status.cls}` : "");
   badge.textContent = status.badge;
-  const skip = mediaSkipButton(key, skipped);
+  const skip = binding ? document.createElement("span") : mediaSkipButton(key, skipped);
 
   if (picked || keepOriginal || skipped || problem) {
     const thumb = document.createElement("div");
@@ -2587,16 +2792,16 @@ function renderMediaTile(slot, key, kind) {
       file.click();
     });
     actions.append(replace);
-    if (picked && picked.available !== false) {
+    if ((picked && picked.available !== false) || (binding && (keepOriginal || problem || picked))) {
       const clear = document.createElement("button");
       clear.type = "button";
       clear.textContent = "✕";
-      clear.title = status.clearTitle;
+      clear.title = binding ? "清除选择，这个输出不选图片" : status.clearTitle;
       clear.setAttribute("aria-label", clear.title);
       clear.addEventListener("click", (event) => {
         event.stopPropagation();
-        comfyui.mediaSelection.delete(key);
-        rerenderParamForm();
+        if (binding) binding.clear();
+        else { comfyui.mediaSelection.delete(key); rerenderParamForm(); }
       });
       actions.append(clear);
     }
@@ -2699,7 +2904,21 @@ function renderMediaTile(slot, key, kind) {
     });
   }
   tile.append(file);
-  wireMediaTileDrop(tile, key, kind);
+  if (binding) {
+    file.multiple = binding.multiple === true;
+    file.disabled = binding.busy === true;
+    tile.querySelectorAll("button").forEach((button) => { button.disabled = binding.busy === true; });
+    tile.addEventListener("dragover", (event) => {
+      if (!dragHasFiles(event)) return;
+      event.preventDefault(); event.stopPropagation(); tile.classList.add("dragover");
+    });
+    tile.addEventListener("dragleave", () => tile.classList.remove("dragover"));
+    tile.addEventListener("drop", (event) => {
+      event.preventDefault(); event.stopPropagation(); tile.classList.remove("dragover");
+      if (dropHasDirectory(event)) { toast("媒体输入不支持拖文件夹"); return; }
+      void binding.upload([...(event.dataTransfer?.files || [])]);
+    });
+  } else wireMediaTileDrop(tile, key, kind);
   return tile;
 }
 
@@ -2959,15 +3178,9 @@ async function uploadMediaFiles(items) {
   let okCount = 0;
   try {
     for (const { key, file } of items) {
-      const form = new FormData();
-      form.append("file", file, file.name);
       try {
-        const payload = await api("/api/comfyui/media", { method: "POST", body: form });
-        comfyui.mediaSelection.set(key, {
-          path: String(payload.path || ""),
-          name: String(payload.name || file.name),
-          thumb_path: String(payload.thumb_path || ""),
-        });
+        const payload = await uploadManagedMedia(file);
+        comfyui.mediaSelection.set(key, payload);
         // 选文件即表达「这次用这个文件」：取消该槽此前的 ⊘ 跳过，并解除失效标记。
         comfyui.mediaSkipped.delete(key);
         comfyui.rerun?.unavailable?.delete(key);
@@ -3448,6 +3661,7 @@ async function openRerunSnapshot(taskId) {
 async function submitTask() {
   if (comfyui.submitting || comfyui.detailLoading || !comfyui.detail
       || comfyui.detail.id !== comfyui.selectedId) return;
+  if (comfyui.uploadingSlot) { toast("图片正在上传，请稍候再生成"); return; }
   const request = comfyui.detailRequest;
   const rerunId = String(comfyui.rerun?.sourceTaskId || "");
   if (rerunId) {
@@ -3468,8 +3682,16 @@ async function submitTask() {
   const button = $("#comfyuiSubmit");
   if (button) button.disabled = true;
   try {
+    const overrides = collectOverrides();
+    const refs = (comfyui.detail.params || []).flatMap((slot) => {
+      const override = overrides.find((row) => slotKeyOf(row) === slotKeyOf(slot));
+      return imageContainerReferences(slot, override?.value ?? slot.default);
+    });
+    const missing = await checkImageContainerFiles(refs);
+    if (request !== comfyui.detailRequest) return;
+    if (missing.length) { rerenderParamForm(); throw new Error("有图片已失效，请替换或清除后再生成"); }
     const body = {
-      overrides: collectOverrides(),
+      overrides,
       media_inputs: collectMediaInputs(),
       media_skip: collectMediaSkips(),
       shots,
@@ -4715,6 +4937,24 @@ function clearBatchDraft() {
   renderBatch();
 }
 
+function imageContainerSchemeReferences(scheme) {
+  const refs = [];
+  for (const slot of scheme.detail?.params || []) {
+    if (!isImageContainerSlot(slot)) continue;
+    const key = slotKeyOf(slot);
+    const base = scheme.fixed?.[key] ?? slot.default;
+    const source = ["prompt", "duration", "resolution"].find((name) => slotKeyOf(scheme.mapping?.[`${name}_slot`] || {}) === key);
+    const extra = activeExtraPoints(scheme).some((point) => slotKeyOf(point.slot) === key);
+    const items = scheme.items?.length ? scheme.items : [{}];
+    for (const item of items) {
+      const override = source ? item[source] : extra ? item.extras?.[key] : undefined;
+      const value = String(override ?? "").trim() || base;
+      refs.push(...imageContainerReferences(slot, value));
+    }
+  }
+  return refs;
+}
+
 async function checkBatchRestoredFiles(scheme) {
   const detail = scheme.detail;
   const stored = scheme.items.flatMap((item) => Object.entries(item.files || {}).map(([key, file]) => ({ item, key, file })));
@@ -4728,16 +4968,22 @@ async function checkBatchRestoredFiles(scheme) {
     else { delete row.item.files[row.key]; removed += 1; }
   }
   if (removed) scheme.restoreNotice = `有 ${removed} 个草稿素材不在当前上传目录，请重新选择；剧本和提示词已保留。`;
-  if (!records.length) { scheme.filesUnverified = false; batch.recheckMissing(); renderBatch(); return; }
+  const imageRefs = imageContainerSchemeReferences(scheme);
+  if (!records.length && !imageRefs.length) { scheme.filesUnverified = false; batch.recheckMissing(); renderBatch(); return; }
   const current = () => batchOwnsDraftScheme(scheme) && scheme.detail === detail;
   scheme.filesUnverified = true;
   scheme.checkingFiles = true;
   renderBatch();
   try {
-    const payload = await api("/api/uploads/check", { method: "POST", body: { paths: [...new Set(records.map(({ file }) => file.path))] } });
+    const paths = [...new Set([...records.map(({ file }) => file.path), ...imageRefs.map((ref) => ref.path)])];
+    const payload = await api("/api/uploads/check", { method: "POST", body: { paths } });
     if (!current()) return;
     if (!Array.isArray(payload?.missing)) throw new Error("素材检查未返回有效结果");
     const missing = new Set(payload.missing);
+    for (const ref of imageRefs) {
+      if (missing.has(ref.path)) imageContainerMissingPaths.add(ref.path);
+      else imageContainerMissingPaths.delete(ref.path);
+    }
     for (const { item, key, file } of records) {
       if (missing.has(file.path) && item.files[key] === file) { delete item.files[key]; removed += 1; }
     }
@@ -5257,6 +5503,7 @@ function renderBatch() {
     return;
   }
   // 转换条是条件渲染的：重绘后补模板与模型下拉（选中值存在 batch.convert 里）。
+  mountBatchImageContainers(host);
   batchRenderConvertProviders();
   void batchLoadConvertModels();
   void batchLoadCustomTemplates();
@@ -5622,7 +5869,9 @@ function batchFixedMarkup(scheme) {
     const key = slotKeyOf(slot);
     const value = scheme.fixed[key] ?? batchSlotSavedValue(detail, slot);
     let control = "";
-    if (slot.field_type === "text" && jsonParamInfo(value)) {
+    if (isImageContainerSlot(slot)) {
+      control = batchJsonParamMarkup(scheme, -1, "fixed", value, key);
+    } else if (slot.field_type === "text" && jsonParamInfo(value)) {
       control = `<div class="cbm-json-param">
         <span class="cbm-json-summary">${escapeText(jsonParamSummary(value))}</span>
         <button type="button" class="cbm-btn tiny" data-batch-json-edit data-json-source="fixed" data-scheme="${scheme.id}" data-fixed-key="${escapeText(key)}" data-json-key="${escapeText(key)}">${escapeText(jsonParamButtonText(value))}</button>
@@ -5781,11 +6030,29 @@ function batchConnectionsMarkup(scheme) {
 
 // 批量单元格里的 JSON 摘要：紧凑按钮打开同一个弹窗，不把整串 JSON 摊进表格。
 function batchJsonParamMarkup(scheme, itemIndex, source, value, key = "", pointId = "") {
+  const slot = source === "extras" || source === "fixed"
+    ? jsonSlotFromKey(scheme.detail, key) : batchSlotByAddress(scheme.detail, scheme.mapping?.[`${source}_slot`]);
+  if (isImageContainerSlot(slot)) return `<div data-image-container-source="${source}" data-scheme="${escapeText(scheme.id)}" data-item="${itemIndex}" data-json-key="${escapeText(key)}"></div>`;
   return `<div class="cbm-json-param cbm-json-param-cell">
     <span class="cbm-json-summary">${escapeText(jsonParamSummary(value))}</span>
     <button type="button" class="cbm-btn tiny" data-batch-json-edit data-json-source="${source}" data-scheme="${scheme.id}" data-item="${itemIndex}" data-json-key="${escapeText(key)}" data-extra="${escapeText(String(pointId || ""))}">${escapeText(jsonParamButtonText(value))}</button>
     <span class="cbm-json-helper">${escapeText(jsonParamHelper(value))}</span>
   </div>`;
+}
+
+function mountBatchImageContainers(host) {
+  host.querySelectorAll("[data-image-container-source]").forEach((placeholder) => {
+    const scheme = batchSchemeOf(placeholder.dataset.scheme);
+    if (!scheme) return;
+    const source = placeholder.dataset.imageContainerSource;
+    const key = placeholder.dataset.jsonKey;
+    const slot = source === "fixed" || source === "extras"
+      ? jsonSlotFromKey(scheme.detail, key) : batchSlotByAddress(scheme.detail, scheme.mapping?.[`${source}_slot`]);
+    if (!isImageContainerSlot(slot)) return;
+    const target = source === "fixed" ? { kind: "fixed", scheme, key, slot }
+      : { kind: "item", scheme, item: scheme.items[Number(placeholder.dataset.item)], source, key, slot };
+    placeholder.append(renderImageContainer(target));
+  });
 }
 
 function openBatchJsonEditor(button) {
@@ -5820,7 +6087,7 @@ function batchExtraCellMarkup(scheme, item, itemIndex, point) {
   const value = itemExtraValue(item, key);
   const effective = value || batchSlotSavedValue(detail, slot);
   const bind = `<td data-label="${escapeAttribute(EXTRA_KIND_LABELS[point.kind] || "备用槽")}" data-batch-extra="${escapeText(String(point.id || ""))}">`;
-  if (slot?.field_type === "text" && jsonParamInfo(effective)) {
+  if (isImageContainerSlot(slot) || (slot?.field_type === "text" && jsonParamInfo(effective))) {
     return `${bind}${batchJsonParamMarkup(scheme, itemIndex, "extras", effective, key, point.id)}</td>`;
   }
   if (point.kind === "prompt") {
@@ -6467,10 +6734,8 @@ async function batchUploadTiles(pairs) {
         && scheme.detail === detail && port?.checked && slotKeyOf(port) === address
         && (scheme.mapping?.media_ports || []).includes(port);
       if (!current()) continue;
-      const form = new FormData();
-      form.append("file", file, file.name);
       try {
-        const payload = await api("/api/comfyui/media", { method: "POST", body: form });
+        const payload = await uploadManagedMedia(file);
         const ordinal = (scheme.mapping?.media_ports || []).filter((entry) => entry.checked).indexOf(port);
         if (current() && ordinal >= 0) {
           item.files[String(ordinal)] = {
@@ -6799,8 +7064,14 @@ batch.recheckMissing = function recheckMissing() {
 };
 
 async function submitBatch() {
+  if (comfyui.uploadingSlot) { toast("图片正在上传，请稍候再生成"); return; }
   batch.recheckMissing();
   const draft = ensureBatchDraft();
+  try {
+    const missing = await checkImageContainerFiles(draft.schemes.flatMap(imageContainerSchemeReferences));
+    if (batch.draft !== draft) return;
+    if (missing.length) { renderBatch(); toast("有图片已失效，请替换或清除后再生成"); return; }
+  } catch (error) { toast(`图片核验失败：${error.message}`); return; }
   if (draft.schemes.some((scheme) => scheme.restoreDraft || scheme.restoreNeedsReview || scheme.filesUnverified || scheme.checkingFiles)) {
     toast("先完成草稿工作流和素材核对，再开始批量生成");
     return;

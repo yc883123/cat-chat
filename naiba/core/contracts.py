@@ -184,6 +184,26 @@ JOB_SUBMISSION_PENDING_KEY = "submission_pending"
 JOB_SUBMISSION_GUARD_KEY = "submission_guard_version"
 # ComfyUI checkpoints persist each segment's submitting/unknown state.
 COMFYUI_SUBMISSIONS_KEY = "submissions"
+# ImageContainer selected_json remains an ordered JSON string (at most six
+# native {name, subfolder, type} entries). Newly picked files carry this host-only
+# upload reference until the runner uploads them and removes the private key.
+COMFYUI_IMAGE_CONTAINER_MEDIA_KEY = "_cat_chat_media"
+COMFYUI_IMAGE_CONTAINER_MAX_IMAGES = 6
+
+
+class ComfyUIImageContainerMedia(TypedDict):
+    path: str
+    name: str
+    thumb_path: str
+
+
+class ComfyUIImageContainerEntry(TypedDict):
+    name: str  # Relative ComfyUI filename, including nested relative names.
+    subfolder: NotRequired[str | None]  # Missing/null means no subfolder.
+    type: NotRequired[Literal["", "input", "output", "temp"] | None]  # Missing/empty/null means input.
+    _cat_chat_media: NotRequired[ComfyUIImageContainerMedia]
+
+
 # Editing metadata only: this does not change a ComfyUI graph or execution.
 COMFYUI_BATCH_CONVERT_KEY = "convert"
 # Managed ComfyUI output directory fields (legacy tasks omit version or < 2 and

@@ -27,6 +27,7 @@ from naiba.comfyui import client
 from naiba.comfyui.batches import (ComfyUIBatchError, ComfyUIBatchManager,
                                    ComfyUIBatchVersionError)
 from naiba.comfyui.dream import DreamConfigError, DreamService, check_bindings_against_params
+from naiba.comfyui.image_container import referenced_media_paths
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError
 from naiba.comfyui.history import history_record_missing, parse_history_ids
 from naiba.comfyui.params import enrich_slots, scan_params
@@ -108,6 +109,13 @@ class ComfyUIService:
                 if not isinstance(ref, dict):
                     continue
                 key = normalized_path_key(Path(str(ref.get("path") or "")).expanduser())
+                if key:
+                    keys.add(key)
+            prompt = input_data.get("prompt")
+            for path in referenced_media_paths(
+                prompt if isinstance(prompt, dict) else {}, input_data.get("overrides"),
+            ):
+                key = normalized_path_key(Path(path).expanduser())
                 if key:
                     keys.add(key)
         return keys

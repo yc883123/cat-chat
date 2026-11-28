@@ -8,8 +8,8 @@
   纵深防御（去掉 ``..`` / 盘符 / 绝对前缀），并断言最终路径仍在任务输出目录内；
 - ``mode=write`` 整份覆盖，``mode=append`` 按调用顺序追加——最终内容就是各段
   原样拼接，不偷偷插入分隔符（分隔符由模型自己写进段里）；
-- 模型没调用工具时，runner 用标注结果回填一份（状态 ``auto``），保证每张成功图片
-  都有同名 TXT；模型写过（状态 ``written``）就保留模型分段输出的内容。
+- 模型没成功调用工具时，runner 仅在严格合法的结构化标注经过原模式过滤后回填
+  （状态 ``auto``）；自由文本与非法字段不能充当交付正文。工具写过就保留原文。
 
 本模块不碰数据库与事件流：落库/事件通过构造函数注入的回调完成，便于单测。
 """
@@ -38,7 +38,8 @@ _TOOL_DESCRIPTION = (
     "把当前这张图片的打标文本写入与图片同名的 .txt 文件（保存在本批次输出目录）。"
     "内容一次写完用 mode=write；内容多、想分段写时先用 write 写第一段，再用 append 追加后续段。"
     "每张图只能写自己的文件：item 填当前图片的文件名或相对路径（不要填别的图）。"
-    "写入只影响 TXT 文件，打标结果仍按原有格式正常输出。"
+    "content 只写可直接用于训练的 caption 正文，不要加入写入成功或任务完成等操作回执。"
+    "成功写入的正文就是最终交付内容；标签等元数据仍按原规则返回，无需重复正文。"
 )
 
 _TOOL_PARAMETERS: dict[str, Any] = {
@@ -149,6 +150,10 @@ def _error(message: str) -> tuple[bool, str]:
     return False, json.dumps({"ok": False, "error": message}, ensure_ascii=False)
 
 
+class TxtOutputError(OSError):
+    """TXT 存储失败：调用方必须停止本次处理，不能按模型瞬时错误重试。"""
+
+
 class TxtToolContext:
     """单张图片的 TXT 工具执行上下文（两次重试之间用 ``reset()`` 清干净）。"""
 
@@ -231,12 +236,10 @@ class TxtToolContext:
 
     def candidate_text(self) -> str:
         """返回最终交付的完整原文，供监督逐字审核；不截断。"""
-        return self._content if self.staged else self._read_text()
+        return self._content
 
     def publish(self) -> None:
-        """监督批准后原子发布同一份已审文本；落盘失败必须向调用方显式报错。"""
-        if not self.staged:
-            return
+        """发布完整原文；最终 TXT 状态由 runner 与标注同事务提交。"""
         if not self.wrote or self.state == TXT_STATE_FAILED:
             raise ValueError("TXT 未完整生成，不能发布")
         path = self.target_path()
@@ -246,8 +249,7 @@ class TxtToolContext:
             self._ensure_parent(path)
             self._write_text(path, self._content)
         self._published = True
-        self._record(self.state, self.total_chars)
-        self._event(f"{self._label()}：监督通过，已发布 TXT")
+
 
     def write_fallback(self, text: str) -> bool:
         """模型没调用工具时，用最终标注文本回填一份（状态 ``auto``）。"""
@@ -264,9 +266,10 @@ class TxtToolContext:
             else:
                 self._ensure_parent(path)
                 self._write_text(path, content)
-        except OSError:
+        except OSError as exc:
             self._record(TXT_STATE_FAILED, 0)
-            return False
+            raise TxtOutputError(f"TXT 写入失败：{exc}") from exc
+        self._content = content
         self.total_chars = len(content)
         self.wrote = True
         self._record(TXT_STATE_AUTO, self.total_chars)
@@ -322,8 +325,10 @@ class TxtToolContext:
                     self.total_chars += len(content)
         except OSError as exc:
             self._record(TXT_STATE_FAILED, self.total_chars)
-            return _error(f"写入失败：{exc}")
+            raise TxtOutputError(f"TXT 写入失败：{exc}") from exc
 
+        if not self.staged:
+            self._content = content if mode == "write" else self._content + content
         self.wrote = True
         self.segments += 1
         self._record(TXT_STATE_WRITTEN, self.total_chars)
@@ -356,7 +361,8 @@ class TxtToolContext:
         if path is None or not path.is_file():
             return ""
         try:
-            return path.read_text(encoding="utf-8", errors="replace")
+            with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+                return handle.read()
         except OSError:
             return ""
 

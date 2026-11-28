@@ -65,10 +65,11 @@ const labeler = {
   imageResultLimit: 100,
   lastImageSignature: "",
   annotations: [],
-  // 打标中逐图文本增量：记录当前任务最近一次看到的「已完成标注数」，轮询发现变多
-  // 就补拉一次标注内容（2026-11-09 远端反馈：打标中按图只出状态不出文本）。
+  // 打标中逐图文本增量：只在成功取回当前任务正文后推进完成数检查点。
   resultsSyncTaskId: "",
+  resultsSyncDetailToken: -1,
   resultsSyncDoneCount: 0,
+  resultsSyncPending: null,
   // 按标签视图命中集：与按图共用 annotations 会互相覆盖，单独存一份。
   tagMatches: [],
   tags: [],
@@ -1375,12 +1376,30 @@ function syncAnnotationsIfDue(taskId, items) {
   taskId = String(taskId || "");
   if (!taskId || String(labeler.taskId || "") !== taskId) return;
   const done = annotatedCount(items);
+  const detailToken = labeler.detailToken;
   const due = labeler.resultsSyncTaskId !== taskId
+    || labeler.resultsSyncDetailToken !== detailToken
     || done > Number(labeler.resultsSyncDoneCount || 0);
-  labeler.resultsSyncTaskId = taskId;
-  labeler.resultsSyncDoneCount = done;
-  if (!due || !done) return;
-  void loadTaskResults(taskId);
+  const pending = labeler.resultsSyncPending;
+  if (!due || !done || (pending?.taskId === taskId && pending.detailToken === detailToken)) return;
+  const request = { taskId, detailToken };
+  labeler.resultsSyncPending = request;
+  void (async () => {
+    try {
+      const loaded = await loadTaskResults(taskId);
+      if (!loaded || labeler.taskId !== taskId || labeler.detailToken !== detailToken
+          || labeler.resultsSyncPending !== request) return;
+      labeler.resultsSyncTaskId = taskId;
+      labeler.resultsSyncDetailToken = detailToken;
+      labeler.resultsSyncDoneCount = done;
+    } catch (error) {
+      if (labeler.taskId === taskId && labeler.detailToken === detailToken) {
+        setHint(`标注结果读取失败：${error.message}`, true);
+      }
+    } finally {
+      if (labeler.resultsSyncPending === request) labeler.resultsSyncPending = null;
+    }
+  })();
 }
 
 // 切回页面 / 窗口重新可见时立即按服务端校准一次：手机后台、窗口被遮挡期间浏览器会
@@ -1876,6 +1895,7 @@ async function loadNextTaskItems() {
 }
 
 async function loadTaskResults(taskId) {
+  if (!taskId || taskId !== labeler.taskId) return false;
   const token = ++labeler.resultsToken;
   const detailToken = labeler.detailToken;
   const isCurrent = () => labeler.taskId === taskId && token === labeler.resultsToken
@@ -1891,7 +1911,9 @@ async function loadTaskResults(taskId) {
     return false;
   }
   if (labeler.resultTab === "tags") await loadTags();
+  if (!isCurrent()) return false;
   if (labeler.resultTab === "sentences") await loadSentences();
+  if (!isCurrent()) return false;
   renderResultBody();
   return true;
 }
@@ -1946,11 +1968,35 @@ function annotationForItem(item) {
   return labeler.annotations.find((row) => Number(row.id) === id) || null;
 }
 
+// 空字符串也是已采纳正文；未保存交付正文的记录才回退描述。
+function annotationBody(row) {
+  return typeof row?.approved_txt === "string" ? row.approved_txt : (row?.description || "");
+}
+
+function appendAnnotationBody(card, row, legacyTxt = false) {
+  if (!row) return;
+  const approved = typeof row.approved_txt === "string";
+  if (!approved && legacyTxt) {
+    const note = document.createElement("p");
+    note.className = "labeler-anno-meta";
+    note.textContent = "历史标注：未保存交付正文，显示当时的标签和描述。";
+    card.append(note);
+  }
+  const text = annotationBody(row);
+  if (approved || text) {
+    const desc = document.createElement("p");
+    desc.className = "labeler-anno-desc";
+    desc.textContent = text;
+    desc.title = approved ? "交付正文" : "历史描述";
+    card.append(desc);
+  }
+}
+
 function matchesSearch(row) {
   const needle = labeler.search.trim().toLowerCase();
   if (!needle) return true;
   const haystack = [
-    row.name, row.relative_path, row.description, ...(row.tags || []),
+    row.name, row.relative_path, annotationBody(row), ...(row.tags || []),
   ].join(" ").toLowerCase();
   return haystack.includes(needle);
 }
@@ -1991,6 +2037,7 @@ function renderImageResults(body) {
       : null;
     const probe = {
       name: item.name, relative_path: item.relative_path,
+      approved_txt: annotation?.approved_txt,
       description: annotation?.description || "", tags: annotation?.tags || [],
     };
     if (labeler.search && !matchesSearch(probe)) continue;
@@ -2016,7 +2063,8 @@ function renderImageResults(body) {
     Number(labeler.task?.items_total || 0),
     visible.map(({ item, annotation }) => [
       item.item_id, item.state, item.annotation_id || 0, item.error || "",
-      (annotation?.tags || []).length, annotation?.description || "",
+      annotation?.tags || [], annotation?.confidences || [],
+      typeof annotation?.approved_txt === "string", annotationBody(annotation),
       item.txt_state || "", item.txt_path || "", Number(item.txt_chars || 0),
       item.worker_slot || 0, item.worker_model_name || "",
       item.supervisor_decision || "", Number(item.supervisor_attempts || 0),
@@ -2056,12 +2104,7 @@ function renderImageResults(body) {
     if (annotation?.tags?.length) {
       card.append(tagList(annotation.tags, annotation.confidences));
     }
-    if (annotation?.description) {
-      const desc = document.createElement("p");
-      desc.className = "labeler-anno-desc";
-      desc.textContent = annotation.description;
-      card.append(desc);
-    }
+    appendAnnotationBody(card, annotation, Boolean(item.txt_state));
     if (item.txt_state) card.append(txtStatusRow(item));
     if (item.error) {
       const err = document.createElement("p");
@@ -2308,12 +2351,8 @@ function renderTagCloud(body) {
       name.textContent = row.relative_path || row.name;
       head.append(name);
       card.append(head, tagList(row.tags || [], row.confidences || []));
-      if (row.description) {
-        const desc = document.createElement("p");
-        desc.className = "labeler-anno-desc";
-        desc.textContent = row.description;
-        card.append(desc);
-      }
+      appendAnnotationBody(card, row, Boolean(labeler.task?.input?.config?.write_txt
+        && row.source_task_id === labeler.taskId));
       return card;
     }));
   }

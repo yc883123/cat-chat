@@ -124,6 +124,27 @@ class SupervisionIntegrityTests(unittest.TestCase):
         cached = self.db.list_items(repeated["id"])[0]
         self.assertEqual((self.store.outputs_dir(repeated["id"]) / cached["txt_path"]).read_text(encoding="utf-8"), "dog\nairplane")
 
+    def test_tool_caption_is_reviewed_even_with_empty_or_receipt_final(self):
+        for final in ("", "TXT 写入完成。"):
+            with self.subTest(final=final):
+                seen = []
+                def label(text, options, index):
+                    if index == 0:
+                        return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                            "item": _image_name(text), "mode": "write", "content": "clean caption\r\nnext"}})
+                    return final
+                def supervise(text, options, index):
+                    seen.append(_txt_body(text))
+                    return '{"decision":"approve"}'
+                models = _ConcurrencyModels(label=label, supervisor=supervise)
+                _, task = self._submit(_StubApp(self.data_dir, models=models), self._images(1),
+                                       workers=_workers(1), write_txt=True, system_prompt="rules:" + final)
+                self.assertEqual(self._wait(task["id"])["status"], "done")
+                self.assertEqual(seen, ["clean caption\r\nnext"])
+                annotation = self.db.annotations(task_id=task["id"])[0]
+                self.assertEqual(annotation[LABELER_APPROVED_TXT_KEY], "clean caption\r\nnext")
+                self.assertEqual(annotation["description"], "")
+
     def test_cancelled_supervision_never_exposes_provisional_txt(self):
         entered = threading.Event()
 

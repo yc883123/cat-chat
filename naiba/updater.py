@@ -11,10 +11,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from naiba import net as net_io
+from naiba.core.contracts import UPDATE_INSTALL_RESULT_FILE, UpdateInstallResult
 
 
 # ============================ 更新协议常量（永不可改） ============================
@@ -115,32 +117,149 @@ class UpdateCancelled(Exception):
 # 两条 Start-Process 都必须以**普通窗口**启动：本程序是窗口化打包（spec `console=False`，
 # 本来就没有控制台窗口要藏），而 `-WindowStyle Hidden` 会让新进程的主窗口一起处于隐藏状态
 # ——更新后进程活着、托盘图标在，但界面不出来，用户只能到托盘双击「打开窗口」才能唤回。
-APPLY_UPDATE_SCRIPT = """param([int]$ProcessId, [string]$Downloaded, [string]$Target, [string]$Backup)
+APPLY_UPDATE_SCRIPT = """param(
+  [int]$ProcessId, [string]$ProcessStartedAt,
+  [int]$ParentProcessId, [string]$ParentStartedAt,
+  [string]$Downloaded, [string]$Target, [string]$Backup,
+  [string]$Sha256, [string]$Result, [string]$AttemptId, [string]$TargetCommit,
+  [int]$GraceSeconds = 30, [int]$InstallSeconds = 60, [switch]$NoFailurePopup
+)
 $ErrorActionPreference = 'Stop'
-Wait-Process -Id $ProcessId -Timeout 30 -ErrorAction SilentlyContinue
-$deadline = (Get-Date).AddSeconds(60)
-$installed = $false
-while ((Get-Date) -lt $deadline) {
+$stage = 'processes'
+$staged = "$Target.update-$AttemptId.tmp"
+$processes = @()
+function Write-Result([string]$status, [string]$detail) {
+  $payload = @{
+    attempt_id = $AttemptId; status = $status; target_commit = $TargetCommit
+    stage = $stage; error = $detail
+    finished_at = [long]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+  } | ConvertTo-Json -Compress
+  $temporary = "$Result.$AttemptId.tmp"
+  [IO.File]::WriteAllText($temporary, $payload, (New-Object Text.UTF8Encoding($false)))
+  Move-Item -LiteralPath $temporary -Destination $Result -Force
+}
+function Get-VerifiedProcess([int]$id, [string]$startedAt) {
+  if ($id -le 0 -or -not $startedAt) { return $null }
+  $process = Get-Process -Id $id -ErrorAction SilentlyContinue
+  if (-not $process) { return $null }
   try {
-    if (Test-Path -LiteralPath $Target) { Copy-Item -LiteralPath $Target -Destination $Backup -Force }
-    Copy-Item -LiteralPath $Downloaded -Destination $Target -Force
-    $installed = $true
-    break
-  } catch { Start-Sleep -Milliseconds 500 }
+    # Retain the handle before checking identity; Kill/Wait then cannot target a reused PID.
+    $null = $process.Handle
+    if ($process.HasExited) { $process.Dispose(); return $null }
+    $sameStart = $process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -eq $startedAt
+    $samePath = [StringComparer]::OrdinalIgnoreCase.Equals($process.MainModule.FileName, $Target)
+    if ($sameStart -and $samePath) { return $process }
+  } catch {
+    if (-not $process.HasExited) { $process.Dispose(); throw }
+  }
+  $process.Dispose()
+  return $null
 }
-if (-not $installed) { exit 1 }
-$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
-Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI_*' } | ForEach-Object {
-  Remove-Item -LiteralPath ("Env:" + $_.Name) -ErrorAction SilentlyContinue
+try {
+  $child = Get-VerifiedProcess $ProcessId $ProcessStartedAt
+  if ($child) { $processes += $child }
+  $parent = Get-VerifiedProcess $ParentProcessId $ParentStartedAt
+  if ($parent) { $processes += $parent }
+  $exitDeadline = (Get-Date).AddSeconds($GraceSeconds)
+  while ((Get-Date) -lt $exitDeadline) {
+    $running = @($processes | Where-Object { -not $_.HasExited })
+    if (-not $running.Count) { break }
+    Start-Sleep -Milliseconds 200
+  }
+  # The onefile parent may be waiting in a native cleanup warning after Python exited.
+  foreach ($process in $processes) {
+    if (-not $process.HasExited) {
+      $process.Kill()
+      if (-not $process.WaitForExit(5000)) { throw 'Old application did not exit.' }
+    }
+  }
+  $stage = 'staging'
+  Copy-Item -LiteralPath $Downloaded -Destination $staged -Force
+  if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $Sha256) {
+    throw 'Staged update checksum mismatch.'
+  }
+  $stage = 'backup'
+  # Save the old executable only once, before any attempt to replace it.
+  if (Test-Path -LiteralPath $Target) { Copy-Item -LiteralPath $Target -Destination $Backup -Force }
+  $stage = 'replace'
+  $deadline = (Get-Date).AddSeconds($InstallSeconds)
+  $installed = $false
+  $lastError = ''
+  while ((Get-Date) -lt $deadline) {
+    try {
+      if (Test-Path -LiteralPath $Target) {
+        [IO.File]::Replace($staged, $Target, [NullString]::Value)
+      } else {
+        [IO.File]::Move($staged, $Target)
+      }
+      $installed = $true
+      break
+    } catch { $lastError = $_.Exception.Message; Start-Sleep -Milliseconds 500 }
+  }
+  if (-not $installed) { throw "Cannot replace executable: $lastError" }
+  $stage = 'start'
+  $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+  Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI_*' } | ForEach-Object {
+    Remove-Item -LiteralPath ("Env:" + $_.Name) -ErrorAction SilentlyContinue
+  }
+  # A new process may read pending immediately; do not announce success before observation.
+  Write-Result 'starting' ''
+  $started = Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -PassThru
+  Start-Sleep -Seconds 3
+  if ($started.HasExited) {
+    Start-Sleep -Seconds 2
+    $started = Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -PassThru
+    Start-Sleep -Seconds 3
+    if ($started.HasExited) { throw 'Updated application exited immediately twice.' }
+  }
+  Write-Result 'installed' ''
+  Remove-Item -LiteralPath $Downloaded -Force -ErrorAction SilentlyContinue
+} catch {
+  $detail = $_.Exception.Message
+  try { Write-Result 'error' $detail } catch { }
+  if (-not $NoFailurePopup) {
+    try {
+      $shell = New-Object -ComObject WScript.Shell
+      $null = $shell.Popup("Cat Chat 更新失败（$stage）：$detail`n请重新打开程序后重试，已下载的更新包会保留。", 30, 'Cat Chat 更新失败', 16)
+    } catch { }
+  }
+  exit 1
+} finally {
+  foreach ($process in $processes) { $process.Dispose() }
+  Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
 }
-$started = Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -PassThru
-Start-Sleep -Seconds 3
-if ($started.HasExited) {
-  Start-Sleep -Seconds 2
-  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)
-}
-Remove-Item -LiteralPath $Downloaded -Force -ErrorAction SilentlyContinue
 """
+
+
+def _windows_process_identity(process_id: int) -> tuple[str, str] | None:
+    """读取映像路径和创建时间；时间保留 FILETIME 整数，供替换器防 PID 重用。"""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    handle = kernel32.OpenProcess(0x1000, False, process_id)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            return None
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
+            return None
+        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        return str(Path(path.value).resolve()), str(created)
+    finally:
+        kernel32.CloseHandle(handle)
+
 
 
 def _sha256(path: Path) -> str:
@@ -213,6 +332,8 @@ class UpdateManager:
         self._package_file: Path | None = None
         self._cleanup_failures: dict[str, str] = {}
         self.build = self._read_build_info()
+        self._install_attempt = ""
+        self._replacer: subprocess.Popen | None = None
         # 「已下载待重启」状态：从磁盘标记恢复，重启 App 后仍可一键应用。
         self.ready: dict[str, Any] | None = self._load_ready()
         self.pending_verification = self.verify_pending()
@@ -379,6 +500,7 @@ class UpdateManager:
 
     def status(self) -> dict[str, Any]:
         with self.lock:
+            self._refresh_install_result()
             latest = dict(self.latest or {})
             current_commit = self.build.get("commit", "")
             phase = self.phase
@@ -928,11 +1050,70 @@ class UpdateManager:
                     "commit": latest.get("commit", ""),
                     "tag": latest.get("tag", ""),
                     "installed_at": int(time.time()),
+                    "attempt_id": self._install_attempt,
                 },
                 ensure_ascii=False,
             ),
             encoding="utf-8",
         )
+
+    def _read_install_result(self, attempt_id: str) -> UpdateInstallResult | None:
+        if not attempt_id:
+            return None
+        try:
+            result = json.loads((self._update_dir() / UPDATE_INSTALL_RESULT_FILE).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return None
+        if (
+            not isinstance(result, dict)
+            or result.get("attempt_id") != attempt_id
+            or result.get("status") not in {"starting", "installed", "error"}
+        ):
+            return None
+        return result
+
+    @staticmethod
+    def _install_failure_message(result: UpdateInstallResult) -> str:
+        detail = str(result.get("error") or "替换程序未正常完成")[:1000]
+        return f"安装更新失败：{detail}。请重新打开程序后重试，已下载的更新包会保留。"
+
+    def _record_install_failure(self, detail: str, stage: str) -> None:
+        result: UpdateInstallResult = {
+            "attempt_id": self._install_attempt,
+            "status": "error",
+            "target_commit": str((self.ready or {}).get("commit") or ""),
+            "stage": stage,
+            "error": detail[:1000],
+            "finished_at": int(time.time()),
+        }
+        self.phase = "error"
+        self.error = self._install_failure_message(result)
+        try:
+            marker = self._update_dir() / UPDATE_INSTALL_RESULT_FILE
+            temporary = marker.with_suffix(".tmp")
+            temporary.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(marker)
+        except OSError:
+            pass  # 写盘失败不能遮掉启动替换器的原始错误。
+
+    def _refresh_install_result(self) -> None:
+        if self.phase != "restarting" or not self._install_attempt:
+            return
+        result = self._read_install_result(self._install_attempt)
+        if result and result["status"] == "error":
+            self.phase = "error"
+            self.error = self._install_failure_message(result)
+        elif result and result["status"] == "installed" and result.get("target_commit") == self.build.get("commit"):
+            self.pending_verification = self.verify_pending()
+            self.phase = "idle"
+            self.error = ""
+            self.ready = self._load_ready()
+        elif result and result["status"] == "starting" and time.time() - float(result.get("finished_at") or 0) > 30:
+            self._record_install_failure("替换程序未返回启动结果，请重新打开程序重试", "start")
+        elif self._replacer is not None:
+            code = self._replacer.poll()
+            if code is not None and code != 0:
+                self._record_install_failure(f"替换程序异常退出（退出码 {code}）", "script")
 
     def verify_pending(self) -> dict[str, Any]:
         marker = self.data_dir / "update" / "pending-update.json"
@@ -943,10 +1124,25 @@ class UpdateManager:
         except (OSError, json.JSONDecodeError):
             marker.unlink(missing_ok=True)
             return {"pending": False}
-        marker.unlink(missing_ok=True)
+        if not isinstance(data, dict):
+            marker.unlink(missing_ok=True)
+            return {"pending": False}
         target_commit = str(data.get("commit") or "")
         current_commit = self.build.get("commit", "")
-        ok = bool(target_commit) and target_commit == current_commit
+        attempt_id = str(data.get("attempt_id") or "")
+        result = self._read_install_result(attempt_id)
+        if attempt_id and result and result["status"] == "starting":
+            self._install_attempt = attempt_id
+            self.phase = "restarting"
+            return {"pending": False}
+        failed = bool(result and result["status"] == "error")
+        if failed:
+            # 失败保留 pending：多次手动启动也能看到原因，且不会删掉同 commit 的下载包。
+            self.phase = "error"
+            self.error = self._install_failure_message(result)
+        else:
+            marker.unlink(missing_ok=True)
+        ok = not failed and bool(target_commit) and target_commit == current_commit
         return {
             "pending": True,
             "ok": ok,
@@ -1343,8 +1539,8 @@ class UpdateManager:
             if path is not None:
                 self._remove_file(path)
             return None
-        if commit == str(self.build.get("commit") or ""):
-            # 标记对应的版本已经是当前运行版本（说明更新已应用）：清掉残留。
+        if commit == str(self.build.get("commit") or "") and not (self._update_dir() / "pending-update.json").is_file():
+            # 安装观察完成并消费 pending 后才删包；启动后仍可能写回迟到失败。
             marker.unlink(missing_ok=True)
             if path is not None:
                 self._remove_file(path)
@@ -1385,7 +1581,10 @@ class UpdateManager:
             ready = dict(self.ready or {})
             self.ready = None
             self.phase = "available" if self._update_pending() else "idle"
+            self.error = ""
+            self.pending_verification = {"pending": False}
         self._ready_marker_path().unlink(missing_ok=True)
+        (self._update_dir() / "pending-update.json").unlink(missing_ok=True)
         path = self._safe_update_path(str(ready.get("file") or ""))
         if path is not None:
             self._remove_file(path)
@@ -1408,29 +1607,68 @@ class UpdateManager:
             self.discard_ready()
             raise RuntimeError("更新文件已损坏或被清理，请重新下载")
         with self.lock:
+            if self.phase in {"downloading", "restarting"}:
+                raise RuntimeError("更新正在下载或重启中，请稍候")
             self.phase = "restarting"
             self.error = ""
-        # pending 标记只在「真正要安装」这一刻写：此前版本在下载前就写，
-        # 下载失败/取消后下次启动会误报「上次更新校验失败」。
-        self._write_pending(ready)
-        self._launch_replacer(path)
+            self.pending_verification = {"pending": False}
+            self._install_attempt = uuid.uuid4().hex
+            self._replacer = None
+            try:
+                # 只在用户应用时写入；结果按 attempt_id 匹配，旧失败不影响本次安装。
+                self._write_pending(ready)
+                self._replacer = self._launch_replacer(path)
+            except Exception as exc:
+                self._record_install_failure(str(exc), "prepare")
+                raise RuntimeError(self.error) from exc
 
         def restart() -> None:
             time.sleep(0.5)
+            with self.lock:
+                self._refresh_install_result()
+                if self.phase != "restarting":
+                    return
             if on_ready:
-                on_ready()
+                try:
+                    on_ready()
+                except Exception as exc:
+                    with self.lock:
+                        if self._replacer is not None:
+                            try:
+                                self._replacer.terminate()
+                                self._replacer.wait(timeout=5)
+                            except (OSError, subprocess.TimeoutExpired):
+                                pass
+                        self._record_install_failure(str(exc), "shutdown")
 
         threading.Thread(target=restart, name="naiba-update-restart", daemon=True).start()
         return self.status()
 
-    def _launch_replacer(self, downloaded: Path) -> None:
+    def _launch_replacer(self, downloaded: Path) -> subprocess.Popen:
         target = Path(sys.executable).resolve()
+        identity = _windows_process_identity(os.getpid())
+        if identity is None or os.path.normcase(identity[0]) != os.path.normcase(str(target)):
+            raise RuntimeError("无法核实当前进程身份，已取消替换")
+        parent_id = 0
+        parent_started_at = ""
+        # onedir/源码没有负责解包清理的父进程；onefile 也只接受同一映像的直接父进程。
+        if getattr(sys, "frozen", False) and Path(getattr(sys, "_MEIPASS", "")).name.startswith("_MEI"):
+            candidate_id = os.getppid()
+            parent = _windows_process_identity(candidate_id)
+            if (
+                parent is not None
+                and os.path.normcase(parent[0]) == os.path.normcase(str(target))
+                and int(parent[1]) < int(identity[1])
+            ):
+                parent_id = candidate_id
+                parent_started_at = parent[1]
         update_dir = downloaded.parent
         script = update_dir / "apply-update.ps1"
         backup = update_dir / "naiba-chat.previous.exe"
-        script.write_text(APPLY_UPDATE_SCRIPT, encoding="utf-8")
+        # Windows PowerShell 5.1 需要 BOM 才能正确读取脚本内的中文提示。
+        script.write_text(APPLY_UPDATE_SCRIPT, encoding="utf-8-sig")
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen(
+        return subprocess.Popen(
             [
                 "powershell.exe",
                 "-NoProfile",
@@ -1440,12 +1678,26 @@ class UpdateManager:
                 str(script),
                 "-ProcessId",
                 str(os.getpid()),
+                "-ProcessStartedAt",
+                identity[1],
+                "-ParentProcessId",
+                str(parent_id),
+                "-ParentStartedAt",
+                parent_started_at,
                 "-Downloaded",
                 str(downloaded),
                 "-Target",
                 str(target),
                 "-Backup",
                 str(backup),
+                "-Sha256",
+                str((self.ready or {}).get("sha256") or ""),
+                "-Result",
+                str(update_dir / UPDATE_INSTALL_RESULT_FILE),
+                "-AttemptId",
+                self._install_attempt,
+                "-TargetCommit",
+                str((self.ready or {}).get("commit") or ""),
             ],
             cwd=str(self.app_dir),
             creationflags=creation_flags,

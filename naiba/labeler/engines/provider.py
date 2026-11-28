@@ -13,6 +13,7 @@ LM Studio / llama.cpp 这类本地后端（同样走 HTTP 协议）。本引擎�
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -124,7 +125,10 @@ def _txt_tool_rule() -> str:
         "写入本地 TXT：本次任务已开启 TXT 输出。请把这张图的最终打标文本通过 "
         f"{TXT_TOOL_NAME} 工具写入与图片同名的 .txt：一次写完用 mode=write；"
         "内容分段时先用 write 写第一段，再用 append 追加后续段（按顺序拼接）。"
-        "item 参数填当前图片的文件名或相对路径。写入后仍按上面的要求输出标注结果。"
+        "item 参数填当前图片的文件名或相对路径。content 只能包含可直接用于训练的 caption 正文，"
+        "不要加入写入成功、任务完成等操作回执。工具成功写入的完整正文就是最终交付内容，"
+        "可直接结束；如需返回标签、置信度和描述元数据，请按原有标注 JSON 格式返回，"
+        "不要再重复输出正文。未调用工具时只接受合法的标注 JSON。"
     )
 
 
@@ -215,6 +219,48 @@ def parse_response(text: str) -> dict[str, Any]:
     return {"tags": tags, "confidences": confidences, "description": description, "parsed": "json"}
 
 
+def parse_txt_response(text: str, writer: Any) -> dict[str, Any]:
+    """TXT 的自动回填只接受完整、字段合法的标注 JSON；工具正文独立于收尾。"""
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("重复字段")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(str(text or ""), object_pairs_hook=unique_object)
+        if not isinstance(payload, dict) or not payload or set(payload) - {"tags", "description"}:
+            raise ValueError("标注字段非法")
+        if "description" in payload and not isinstance(payload["description"], str):
+            raise ValueError("description 必须是字符串")
+        rows = payload.get("tags", [])
+        if not isinstance(rows, list):
+            raise ValueError("tags 必须是数组")
+        for row in rows:
+            if isinstance(row, str) and row.strip():
+                continue
+            if not isinstance(row, dict) or set(row) - {"tag", "confidence"} \
+                    or not isinstance(row.get("tag"), str) or not row["tag"].strip():
+                raise ValueError("标签字段非法")
+            conf = row.get("confidence", -1)
+            if "confidence" in row and (isinstance(conf, bool) or not isinstance(conf, (int, float))
+                                        or not math.isfinite(conf) or not 0 <= conf <= 1):
+                raise ValueError("confidence 必须在 0 到 1 之间")
+        tags, confidences = _as_tags(rows)
+        description = payload.get("description", "").strip()
+        if not tags and not description:
+            raise ValueError("标注正文为空")
+        return {"tags": tags, "confidences": confidences,
+                "description": description, "parsed": "json"}
+    except (ValueError, TypeError):
+        if writer.wrote:
+            # 自由文本回执、空收尾和非法元数据都不覆盖已经成功写入的正文。
+            return {"tags": [], "confidences": [], "description": "", "parsed": "tool"}
+        raise ValueError("未成功调用 TXT 工具，自动回填只接受字段合法的完整标注 JSON") from None
+
+
 class ProviderLabelerEngine:
     """``engine=provider``：一次一张图，返回解析后的标注数据。"""
 
@@ -251,7 +297,11 @@ class ProviderLabelerEngine:
             text = self._complete_with_txt_tool(profile, messages, options, status, writer)
         else:
             text = self._call_model(profile, messages, options, status)
-        parsed = parse_response(text)
+        try:
+            parsed = parse_txt_response(text, writer) if writer is not None else parse_response(text)
+        except ValueError as exc:
+            exc.labeler_attempt_usage = dict(self.last_usage)
+            raise
         parsed["raw"] = text
         return parsed
 
@@ -272,7 +322,6 @@ class ProviderLabelerEngine:
         working = list(messages)
         step_options = dict(options)
         step_options["tools"] = [tool_schema()]
-        retries = 0
         for step in range(MAX_TXT_TOOL_STEPS):
             try:
                 text = self._call_model(profile, working, step_options, status)
@@ -284,25 +333,19 @@ class ProviderLabelerEngine:
                         and cancel_event.is_set()) or "任务已取消" in str(exc) \
                         or "cancelled" in str(exc).lower() or "canceled" in str(exc).lower():
                     raise
-                if step == 0:
-                    self._emit(f"模型调用工具失败，已按普通打标继续：{str(exc)[:200]}")
+                error_text = str(exc).lower()
+                unsupported = (
+                    any(word in error_text for word in ("tools", "tool_choice", "tool calling"))
+                    and any(word in error_text for word in (
+                        "not supported", "unsupported", "unknown parameter", "unrecognized"))
+                )
+                if step == 0 and unsupported and not self.last_usage and not writer.wrote:
+                    self._emit(f"模型不支持工具，已按普通打标继续：{str(exc)[:200]}")
                     return self._call_model(profile, working, options, status)
                 raise
             action = SkillAgent._parse_action(text)
             if action.get("type") == "parse_error":
-                retries += 1
-                if retries > 2:
-                    return text
-                working.append({"role": "assistant", "content": text})
-                working.append({
-                    "role": "user",
-                    "content": (
-                        f"工具调用参数不是合法 JSON。请重新调用 {TXT_TOOL_NAME}，"
-                        "参数必须是包含 item / mode / content 的 JSON 对象；"
-                        "如果已经写完，请直接输出标注结果。"
-                    ),
-                })
-                continue
+                return text
             if action.get("type") not in {"tool", "tools"}:
                 return text
             calls = [action] if action.get("type") == "tool" else list(action.get("calls") or [])
@@ -331,8 +374,10 @@ class ProviderLabelerEngine:
                     + "\n</untrusted_tool_result>",
                 ),
             })
-        # 步数用尽仍在调工具：去掉 tools 再要一次最终标注，避免整张图白跑。
-        return self._call_model(profile, working, options, status)
+        # 持续调用直到预算耗尽不能视为正文完成，也不追加付费纠正请求。
+        error = ValueError("TXT 工具调用步数用尽，未确认正文完整")
+        error.labeler_attempt_usage = dict(self.last_usage)
+        raise error
 
     def _call_model(self, profile: dict[str, Any], messages: list[dict[str, Any]],
                      options: dict[str, Any], status: Any) -> str:

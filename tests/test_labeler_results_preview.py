@@ -42,7 +42,7 @@ vm.runInContext('const catalogGenerations=new Map(),catalogRequests=new Map();\n
 const source=fs.readFileSync('public/js/23-labeler.js','utf8')
   .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(source+'\nglobalThis.p={labeler,renderResultBody,pollTask,loadTaskItems,loadTaskResults,loadNextAnnotations,renderTask,'
-  +'retryTask,renderSupervisorSelects,syncConcurrencyUi,saveProviderLimit,ensureLabelerSettings};',context);
+  +'retryTask,renderSupervisorSelects,syncConcurrencyUi,saveProviderLimit,ensureLabelerSettings,syncAnnotationsIfDue};',context);
 const p=context.p;
 function seed(){
   p.labeler.taskId='tg-test';
@@ -68,6 +68,137 @@ class LabelerResultsPreviewTests(unittest.TestCase):
         result = subprocess.run([shutil.which("node"), "-"], input=HARNESS + body,
                                 cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_approved_body_renders_verbatim_and_metadata_stays_searchable(self):
+        self.run_case(r"""
+seed();const body='  分镜一\r\n\r\n镜头二\n结尾  \n';
+p.labeler.annotations[0].approved_txt=body;
+p.labeler.annotations[0].description='已完成写入，assistant footer';
+p.renderResultBody();
+const desc=card().children.find(x=>x.className==='labeler-anno-desc');
+assert.equal(desc.textContent,body);assert.equal(desc.title,'交付正文');
+assert.ok(card().children.some(x=>x.className==='labeler-taglist'),'保留标签元数据');
+assert.ok(!card().children.some(x=>x.textContent.includes('assistant footer')));
+p.labeler.search='镜头二';p.renderResultBody();assertCard('按交付正文搜索');
+p.labeler.search='cat';p.renderResultBody();assertCard('按元数据标签搜索');
+p.labeler.search='assistant footer';p.renderResultBody();
+assert.equal(card().children[0].textContent,'没有匹配的图片','不搜索已被正文替代的footer');
+const css=fs.readFileSync('public/styles.css','utf8');
+assert.match(css,/\.labeler-anno-desc\s*\{[^}]*white-space:\s*pre-wrap/,'卡片保留正文换行');
+""")
+
+    def test_body_and_same_length_metadata_change_redraw_signature(self):
+        self.run_case(r"""
+seed();p.labeler.annotations[0].approved_txt='第一版\n正文';p.renderResultBody();
+const old=card(),sig=p.labeler.lastImageSignature;
+p.renderResultBody();assert.equal(card(),old,'没变化无需重绘');
+p.labeler.annotations[0].approved_txt='第二版\n正文';p.renderResultBody();
+assert.notEqual(card(),old);assert.notEqual(p.labeler.lastImageSignature,sig);
+assert.equal(card().children.find(x=>x.className==='labeler-anno-desc').textContent,'第二版\n正文');
+const beforeTags=card();p.labeler.annotations[0].tags=['dog'];p.renderResultBody();
+assert.notEqual(card(),beforeTags,'标签数相同也要重绘元数据');
+assert.equal(card().children.find(x=>x.className==='labeler-taglist').children[0].textContent,'dog');
+p.labeler.annotations[0].approved_txt='';p.renderResultBody();
+assert.equal(card().children.find(x=>x.className==='labeler-anno-desc').textContent,'','空正文不可回退');
+p.labeler.annotations[0].approved_txt=null;p.renderResultBody();
+assert.equal(card().children.find(x=>x.className==='labeler-anno-desc').textContent,'一只猫坐在窗台上');
+assert.ok(card().children.some(x=>x.textContent.includes('历史标注：未保存交付正文')));
+p.labeler.search='窗台';p.renderResultBody();assertCard('历史描述仍可搜索');
+""")
+
+    def test_tag_result_cards_use_approved_body_and_explain_legacy(self):
+        self.run_case(r"""
+seed();p.labeler.resultTab='tags';p.labeler.tags=[{tag:'cat',count:2}];p.labeler.activeTag='cat';
+p.labeler.task.input={config:{write_txt:true}};
+p.labeler.tagMatches=[{id:1,name:'a.png',tags:['cat'],description:'assistant footer',approved_txt:'正文\n两行'},
+  {id:2,name:'b.png',source_task_id:'tg-test',tags:['cat'],description:'历史描述',approved_txt:null}];
+p.renderResultBody();
+const approved=resultBody.children[1],legacy=resultBody.children[2];
+assert.equal(approved.children.find(x=>x.className==='labeler-anno-desc').textContent,'正文\n两行');
+assert.equal(legacy.children.find(x=>x.className==='labeler-anno-desc').textContent,'历史描述');
+assert.ok(legacy.children.some(x=>x.textContent.includes('历史标注：未保存交付正文')));
+p.labeler.task.input.config.write_txt=false;p.renderResultBody();
+assert.ok(!resultBody.children[2].children.some(x=>x.textContent.includes('历史标注：')),'普通非TXT标注不误报历史');
+""")
+
+    def test_running_increment_failure_retries_without_advancing_checkpoint(self):
+        self.run_case(r"""
+seed();let calls=0,fail=true;
+apiImpl=async()=>{calls++;if(fail)throw Error('临时断线');
+  return{annotations:[{id:1,approved_txt:'恢复后的正文\n第二行'}],total:1};};
+const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+(async()=>{
+  const old=p.labeler.annotations;p.syncAnnotationsIfDue('tg-test',p.labeler.items);await tick();
+  assert.equal(calls,1);assert.equal(p.labeler.annotations,old);
+  assert.equal(p.labeler.resultsSyncDoneCount,0,'失败不推进完成数');
+  assert.equal(p.labeler.resultsSyncTaskId,'');assert.equal(p.labeler.resultsSyncPending,null);
+  fail=false;p.syncAnnotationsIfDue('tg-test',p.labeler.items);await tick();
+  assert.equal(calls,2,'同完成数重试');assert.equal(p.labeler.resultsSyncDoneCount,1);
+  assert.equal(p.labeler.annotations[0].approved_txt,'恢复后的正文\n第二行');
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);await tick();assert.equal(calls,2,'成功后不重复');
+})().catch(err=>{console.error(err);process.exit(1);});
+""")
+
+    def test_running_increment_inflight_is_not_duplicated_and_new_count_remains_due(self):
+        self.run_case(r"""
+seed();let calls=0,finish;
+apiImpl=()=>{calls++;return new Promise(resolve=>{finish=resolve;});};
+const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+(async()=>{
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);assert.equal(calls,1);
+  p.labeler.items.push({item_id:'i2',state:'succeeded',annotation_id:2});
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);assert.equal(calls,1,'请求未完成不重复');
+  assert.equal(p.labeler.resultsSyncDoneCount,0,'在途不推进检查点');
+  finish({annotations:[{id:1,approved_txt:'第一张'}],total:1});await tick();
+  assert.equal(p.labeler.resultsSyncDoneCount,1,'只确认本次开始时完成数');
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);assert.equal(calls,2,'新增完成仍需补拉');
+  finish({annotations:[{id:1},{id:2,approved_txt:'第二张'}],total:2});await tick();
+  assert.equal(p.labeler.resultsSyncDoneCount,2);
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);assert.equal(calls,2);
+})().catch(err=>{console.error(err);process.exit(1);});
+""")
+
+    def test_running_increment_old_task_response_cannot_advance_new_checkpoint(self):
+        self.run_case(r"""
+seed();const finishes=[];let calls=0;
+apiImpl=()=>{calls++;return new Promise(resolve=>finishes.push(resolve));};
+const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+(async()=>{
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);
+  p.labeler.taskId='new-task';p.labeler.detailToken++;
+  p.labeler.items=[{item_id:'new',state:'succeeded',annotation_id:9}];
+  p.labeler.annotations=[];p.syncAnnotationsIfDue('new-task',p.labeler.items);
+  const pending=p.labeler.resultsSyncPending;assert.equal(calls,2);
+  finishes[0]({annotations:[{id:1,approved_txt:'旧正文'}],total:1});await tick();
+  assert.equal(p.labeler.annotations.length,0);assert.equal(p.labeler.resultsSyncDoneCount,0);
+  assert.equal(p.labeler.resultsSyncTaskId,'');assert.equal(p.labeler.resultsSyncPending,pending);
+  p.syncAnnotationsIfDue('new-task',p.labeler.items);assert.equal(calls,2,'旧finally不能清新请求锁');
+  finishes[1]({annotations:[{id:9,approved_txt:'新正文'}],total:1});await tick();
+  assert.equal(p.labeler.resultsSyncTaskId,'new-task');assert.equal(p.labeler.resultsSyncDoneCount,1);
+  assert.equal(p.labeler.annotations[0].approved_txt,'新正文');
+})().catch(err=>{console.error(err);process.exit(1);});
+""")
+
+    def test_running_increment_revisiting_same_task_uses_new_generation(self):
+        self.run_case(r"""
+seed();const finishes=[];let calls=0;
+apiImpl=()=>{calls++;return new Promise(resolve=>finishes.push(resolve));};
+const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+(async()=>{
+  p.syncAnnotationsIfDue('tg-test',p.labeler.items);
+  p.labeler.detailToken++;p.syncAnnotationsIfDue('tg-test',p.labeler.items);assert.equal(calls,2);
+  finishes[1]({annotations:[{id:1,approved_txt:'当前正文'}],total:1});await tick();
+  const checkpoint=p.labeler.resultsSyncDetailToken;
+  finishes[0]({annotations:[{id:1,approved_txt:'上次访问的正文'}],total:1});await tick();
+  assert.equal(p.labeler.annotations[0].approved_txt,'当前正文');
+  assert.equal(p.labeler.resultsSyncDetailToken,checkpoint);
+  p.labeler.detailToken++;p.syncAnnotationsIfDue('tg-test',p.labeler.items);
+  assert.equal(calls,3,'同完成数的新访问仍需要拉取');
+  finishes[2]({annotations:[{id:1,approved_txt:'再次访问正文'}],total:1});await tick();
+  assert.equal(p.labeler.resultsSyncDetailToken,p.labeler.detailToken);
+})().catch(err=>{console.error(err);process.exit(1);});
+""")
 
     def test_terminal_wipe_then_restore_redraws_cards(self):
         """终态清空 items 后补拉回来，必须重绘逐图卡（签名 diff 不能挡住）。"""

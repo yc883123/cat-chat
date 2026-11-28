@@ -47,6 +47,7 @@ from naiba.labeler.txt_output import (
     TXT_STATE_WRITTEN,
     TXT_TOOL_NAME,
     TxtToolContext,
+    TxtOutputError,
     build_txt_targets,
 )
 
@@ -62,8 +63,14 @@ MAX_REVISIONS = 2
 SUPERVISOR_RETRY_LIMIT = 1
 
 
+class LabelerStorageError(RuntimeError):
+    """请求前后的本地持久化异常，不能进入模型重试。"""
+
+
 def classify_error(exc: BaseException) -> str:
     """把异常分成 ``cancelled`` / ``auth`` / ``bad_request`` / ``image`` / ``transient`` / ``permanent``。"""
+    if isinstance(exc, (LabelerStorageError, TxtOutputError)):
+        return "storage"
     if isinstance(exc, TaskCancelled):
         return "cancelled"
     raw = str(exc or "")
@@ -223,7 +230,7 @@ class LabelerRunner:
     def _run_task_serial(self, task_id: str, task: dict[str, Any],
                          config: dict[str, Any], cancel_event: threading.Event,
                          writer: "_ProgressWriter") -> None:
-        """关闭并发时沿用原串行路径：一张一张跑，行为与旧版本逐字节一致。"""
+        """串行逐图处理；模型重试与持久化提交分开，分段 TXT 保持实时可见。"""
         try:
             try:
                 profile = resolve_profile_with_override(
@@ -767,7 +774,8 @@ class LabelerRunner:
                              fingerprint: str, meta: dict[str, Any], writer: Any,
                              cancel_event: threading.Event,
                              candidate: dict[str, Any] | None = None,
-                             finish_reason: str = "") -> bool:
+                             finish_reason: str = "", reused: bool = False,
+                             elapsed_ms: int | None = None) -> bool:
         """提交成功标注并发布 TXT；返回 False 表示已按取消/失败收尾。
 
         ``candidate`` 只在发布失败时作为证据保留。检查通过、无需检查（没有 TXT）
@@ -789,15 +797,20 @@ class LabelerRunner:
             return False
         if not committed:
             return False
-        if usage:
+        if usage and not reused:
             self.store.append_event(task_id, {"type": "usage", "usage": usage})
-        self.store.append_event(task_id, {
+        event = {
             "type": "image_done", "item_id": item_id,
             "name": item.get("name") or "",
             "tags": len(annotation.get("tags") or []),
             "finish_reason": finish_reason,
             "txt_state": writer.state if writer is not None else "",
-        })
+        }
+        if reused:
+            event["reused"] = True
+        if elapsed_ms is not None:
+            event["elapsed_ms"] = elapsed_ms
+        self.store.append_event(task_id, event)
         return True
 
     def _commit_approved(self, task_id: str, item_id: str, annotation: dict[str, Any],
@@ -812,10 +825,13 @@ class LabelerRunner:
                                     supervisor_usage=meta.get("supervisor_usage"))
                 return False
             try:
+                txt_fields = {}
                 if writer is not None:
                     writer.publish()
+                    txt_fields = {"txt_path": writer.relative, "txt_state": writer.state,
+                                  "txt_chars": writer.total_chars}
                 self.db.complete_item(task_id, item_id, annotation=annotation, usage=usage,
-                                      config_fingerprint=fingerprint, meta=meta)
+                                      config_fingerprint=fingerprint, meta=meta, **txt_fields)
             except Exception:
                 if writer is not None:
                     writer.reset()
@@ -925,32 +941,53 @@ class LabelerRunner:
     ) -> dict[str, Any]:
         item_id = item["item_id"]
         writer = self._build_txt_writer(task_id, item, txt_output)
-        # 同图同内容同配置已有成功结果：直接复用，不重复调用（也不产生费用）。
+        # 主动重试 missing_approved_txt 失败项时，仅跳过缺正文的旧缓存。
         reusable = self.db.find_reusable(item["path_key"], item["content_version"], fingerprint)
+        if (reusable is not None and writer is not None
+                and not isinstance(reusable.get(LABELER_APPROVED_TXT_KEY), str)
+                and item.get("error_category") == "missing_approved_txt"):
+            reusable = None
         if reusable is not None:
+            if writer is not None and not isinstance(reusable.get(LABELER_APPROVED_TXT_KEY), str):
+                self.db.fail_item(
+                    task_id, item_id,
+                    error="历史标注未保存最终 TXT 正文，无法原样恢复。请点击重试失败重新打标（可能产生费用）。",
+                    category="missing_approved_txt",
+                )
+                self.store.append_event(task_id, {
+                    "type": "image_failed", "item_id": item_id, "name": item.get("name") or "",
+                    "error": "历史标注缺少最终 TXT 正文，请主动重试失败", "category": "missing_approved_txt",
+                })
+                return {}
             annotation = self._annotation_from_reusable(reusable, item, config)
-            if writer is not None:
-                # 复用的结果也要有同名 TXT：内容就是这条已保存的标注。
-                writer.write_fallback(caption_text(annotation))
-            self.db.complete_item(
-                task_id, item_id,
-                annotation=annotation,
-                usage=reusable.get("usage") or {},
-                config_fingerprint=fingerprint,
+            try:
+                if writer is not None:
+                    writer.write_fallback(reusable[LABELER_APPROVED_TXT_KEY])
+            except Exception as exc:
+                if writer is not None:
+                    writer.reset()
+                self.db.fail_item(task_id, item_id, error=f"缓存正文恢复失败：{exc}",
+                                  category="publish_failed")
+                self.store.append_event(task_id, {"type": "image_failed", "item_id": item_id,
+                                                  "category": "publish_failed", "error": str(exc)[:500]})
+                return {}
+            self._commit_item_success(
+                task_id=task_id, item=item, item_id=item_id, annotation=annotation,
+                usage=reusable.get("usage") or {}, fingerprint=fingerprint, meta={},
+                writer=writer, cancel_event=cancel_event, reused=True,
             )
-            self.store.append_event(task_id, {
-                "type": "image_done", "item_id": item_id, "name": item.get("name") or "",
-                "reused": True, "txt_state": writer.state if writer else "",
-            })
             return {}
 
         options, prompt = self._build_item_options(
             config, item, prompt, timeout_seconds, cancel_event, writer)
         attempt = 0
+        total_usage: dict[str, Any] = {}
         while True:
             if cancel_event.is_set():
-                self.db.cancel_item(task_id, item_id)
-                return {}
+                if writer is not None:
+                    writer.reset()
+                self.db.cancel_item(task_id, item_id, usage=total_usage)
+                return total_usage
             started = time.monotonic()
             try:
                 annotation, usage, finish_reason = self._label_once(
@@ -958,46 +995,44 @@ class LabelerRunner:
                     prompt=prompt, engine=engine, profile=profile, options=options,
                     cancel_event=cancel_event, writer=writer,
                 )
-                self.db.complete_item(
-                    task_id, item_id,
-                    annotation=annotation,
-                    usage=usage,
-                    config_fingerprint=fingerprint,
-                )
-                if usage:
-                    self.store.append_event(task_id, {"type": "usage", "usage": usage})
-                self.store.append_event(task_id, {
-                    "type": "image_done", "item_id": item_id, "name": item.get("name") or "",
-                    "tags": len(annotation.get("tags") or []), "finish_reason": finish_reason,
-                    "txt_state": writer.state if writer is not None else "",
-                    "elapsed_ms": int((time.monotonic() - started) * 1000),
-                })
-                return usage
-            except Exception as exc:  # noqa: BLE001 - 分类后决定重试或记失败
+            except Exception as exc:  # noqa: BLE001 - 这里只重试模型调用的瞬时错误
                 category = classify_error(exc)
+                captured = getattr(exc, "labeler_attempt_usage", None)
+                failure_usage = dict(captured) if isinstance(captured, dict) else (
+                    {} if category in {"auth", "bad_request", "image", "storage"} else
+                    dict(getattr(self.app.models, "last_usage", {}) or {}))
+                total_usage = aggregate_usage(total_usage, failure_usage)
+                if writer is not None:
+                    writer.reset()
                 if category == "cancelled":
-                    self.db.cancel_item(task_id, item_id)
+                    self.db.cancel_item(task_id, item_id, usage=total_usage)
                     cancel_event.set()
-                    return {}
+                    return total_usage
                 attempt += 1
                 if category == "transient" and attempt <= retry_limit:
                     delay = min(MAX_RETRY_BACKOFF, 0.5 * (2 ** (attempt - 1)))
                     if cancel_event.wait(delay):
-                        self.db.cancel_item(task_id, item_id)
-                        return {}
+                        self.db.cancel_item(task_id, item_id, usage=total_usage)
+                        return total_usage
                     continue
-                # 认证/参数错误不重试：重试只会继续失败并可能反复计费。
-                failure_usage = {} if category in {"auth", "bad_request", "image"} else (
-                    dict(getattr(self.app.models, "last_usage", {}) or {})
-                )
                 self.db.fail_item(
-                    task_id, item_id, error=str(exc), category=category, usage=failure_usage,
+                    task_id, item_id, error=str(exc), category=category, usage=total_usage,
                 )
                 self.store.append_event(task_id, {
                     "type": "image_failed", "item_id": item_id, "name": item.get("name") or "",
                     "error": str(exc)[:500], "category": category,
                 })
-                return {}
+                return total_usage
+            total_usage = aggregate_usage(total_usage, usage)
+            # 发布/事务失败只记失败，绝不能重新进入模型调用。
+            self._commit_item_success(
+                task_id=task_id, item=item, item_id=item_id, annotation=annotation,
+                usage=total_usage, fingerprint=fingerprint, meta={}, writer=writer,
+                cancel_event=cancel_event, finish_reason=finish_reason,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                candidate={**annotation, "txt_content": writer.candidate_text()} if writer else annotation,
+            )
+            return total_usage
 
     def _build_item_options(self, config: dict[str, Any], item: dict[str, Any],
                             prompt: str, timeout_seconds: int,
@@ -1050,18 +1085,27 @@ class LabelerRunner:
             "model_key": str(config.get("model_key") or ""),
             "model_name": str(config.get("model_name") or ""),
         }
-        self.db.mark_running(
-            task_id, item_id, phase="labeling", worker_slot=worker_slot,
-            worker_model_key=str(ref.get("model_key") or ""),
-            worker_model_name=str(ref.get("model_name") or ""),
-        )
-        parsed = engine.run(
-            profile=profile,
-            image_path=item["path"],
-            prompt=prompt,
-            options=options,
-            status=None,
-        )
+        try:
+            self.db.mark_running(
+                task_id, item_id, phase="labeling", worker_slot=worker_slot,
+                worker_model_key=str(ref.get("model_key") or ""),
+                worker_model_name=str(ref.get("model_name") or ""),
+            )
+        except Exception as exc:
+            raise LabelerStorageError(f"打标请求前保存状态失败：{exc}") from exc
+        try:
+            parsed = engine.run(
+                profile=profile,
+                image_path=item["path"],
+                prompt=prompt,
+                options=options,
+                status=None,
+            )
+        except Exception as exc:
+            if not isinstance(getattr(exc, "labeler_attempt_usage", None), dict):
+                engine_usage = getattr(engine, "last_usage", None)
+                exc.labeler_attempt_usage = dict(engine_usage or getattr(self.app.models, "last_usage", {}) or {})
+            raise
         # 诊断读数必须在**本线程**内立刻取（P0-a）。chat 引擎的多轮循环
         # 用量在 SkillAgent.run 返回值里汇总（engine.last_usage），比
         # last_usage（只反映最后一次调用）更真实；provider 引擎维持原口径。
@@ -1103,9 +1147,15 @@ class LabelerRunner:
             "description": description,
         }
         if writer is not None:
-            # 模型一次工具都没调用（或不支持工具）时回填一份，保证每张成功图片
-            # 都有同名 TXT；工具写过的内容优先，不被标注文本覆盖。
-            writer.write_fallback(caption_text(annotation))
+            try:
+                # 工具正文保持原文；只有引擎验证过的 JSON 标注可按原模式回填。
+                writer.write_fallback(caption_text(annotation))
+                if not writer.wrote or writer.state == TXT_STATE_FAILED:
+                    raise ValueError("最终 TXT 未生成，没有可交付的正文")
+                annotation[LABELER_APPROVED_TXT_KEY] = writer.candidate_text()
+            except Exception as exc:
+                exc.labeler_attempt_usage = usage
+                raise
         return annotation, usage, finish_reason
 
     def _build_txt_writer(self, task_id: str, item: dict[str, Any],

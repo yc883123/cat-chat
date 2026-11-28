@@ -20,7 +20,7 @@ from typing import Any
 
 from naiba.core.exceptions import TaskCancelled
 from naiba.core.history import encode_image_for_model
-from naiba.labeler.engines.provider import parse_response
+from naiba.labeler.engines.provider import parse_response, parse_txt_response
 from naiba.labeler.txt_output import TXT_TOOL_NAME, tool_schema
 
 ENGINE_ID = "chat"
@@ -41,7 +41,9 @@ def build_chat_prompt(config: dict[str, Any]) -> str:
             "写入本地 TXT：本次任务已开启 TXT 输出。请把最终打标文本通过 "
             f"{TXT_TOOL_NAME} 工具写入与图片同名的 .txt：一次写完用 mode=write，"
             "分段时先 write 再 append（按顺序拼接）。item 填当前图片的文件名或相对路径。"
-            "写入后仍按技能规则输出打标结果。"
+            "content 只能包含可直接用于训练的 caption 正文，不要加入写入成功、任务完成等操作回执。"
+            "工具成功写入的正文就是最终交付内容，可以直接结束；标签等元数据仍遵守技能规则，"
+            "无需再重复正文。未调用工具时只接受合法的标注 JSON。"
         )
     return "\n".join(parts)
 
@@ -73,7 +75,18 @@ class ChatSkillEngine:
         )
         if hasattr(sub_executor, "debug_label"):
             sub_executor.debug_label = task_label
-        worker = SkillAgent(
+        worker_class = SkillAgent
+        if self.config.get("write_txt"):
+            class TxtLabelerAgent(SkillAgent):
+                def _parse_action(self, raw: str) -> dict[str, Any]:
+                    action = SkillAgent._parse_action(raw)
+                    if action.get("type") == "parse_error":
+                        if getattr(getattr(self, "txt_writer", None), "wrote", False):
+                            return {"type": "final", "content": "TXT 正文已写入。"}
+                        raise ValueError("TXT 打标输出不是合法 JSON，未增加纠正请求")
+                    return action
+            worker_class = TxtLabelerAgent
+        worker = worker_class(
             self.app.catalog,
             CraftToolExecutor(sub_executor),
             self.app.models.complete,
@@ -104,14 +117,27 @@ class ChatSkillEngine:
         ))
         return registry
 
+    def _billing_usage(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """SkillAgent 的顶层 token 是末轮读数；TXT 尝试计费累计逐次明细。"""
+        result = dict(usage or {})
+        details = result.get("requests_detail")
+        if self.config.get("write_txt") and isinstance(details, list) and details:
+            for key in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens"):
+                result[key] = sum(max(0, int(row.get(key) or 0))
+                                  for row in details if isinstance(row, dict))
+            result["uncached_tokens"] = max(0, result["input_tokens"] - result["cached_tokens"])
+        return result
+
     def _bridge_event(self, image_name: str) -> Any:
         """SkillAgent 事件 → 贴签匠事件流：只转发批量进度有意义的关键事件。"""
         sink = self._event_sink
-        if not callable(sink):
-            return None
 
         def emit(payload: dict[str, Any]) -> None:
             kind = str(payload.get("type") or "")
+            if kind == "usage":
+                self.last_usage = self._billing_usage(payload.get("usage") or {})
+            if not callable(sink):
+                return
             message = str(payload.get("message") or "")
             try:
                 if kind == "status":
@@ -156,6 +182,7 @@ class ChatSkillEngine:
         tool_registry = getattr(self.app, "tool_registry", None)
         writer = options.get("txt_tool")
         if writer is not None:
+            worker.txt_writer = writer
             # 本任务专属工具（TXT 写入）只出现在这次运行的注册表与授权集里。
             tool_registry = self._build_txt_registry(writer)
             allowed_tools.append(TXT_TOOL_NAME)
@@ -193,13 +220,20 @@ class ChatSkillEngine:
             )
         except TaskCancelled:
             raise
-        self.last_usage = dict(usage or {})
+        except Exception as exc:
+            exc.labeler_attempt_usage = dict(self.last_usage or getattr(self.app.models, "last_usage", {}) or {})
+            raise
+        self.last_usage = self._billing_usage(usage or {})
         cleaned = str(text or "").strip()
         # 上下文塞不下时 SkillAgent 把 notice 当正常返回值交回（不抛异常）：
         # 识别出来转成该图失败，避免把提示文案误存成标注。
-        if not cleaned or cleaned.startswith(("上下文已达到窗口上限",)) \
-                or cleaned in {_CONTEXT_FULL_NOTICE, _CONTEXT_LOOP_NOTICE}:
+        if writer is None and (not cleaned or cleaned.startswith(("上下文已达到窗口上限",)) \
+                or cleaned in {_CONTEXT_FULL_NOTICE, _CONTEXT_LOOP_NOTICE}):
             raise ValueError("Skill 会话没有产出可用文本（上下文超限或步数用尽）")
-        parsed = parse_response(cleaned)
+        try:
+            parsed = parse_txt_response(cleaned, writer) if writer is not None else parse_response(cleaned)
+        except ValueError as exc:
+            exc.labeler_attempt_usage = dict(self.last_usage)
+            raise
         parsed["raw"] = cleaned
         return parsed

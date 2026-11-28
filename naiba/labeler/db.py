@@ -294,6 +294,7 @@ class LabelerDB:
                        supervisor_reason='', supervisor_usage_json='{}', candidate_json='{}'
                  WHERE task_id=?
                    AND state<>'succeeded'
+                   AND error_category NOT IN ('missing_approved_txt','publish_failed')
                    AND EXISTS (
                            SELECT 1
                              FROM annotations a
@@ -319,7 +320,10 @@ class LabelerDB:
             cursor = db.execute(
                 """
                 UPDATE task_items SET
-                    state='queued', error='', error_category='', attempt_count=0,
+                    state='queued', error='',
+                    error_category=CASE WHEN error_category='missing_approved_txt'
+                                        THEN error_category ELSE '' END,
+                    attempt_count=0,
                     annotation_id=NULL, started_at=NULL, finished_at=NULL,
                     phase='', worker_slot=0, worker_model_key='', worker_model_name='',
                     supervisor_decision='', supervisor_attempts=0, supervisor_reason='',
@@ -402,8 +406,11 @@ class LabelerDB:
         usage: dict[str, Any],
         config_fingerprint: str,
         meta: dict[str, Any] | None = None,
+        txt_path: str | None = None,
+        txt_state: str = "",
+        txt_chars: int = 0,
     ) -> tuple[int, bool]:
-        """一次事务提交「标注行 + 逐图成功状态 + 用量」。
+        """一次事务提交「标注行 + 逐图成功状态 + 用量 + 最终 TXT 状态」。
 
         返回 ``(annotation_id, 是否命中既有结果)``。命中时复用既有行（保留 created_at），
         但把最新一次的值与 updated_at 更新掉——同一配置重跑以最近一次结果为准。
@@ -488,11 +495,15 @@ class LabelerDB:
                        error_category='', finished_at=?, phase=?,
                        worker_slot=?, worker_model_key=?, worker_model_name=?,
                        supervisor_decision=?, supervisor_attempts=?,
-                       supervisor_reason=?, supervisor_usage_json=?, candidate_json='{}'
+                       supervisor_reason=?, supervisor_usage_json=?, candidate_json='{}',
+                       txt_path=COALESCE(?,txt_path),
+                       txt_state=CASE WHEN ? IS NULL THEN txt_state ELSE ? END,
+                       txt_chars=CASE WHEN ? IS NULL THEN txt_chars ELSE ? END
                  WHERE task_id=? AND item_id=?
                 """,
                 (annotation_id, _dumps(usage or {}), stamp, phase, slot, worker_key,
                  worker_name, decision, attempts, reason, supervisor_usage,
+                 txt_path, txt_path, txt_state, txt_path, max(0, int(txt_chars)),
                  task_id, item_id),
             )
         return annotation_id, reused

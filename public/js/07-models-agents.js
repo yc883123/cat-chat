@@ -735,7 +735,9 @@ export function renderUpdateStatus(status) {
     : (messages[status.phase] || messages.idle);
   const manualDownload = status.manual_download_required || status.manual_update_available || status.phase === 'manual' || (releases.length && !options.length);
   const pending = status.pending_verification;
-  if (pending && pending.pending) {
+  if (status.error) {
+    $('#updateMessage').textContent = status.error;
+  } else if (pending && pending.pending) {
     $('#updateMessage').textContent = pending.ok
       ? `上次更新已完成并验证通过（${pending.target_version}）。`
       : `上次更新到 ${pending.target_version} 后版本校验失败，请重新检查更新或手动安装。`;
@@ -746,7 +748,7 @@ export function renderUpdateStatus(status) {
   } else if (status.phase === 'available' && selected) {
     $('#updateMessage').textContent = `将安装 ${selected.version}，下载完成后可选择立即重启。`;
   }
-  if (manualDownload) {
+  if (manualDownload && !status.error) {
     const message = $('#updateMessage');
     message.replaceChildren(document.createTextNode('2.0.0 及更早版本不支持自动更新，请前往 '));
     const link = document.createElement('a');
@@ -939,7 +941,7 @@ export function syncUpdateFloat(status = state.bootstrap.update || {}) {
     }
   } else {
     const meta = $('#updateFloatMeta');
-    if (meta) meta.textContent = `${status.ready.version} 已下载，重启后生效`;
+    if (meta) meta.textContent = status.error || `${status.ready.version} 已下载，重启后生效`;
   }
   $('#updateFloatCancel').hidden = !downloading;
   $('#updateFloatApply').hidden = !ready;
@@ -1016,6 +1018,12 @@ export async function applyUpdate() {
     startUpdatePoll();
   } catch (error) {
     toast(`重启失败：${error.message}`);
+    // 准备替换失败时后端仍在，立即刷新持久状态，别只留一个短暂 toast。
+    try {
+      const status = await api('/api/update');
+      state.bootstrap.update = status;
+      renderUpdateStatus(status);
+    } catch (_) { /* 服务已退出时保留原始失败提示。 */ }
   }
 }
 

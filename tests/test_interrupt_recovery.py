@@ -24,9 +24,16 @@
 
 from __future__ import annotations
 
+import ctypes
+import hashlib
+import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -282,6 +289,297 @@ class UpdateRestartShowsWindowTests(unittest.TestCase):
         source = (ROOT / "launcher.py").read_text(encoding="utf-8")
         self.assertIn("self.window.events.loaded += self._on_window_loaded", source)
         self.assertIn("def _on_window_loaded", source)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Requires real Windows process/file semantics")
+class WindowsApplyUpdateScriptTests(unittest.TestCase):
+    """Execute the production PowerShell against disposable winexe processes only."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.powershell = shutil.which("powershell.exe")
+        compilers = list(
+            (Path(os.environ.get("WINDIR", "C:/Windows")) / "Microsoft.NET").glob(
+                "Framework*/v*/csc.exe"
+            )
+        )
+        if not cls.powershell or not compilers:
+            raise unittest.SkipTest("Windows PowerShell and system .NET csc are required")
+        cls._compiled = tempfile.TemporaryDirectory(prefix="naiba-update-compiler-")
+        cls.addClassCleanup(cls._compiled.cleanup)
+        cls.binaries = {}
+        source = r'''using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+class Sleeper {
+    static void Main(string[] args) {
+        Process self = Process.GetCurrentProcess();
+        string directory = AppDomain.CurrentDomain.BaseDirectory;
+        string mode = args.Length == 0 ? "normal" : args[0];
+        File.WriteAllLines(Path.Combine(directory, "process-" + self.Id + ".txt"),
+            new string[] { self.Id.ToString(),
+                self.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(),
+                "VERSION", mode });
+        if (mode == "parent") {
+            ProcessStartInfo info = new ProcessStartInfo(self.MainModule.FileName, "child");
+            info.UseShellExecute = false;
+            using (Process child = Process.Start(info)) { child.WaitForExit(); }
+            File.WriteAllText(Path.Combine(directory, "parent-waiting.txt"), "ready");
+        }
+        Thread.Sleep(30000);
+    }
+}
+'''
+        for version in ("old", "new"):
+            directory = Path(cls._compiled.name)
+            cs = directory / (version + ".cs")
+            exe = directory / (version + ".exe")
+            cs.write_text(source.replace("VERSION", version), encoding="utf-8")
+            # Sources and compiler outputs are ours, never downloaded code.
+            compiled = subprocess.run(
+                [str(compilers[-1]), "/nologo", "/target:winexe", "/out:" + str(exe), str(cs)],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if compiled.returncode:
+                raise AssertionError("C# helper compilation failed: " + compiled.stdout + compiled.stderr)
+            cls.binaries[version] = exe.read_bytes()
+
+    def setUp(self) -> None:
+        from ctypes import wintypes
+        from naiba.updater import APPLY_UPDATE_SCRIPT
+
+        self._tmp = tempfile.TemporaryDirectory(prefix="naiba-update-regression-")
+        self.directory = Path(self._tmp.name).resolve()
+        self.target = self.directory / "application.exe"
+        self.downloaded = self.directory / "downloaded.exe"
+        self.backup = self.directory / "application.backup.exe"
+        self.result = self.directory / "result.json"
+        self.script = self.directory / "apply.ps1"
+        self.target.write_bytes(self.binaries["old"])
+        self.downloaded.write_bytes(self.binaries["new"])
+        self.backup.write_bytes(self.binaries["old"])
+        self.script.write_text(APPLY_UPDATE_SCRIPT, encoding="utf-8-sig")
+        self.processes = []
+        self.lock_handle = None
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        self.kernel32.OpenProcess.restype = wintypes.HANDLE
+        self.kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+            ctypes.POINTER(wintypes.FILETIME)
+        ] * 4
+        self.kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+        ]
+        self.kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        self.kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        self.kernel32.CreateFileW.restype = wintypes.HANDLE
+
+    def _markers(self) -> list[list[str]]:
+        rows = []
+        for marker in self.directory.glob("process-*.txt"):
+            row = marker.read_text(encoding="utf-8-sig").splitlines()
+            if len(row) == 4:
+                rows.append(row)
+        return rows
+
+    def _wait_for(self, predicate, detail: str, timeout: float = 8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.05)
+        self.fail("Timed out waiting for " + detail)
+
+    def _stop_marked_process(self, row: list[str]) -> None:
+        """Keep the handle while verifying identity; never kill an arbitrary reused PID."""
+        from ctypes import wintypes
+
+        handle = self.kernel32.OpenProcess(0x1000 | 0x0001 | 0x100000, False, int(row[0]))
+        if not handle:
+            return
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            self.assertTrue(self.kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)))
+            created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+            if str(created) != row[1]:
+                return
+            if self.kernel32.WaitForSingleObject(handle, 0) == 0:
+                return
+            size = wintypes.DWORD(32768)
+            image = ctypes.create_unicode_buffer(size.value)
+            if not self.kernel32.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(size)):
+                if self.kernel32.WaitForSingleObject(handle, 0) == 0:
+                    return
+                self.fail("Cannot verify a live helper image before cleanup")
+            self.assertEqual(Path(image.value).resolve().parent, self.directory)
+            self.kernel32.TerminateProcess(handle, 0)
+            self.assertEqual(self.kernel32.WaitForSingleObject(handle, 5000), 0)
+        finally:
+            self.kernel32.CloseHandle(handle)
+
+    def tearDown(self) -> None:
+        errors = []
+        try:
+            # Stop the script first so it cannot launch another helper during cleanup.
+            for process in reversed(self.processes):
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=5)
+                except Exception as error:
+                    errors.append(error)
+            # Includes the parent's real child and Start-Process descendants.
+            for row in self._markers():
+                try:
+                    self._stop_marked_process(row)
+                except Exception as error:
+                    errors.append(error)
+        finally:
+            if self.lock_handle is not None:
+                self.kernel32.CloseHandle(self.lock_handle)
+            self._tmp.cleanup()
+        if errors:
+            raise errors[0]
+
+    def _spawn(self, executable: Path, mode: str = "normal") -> subprocess.Popen:
+        process = subprocess.Popen([str(executable), mode], cwd=self.directory)
+        self.processes.append(process)
+        self._wait_for(
+            lambda: any(row[0] == str(process.pid) for row in self._markers()),
+            "helper startup",
+        )
+        return process
+
+    def _identity(self, process_id: int) -> tuple[str, str]:
+        from naiba.updater import _windows_process_identity
+
+        identity = _windows_process_identity(process_id)
+        self.assertIsNotNone(identity)
+        self.assertEqual(Path(identity[0]).parent, self.directory)
+        self.assertGreater(int(identity[1]), 0)
+        return identity
+
+    def _lock_target(self) -> None:
+        # Read/write sharing permits backup, but denying FILE_SHARE_DELETE blocks File.Replace.
+        self.lock_handle = self.kernel32.CreateFileW(
+            str(self.target), 0x80000000, 0x1 | 0x2, None, 3, 0x80, None
+        )
+        self.assertNotEqual(self.lock_handle, ctypes.c_void_p(-1).value)
+
+    def _apply(self, *, child=(0, ""), parent=(0, ""), install_seconds=1, observed_parent=None) -> dict:
+        command = [
+            self.powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", str(self.script),
+            "-ProcessId", str(child[0]), "-ProcessStartedAt", str(child[1]),
+            "-ParentProcessId", str(parent[0]), "-ParentStartedAt", str(parent[1]),
+            "-Downloaded", str(self.downloaded), "-Target", str(self.target),
+            "-Backup", str(self.backup), "-Sha256", hashlib.sha256(self.binaries["new"]).hexdigest(),
+            "-Result", str(self.result), "-AttemptId", "regression-attempt",
+            "-TargetCommit", "regression-commit", "-GraceSeconds", "1",
+            "-InstallSeconds", str(install_seconds), "-NoFailurePopup",
+        ]
+        launched_at = time.monotonic()
+        process = subprocess.Popen(
+            command, cwd=self.directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace",
+        )
+        self.processes.append(process)
+        if observed_parent is not None:
+            observed_parent.wait(timeout=8)
+            self.assertGreaterEqual(time.monotonic() - launched_at, 1)
+        stdout, stderr = process.communicate(timeout=18)
+        self.assertTrue(self.result.is_file(), stdout + stderr)
+        payload = json.loads(self.result.read_text(encoding="utf-8-sig"))
+        self.assertEqual(payload["attempt_id"], "regression-attempt")
+        self.assertEqual(payload["target_commit"], "regression-commit")
+        self.assertGreater(payload["finished_at"], 0)
+        self.assertEqual(process.returncode, 0 if payload["status"] == "installed" else 1, stdout + stderr)
+        self.assertFalse(list(self.directory.glob("*.tmp")))
+        return payload
+
+    def _assert_installed(self, payload: dict) -> None:
+        from naiba.updater import _windows_process_identity
+
+        self.assertEqual(payload["status"], "installed", payload)
+        self.assertEqual(payload["stage"], "start")
+        self.assertEqual(payload["error"], "")
+        self.assertEqual(hashlib.sha256(self.target.read_bytes()).digest(), hashlib.sha256(self.binaries["new"]).digest())
+        self.assertEqual(hashlib.sha256(self.backup.read_bytes()).digest(), hashlib.sha256(self.binaries["old"]).digest())
+        self.assertFalse(self.downloaded.exists())
+        started = [row for row in self._markers() if row[2] == "new"]
+        self.assertEqual(len(started), 1, "New executable must actually start exactly once")
+        self.assertEqual(_windows_process_identity(int(started[0][0])), (str(self.target), started[0][1]))
+
+    def _assert_replace_failed(self, payload: dict) -> None:
+        self.assertEqual(payload["status"], "error", payload)
+        self.assertEqual(payload["stage"], "replace", payload)
+        self.assertIn("Cannot replace executable:", payload["error"])
+        self.assertNotIn("路径的形式不合法", payload["error"])
+        self.assertNotIn("The path is not of a legal form", payload["error"])
+        self.assertRegex(payload["error"], r"(?i)(process|进程)")
+        self.assertEqual(self.target.read_bytes(), self.binaries["old"])
+        self.assertEqual(self.backup.read_bytes(), self.binaries["old"])
+        self.assertEqual(self.downloaded.read_bytes(), self.binaries["new"])
+        self.assertFalse(any(row[2] == "new" for row in self._markers()))
+        self.assertEqual(json.loads(self.result.read_text(encoding="utf-8-sig")), payload)
+
+    def test_exited_child_still_waits_for_and_stops_live_onefile_parent(self) -> None:
+        parent = self._spawn(self.target, "parent")
+        parent_identity = self._identity(parent.pid)
+        child = self._wait_for(
+            lambda: next((row for row in self._markers() if row[3] == "child"), None),
+            "real business child",
+        )
+        child_identity = self._identity(int(child[0]))
+        self._stop_marked_process(child)
+        self._wait_for(lambda: (self.directory / "parent-waiting.txt").exists(), "parent cleanup wait")
+        self.assertIsNone(parent.poll())
+        payload = self._apply(
+            child=(int(child[0]), child_identity[1]), parent=(parent.pid, parent_identity[1]),
+            observed_parent=parent,
+        )
+        self.assertIsNotNone(parent.poll(), "Verified parent must be killed after grace period")
+        self._assert_installed(payload)
+
+    def test_stale_creation_times_do_not_kill_reused_child_or_parent_pids(self) -> None:
+        child = self._spawn(self.target)
+        parent = self._spawn(self.target)
+        child_identity = self._identity(child.pid)
+        parent_identity = self._identity(parent.pid)
+        self._lock_target()
+        payload = self._apply(
+            child=(child.pid, str(int(child_identity[1]) - 1)),
+            parent=(parent.pid, str(int(parent_identity[1]) - 1)),
+        )
+        self.assertIsNone(child.poll(), "A stale child FILETIME must not authorize Kill")
+        self.assertIsNone(parent.poll(), "A stale parent FILETIME must not authorize Kill")
+        self.assertEqual(self._identity(child.pid), child_identity)
+        self.assertEqual(self._identity(parent.pid), parent_identity)
+        self._assert_replace_failed(payload)
+
+    def test_matching_creation_time_but_different_image_is_not_killed(self) -> None:
+        other = self.directory / "unrelated.exe"
+        other.write_bytes(self.binaries["old"])
+        process = self._spawn(other)
+        identity = self._identity(process.pid)
+        payload = self._apply(child=(process.pid, identity[1]), parent=(process.pid, identity[1]))
+        self.assertIsNone(process.poll(), "Matching FILETIME alone must not authorize Kill")
+        self.assertEqual(self._identity(process.pid), identity)
+        self._assert_installed(payload)
+
+    def test_locked_target_persists_error_and_preserves_all_packages(self) -> None:
+        self._lock_target()
+        self._assert_replace_failed(self._apply())
 
 
 if __name__ == "__main__":

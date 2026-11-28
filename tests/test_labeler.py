@@ -848,7 +848,7 @@ class LabelerRunnerTests(unittest.TestCase):
         app = self._make_app(_StubModels(behavior))
         jobs, task = self._submit(app, config=_base_config(retry_limit=0, write_txt=True))
         self._wait(task["id"])
-        self.assertEqual(self.db.counts(task["id"])["done"], 2)
+        self.assertEqual(self.db.counts(task["id"])["done"], 1)
         annotations_before = self.db.annotations(task_id=task["id"])
         succeeded_before = [item for item in self.db.list_items(task["id"])
                             if item["state"] == "succeeded"]
@@ -860,7 +860,7 @@ class LabelerRunnerTests(unittest.TestCase):
         self.assertEqual(state["status"], "done")
         self.assertEqual((state["progress"]["done"], state["progress"]["total"]), (3, 3))
         self.assertEqual(state["usage"]["total_tokens"], 45)
-        self.assertEqual(calls["n"], 5, "首图含工具回退调用，两张成功图片不能再次调用模型")
+        self.assertEqual(calls["n"], 5, "认证错误不降级；只重试两张失败图片")
         self.assertEqual(len(self.store.list_tasks()), 1)
         for old in succeeded_before:
             self.assertEqual(self.db.get_item(task["id"], old["item_id"]), old)
@@ -2529,6 +2529,46 @@ class LabelerChatEngineTests(unittest.TestCase):
         self.assertEqual(item["txt_path"], "d/chat0.txt")
 
 
+    def test_chat_tool_body_accepts_empty_and_footer_finals(self):
+        for final in ("", "TXT 已写入，任务已完成。", '{"type":"final","content":'):
+            with self.subTest(final=final):
+                def answer(profile, messages, options, status):
+                    if len(self.app.models.calls) == 1:
+                        return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                            "item": "chat0.png", "mode": "write", "content": "正文\r\n保留换行"}})
+                    return final
+                task = self._submit_chat(answer, system_prompt="final=" + final, write_txt=True)
+                state = self._wait(task["id"])
+                self.assertEqual(state["status"], "done")
+                row = self.db.annotations(task_id=task["id"])[0]
+                self.assertEqual(row["approved_txt"], "正文\r\n保留换行")
+                self.assertEqual(row["description"], "")
+                self.assertEqual(state["usage"]["total_tokens"], 30)
+
+    def test_chat_malformed_txt_json_and_disk_failure_do_not_add_model_requests(self):
+        for kind in ("malformed", "disk"):
+            with self.subTest(kind=kind):
+                def answer(*args):
+                    if kind == "malformed":
+                        return '{"type":"tool","tool":"write_caption_txt","arguments":'
+                    return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                        "item": "chat0.png", "mode": "write", "content": "正文"}})
+                with mock.patch.object(TxtToolContext, "_write_text", side_effect=OSError("disk timeout")):
+                    task = self._submit_chat(answer, system_prompt=kind, write_txt=True)
+                    state = self._wait(task["id"])
+                self.assertEqual(state["status"], "failed")
+                self.assertEqual(len(self.app.models.calls), 1)
+                self.assertEqual(state["usage"]["total_tokens"], 15)
+
+    def test_chat_txt_freeform_fails_but_valid_json_can_autofill(self):
+        for reply, expected in (("一只猫站在窗前。", "failed"),
+                                ('{"tags":["cat"],"description":"一只猫"}', "done")):
+            with self.subTest(reply=reply):
+                task = self._submit_chat(lambda *args: reply, system_prompt=reply, write_txt=True)
+                self.assertEqual(self._wait(task["id"])["status"], expected)
+                self.assertEqual(len(self.app.models.calls), 1)
+
+
 class LabelerTxtOutputTests(unittest.TestCase):
     """写入本地 TXT：配置开关、路径规则、工具参数校验与分段追加。"""
 
@@ -2718,6 +2758,159 @@ class LabelerTxtRunnerTests(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), "cat")
         item = self.db.list_items(second["id"])[0]
         self.assertEqual(item["txt_state"], "auto")
+
+
+    def test_tool_body_survives_footer_empty_final_and_reuses_exact_bytes(self):
+        for final in ("已写入成功，任务完成。", ""):
+            with self.subTest(final=final):
+                body = "caption 第一行\r\n第二行\n\n尾行\r"
+                def behavior(profile, messages, options, status):
+                    if len(app.models.calls) == 1:
+                        return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                            "item": "a0.png", "mode": "write", "content": body}})
+                    return final
+                app = _StubApp(self.data_dir, models=_StubModels(behavior))
+                config = _base_config(write_txt=True, custom_prompt="footer:" + final)
+                _, task = self._submit(app, config)
+                self.assertEqual(self._wait(task["id"])["status"], "done")
+                row = self.db.annotations(task_id=task["id"])[0]
+                self.assertEqual(row["approved_txt"], body)
+                self.assertEqual(row["tags"], [])
+                self.assertEqual(row["description"], "")
+                calls = len(app.models.calls)
+                _, cached = self._submit(app, config)
+                state = self._wait(cached["id"])
+                self.assertEqual(state["status"], "done")
+                self.assertEqual(state["usage"], {})
+                self.assertEqual(len(app.models.calls), calls)
+                item = self.db.list_items(cached["id"])[0]
+                path = self.store.outputs_dir(cached["id"]) / item["txt_path"]
+                self.assertEqual(path.read_bytes(), body.encode("utf-8"))
+                events = self.store.read_events(cached["id"])
+                self.assertFalse(any(event["type"] == "usage" for event in events))
+                done = next(event for event in events if event["type"] == "image_done")
+                self.assertTrue(done["reused"])
+
+    def test_no_tool_requires_complete_valid_json_and_retains_usage(self):
+        invalid = ["cat, white", "一只猫站在窗前。", '{"tags":["cat"],"extra":"done"}',
+                   '{"description":22}', '{"tags":[{"tag":"cat","confidence":true}]}',
+                   '{"tags":"cat"}', '{"tags":[{"name":"cat"}]}',
+                   '说明 {"tags":["cat"]} 完成', '{"description":"x","description":"y"}',
+                   '{"tags":["cat"]', '{"type":"final","content":"cat"}']
+        for reply in invalid:
+            with self.subTest(reply=reply):
+                app = _StubApp(self.data_dir, models=_StubModels(lambda *args: reply))
+                _, task = self._submit(app, _base_config(write_txt=True, custom_prompt=reply))
+                final = self._wait(task["id"])
+                self.assertEqual(final["status"], "failed")
+                self.assertEqual(len(app.models.calls), 1, "非法输出不增加纠正请求")
+                self.assertEqual(final["usage"]["total_tokens"], 15)
+                self.assertEqual(self.db.list_items(task["id"])[0]["usage"]["total_tokens"], 15)
+                self.assertEqual(self.db.annotations(task_id=task["id"]), [])
+                self.assertEqual(list(self.store.outputs_dir(task["id"]).rglob("*.txt")), [])
+
+    def test_json_auto_uses_mode_filter_and_trigger(self):
+        reply = '{"tags":[{"tag":"cat","confidence":0.9},{"tag":"dog","confidence":0.1}],"description":"ignored"}'
+        app = _StubApp(self.data_dir, models=_StubModels(lambda *args: reply))
+        _, task = self._submit(app, _base_config(write_txt=True,
+            trigger_word={"enabled": True, "value": "my_trigger"}))
+        self.assertEqual(self._wait(task["id"])["status"], "done")
+        annotation = self.db.annotations(task_id=task["id"])[0]
+        self.assertEqual(annotation["approved_txt"], "my_trigger, cat")
+        self.assertEqual(annotation["tags"], ["my_trigger", "cat"])
+        self.assertEqual(self.db.list_items(task["id"])[0]["txt_state"], "auto")
+
+    def test_legacy_null_txt_requires_explicit_retry_without_changing_normal_cache(self):
+        app = _StubApp(self.data_dir)
+        jobs, first = self._submit(app, _base_config())
+        self.assertEqual(self._wait(first["id"])["status"], "done")
+        calls = len(app.models.calls)
+        _, missing = self._submit(app, _base_config(write_txt=True))
+        self.assertEqual(self._wait(missing["id"])["status"], "failed")
+        self.assertEqual(len(app.models.calls), calls)
+        row = self.db.list_items(missing["id"])[0]
+        self.assertEqual(row["error_category"], "missing_approved_txt")
+        self.assertIn("重试失败", row["error"])
+        self.assertEqual(self.db.restore_completed_items_from_annotations(missing["id"]), 0)
+        jobs.continue_task(missing["id"], mode="failed_only")
+        self.assertEqual(self._wait(missing["id"])["status"], "done")
+        self.assertEqual(len(app.models.calls), calls + 1)
+        _, cached = self._submit(app, _base_config(write_txt=True))
+        self.assertEqual(self._wait(cached["id"])["status"], "done")
+        self.assertEqual(len(app.models.calls), calls + 1)
+
+    def test_database_and_txt_failures_never_retry_model(self):
+        for operation in ("complete", "mark_running", "write", "publish"):
+            with self.subTest(operation=operation):
+                app = _StubApp(self.data_dir)
+                config = _base_config(write_txt=True, custom_prompt=operation, retry_limit=3)
+                if operation == "complete":
+                    target = mock.patch.object(self.db, "complete_item", side_effect=RuntimeError("DB 503 timeout"))
+                elif operation == "mark_running":
+                    target = mock.patch.object(self.db, "mark_running", side_effect=RuntimeError("DB 503 timeout"))
+                elif operation == "write":
+                    target = mock.patch.object(TxtToolContext, "_write_text", side_effect=OSError("disk 503 timeout"))
+                else:
+                    target = mock.patch.object(TxtToolContext, "publish", side_effect=OSError("publish timeout"))
+                with target:
+                    _, task = self._submit(app, config)
+                    final = self._wait(task["id"])
+                self.assertEqual(final["status"], "failed")
+                self.assertEqual(len(app.models.calls), 0 if operation == "mark_running" else 1)
+                self.assertEqual(self.db.annotations(task_id=task["id"]), [])
+                self.assertFalse(any(event["type"] == "image_done" for event in self.store.read_events(task["id"])))
+                self.assertEqual(list(self.store.outputs_dir(task["id"]).rglob("*.txt")), [])
+                if operation != "mark_running":
+                    self.assertEqual(final["usage"]["total_tokens"], 15)
+
+    def test_running_serial_segments_remain_visible_before_commit(self):
+        visible = []
+        def behavior(profile, messages, options, status):
+            if len(app.models.calls) == 1:
+                return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                    "item": "a0.png", "mode": "write", "content": "first\r\n"}})
+            writer = options["txt_tool"]
+            visible.append(writer.target_path().read_bytes())
+            item = self.db.get_item(writer.task_id, writer.item_id)
+            self.assertEqual(item["state"], "running")
+            self.assertEqual(item["txt_state"], "written")
+            return "已完成"
+        app = _StubApp(self.data_dir, models=_StubModels(behavior))
+        _, task = self._submit(app, _base_config(write_txt=True))
+        self.assertEqual(self._wait(task["id"])["status"], "done")
+        self.assertEqual(visible, [b"first\r\n"])
+
+    def test_final_txt_metadata_is_committed_with_annotation_even_if_progress_callback_fails(self):
+        app = _StubApp(self.data_dir)
+        with mock.patch.object(self.db, "mark_txt", side_effect=RuntimeError("progress unavailable")):
+            _, task = self._submit(app, _base_config(write_txt=True))
+            self.assertEqual(self._wait(task["id"])["status"], "done")
+        item = self.db.list_items(task["id"])[0]
+        self.assertEqual((item["txt_state"], item["txt_path"], item["txt_chars"]), ("auto", "d/a0.txt", 3))
+        self.assertEqual(self.db.annotations(task_id=task["id"])[0]["approved_txt"], "cat")
+
+    def test_provider_fallback_only_for_explicit_unsupported_tools_and_budget_stops(self):
+        for message, expected_calls in (("503 timeout", 1), ("tools not supported", 2)):
+            with self.subTest(message=message):
+                def behavior(profile, messages, options, status):
+                    if "tools" in options:
+                        raise RuntimeError(message)
+                    return '{"tags":["cat"],"description":""}'
+                app = _StubApp(self.data_dir, models=_StubModels(behavior))
+                _, task = self._submit(app, _base_config(write_txt=True, retry_limit=0, custom_prompt=message))
+                state = self._wait(task["id"])
+                self.assertEqual(state["status"], "done" if expected_calls == 2 else "failed")
+                self.assertEqual(len(app.models.calls), expected_calls)
+        def repeated_tool(*args):
+            return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                "item": "a0.png", "mode": "append", "content": "unfinished"}})
+        app = _StubApp(self.data_dir, models=_StubModels(repeated_tool))
+        _, task = self._submit(app, _base_config(write_txt=True, custom_prompt="budget"))
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(len(app.models.calls), 8)
+        self.assertEqual(state["usage"]["total_tokens"], 120)
+        self.assertEqual(list(self.store.outputs_dir(task["id"]).rglob("*.txt")), [])
 
 
 class LabelerTxtServiceTests(unittest.TestCase):

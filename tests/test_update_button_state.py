@@ -20,6 +20,9 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -84,6 +87,164 @@ class UpdateInstallButtonTests(unittest.TestCase):
         self.assertIn("if (updateBusy(state.bootstrap.update)) startFastUpdatePoll();", poll)
         self.assertIn("if (updateBusy(next)) startFastUpdatePoll();", poll,
                       "另一个客户端发起更新时，慢轮询发现 busy 也要接上快速轮询")
+
+
+@unittest.skipUnless(shutil.which("node"), "更新状态行为测试需要 Node.js")
+class UpdateErrorPriorityTests(unittest.TestCase):
+    """执行真实渲染函数，用固定状态验证最终文案与按钮，不依赖网络或时钟。"""
+
+    NODE_DRIVER = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+class Element {
+  constructor() {
+    this.children = [];
+    this.value = '';
+    this.hidden = false;
+    this.disabled = false;
+    this.open = false;
+    this.style = {};
+    this.classList = { toggle() {} };
+  }
+  set textContent(value) { this.children = [String(value)]; }
+  get textContent() {
+    return this.children.map(child => typeof child === 'string' ? child : child.textContent).join('');
+  }
+  replaceChildren(...children) { this.children = children; }
+  append(...children) { this.children.push(...children); }
+}
+const elements = new Map();
+const $ = selector => {
+  if (!elements.has(selector)) elements.set(selector, new Element());
+  return elements.get(selector);
+};
+$('#settingsDialog').open = Boolean(input.dialogOpen);
+const context = {
+  $, state: { bootstrap: { update: input.status } },
+  document: { createElement: () => new Element(), createTextNode: text => String(text) },
+  UPDATE_BUSY_PHASES: ['checking', 'downloading', 'restarting'],
+  UPDATE_RELEASE_URL: 'https://example.invalid/releases',
+  updateNotesCache: new Map(),
+  updateReadyDismissed: Boolean(input.dismissed),
+  updateReadyDismissedVersion: input.dismissed ? String(input.status.ready?.version || '') : '',
+  installRequestPending: false,
+  initUpdateBrowserControls() {}, renderUpdateSource() {}, renderUpdateVersionList() {},
+  renderUpdateNotes() {}, ensureUpdateNotes() {}, renderUpdateArtifacts() {}, renderUpdateProxyState() {},
+};
+vm.createContext(context);
+vm.runInContext(input.functions + '\nrenderUpdateStatus(' + JSON.stringify(input.status) + ');', context);
+const result = {};
+for (const id of ['updateMessage', 'installUpdate', 'restartNow', 'restartLater',
+                  'updateFloat', 'updateFloatTitle', 'updateFloatMeta', 'updateFloatTrack',
+                  'updateFloatCancel', 'updateFloatApply', 'updateFloatDiscard']) {
+  const element = $('#' + id);
+  result[id] = { text: element.textContent, hidden: element.hidden, disabled: element.disabled };
+}
+result.manualLinks = $('#updateMessage').children.filter(child => child.href).map(child => child.href);
+process.stdout.write(JSON.stringify(result));
+"""
+
+    def render(self, status: dict, *, dialog_open=False, dismissed=False) -> dict:
+        source = _read("public/js/07-models-agents.js")
+        functions = "\n".join(
+            _function(source, header).removeprefix("export ")
+            for header in (
+                "export function renderUpdateStatus(status) {",
+                "export function syncUpdateFloat(status = state.bootstrap.update || {}) {",
+                "function updateInstallAllowed(status, selected) {",
+                "function updateVersionAllowed(release) {",
+                "function versionLabel(release) {",
+                "function formatUpdateSize(bytes) {",
+            )
+        )
+        result = subprocess.run(
+            ["node", "-e", self.NODE_DRIVER], cwd=ROOT,
+            input=json.dumps({"functions": functions, "status": status,
+                              "dialogOpen": dialog_open, "dismissed": dismissed}),
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def status(self, **overrides) -> dict:
+        return {
+            "supported": True, "mode": "frozen", "phase": "error",
+            "current_version": "4.8.1", "latest_version": "4.8.2",
+            "releases": [{"tag": "v4.8.2", "version": "4.8.2", "current": False}],
+            **overrides,
+        }
+
+    def test_error_survives_other_status_messages(self) -> None:
+        current = [{"tag": "v4.8.1", "version": "4.8.1", "current": True}]
+        cases = {
+            "pending_ok": {"pending_verification": {"pending": True, "ok": True, "target_version": "4.8.2"}},
+            "pending_failed": {"pending_verification": {"pending": True, "ok": False, "target_version": "4.8.2"}},
+            "source": {"mode": "source"},
+            "current": {"releases": current},
+            "manual_required": {"manual_download_required": True},
+            "manual_available": {"manual_update_available": True},
+            "manual_phase": {"phase": "manual"},
+            "no_installable_release": {"releases": [{"tag": "v2.0.0", "version": "2.0.0"}]},
+            "unsupported": {"supported": False},
+            "available": {"phase": "available"},
+            "combined": {"releases": current, "manual_download_required": True,
+                         "pending_verification": {"pending": True, "ok": True, "target_version": "4.8.2"}},
+        }
+        error = '更新失败：<校验错误> & "请重试"'
+        for name, fields in cases.items():
+            with self.subTest(name=name):
+                result = self.render(self.status(error=error, **fields))
+                self.assertEqual(result["updateMessage"]["text"], error)
+                self.assertEqual(result["manualLinks"], [])
+
+    def test_normal_status_messages_and_manual_link_remain(self) -> None:
+        cases = [
+            ({}, "检查更新失败。"),
+            ({"phase": "available"}, "将安装 4.8.2，下载完成后可选择立即重启。"),
+            ({"pending_verification": {"pending": True, "ok": True, "target_version": "4.8.2"}},
+             "上次更新已完成并验证通过（4.8.2）。"),
+            ({"pending_verification": {"pending": True, "ok": False, "target_version": "4.8.2"}},
+             "上次更新到 4.8.2 后版本校验失败，请重新检查更新或手动安装。"),
+            ({"mode": "source"}, "源码模式不支持一键更新，请在终端中执行 git pull --ff-only origin master。"),
+            ({"releases": [{"tag": "v4.8.1", "version": "4.8.1", "current": True}]},
+             "当前已安装该版本，无需更新。"),
+            ({"manual_download_required": True, "manual_release_url": "https://example.invalid/manual"},
+             "2.0.0 及更早版本不支持自动更新，请前往 GitHub Release 手动下载。"),
+        ]
+        for error in (None, ""):
+            for fields, expected in cases:
+                with self.subTest(error=error, fields=fields):
+                    status = self.status(**fields)
+                    if error is not None:
+                        status["error"] = error
+                    result = self.render(status)
+                    self.assertEqual(result["updateMessage"]["text"], expected)
+                    self.assertEqual(result["manualLinks"],
+                                     ["https://example.invalid/manual"] if fields.get("manual_download_required") else [])
+
+    def test_ready_error_is_visible_in_float_without_changing_actions(self) -> None:
+        status = self.status(phase="ready", ready={"version": "4.8.2"})
+        normal = self.render(status)
+        self.assertEqual(normal["updateFloatMeta"]["text"], "4.8.2 已下载，重启后生效")
+        failed = self.render({**status, "phase": "error", "error": "替换程序失败，请重试。"})
+        self.assertEqual(failed["updateMessage"]["text"], "替换程序失败，请重试。")
+        self.assertEqual(failed["updateFloatMeta"]["text"], "替换程序失败，请重试。")
+        self.assertFalse(failed["updateFloat"]["hidden"])
+        for id in ("installUpdate", "restartNow", "restartLater", "updateFloatTitle",
+                   "updateFloatTrack", "updateFloatCancel", "updateFloatApply", "updateFloatDiscard"):
+            self.assertEqual(failed[id], normal[id], id)
+        self.assertTrue(failed["installUpdate"]["hidden"])
+        self.assertFalse(failed["updateFloatApply"]["hidden"])
+        self.assertFalse(failed["updateFloatDiscard"]["hidden"])
+
+    def test_ready_error_float_respects_settings_and_later_choice(self) -> None:
+        status = self.status(error="重启失败", ready={"version": "4.8.2"})
+        for options in ({"dialog_open": True}, {"dismissed": True}):
+            with self.subTest(options=options):
+                result = self.render(status, **options)
+                self.assertTrue(result["updateFloat"]["hidden"])
+                self.assertEqual(result["updateMessage"]["text"], "重启失败")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from naiba.updater import (  # noqa: E402
+    APPLY_UPDATE_SCRIPT,
     EXECUTABLE_ASSET,
     FALLBACK_TTL_SECONDS,
     LATEST_TAG,
@@ -941,6 +942,207 @@ class ExecutableUpdateTests(unittest.TestCase):
         self.assertFalse(status["can_apply"])
         self.assertFalse(staged.exists())
         self.assertFalse((self.data_dir / "update" / READY_MARKER).exists())
+
+
+class UpdateReplacementTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.app_dir = self.root / "app"
+        self.data_dir = self.root / "data"
+        self.app_dir.mkdir()
+        self.data_dir.mkdir()
+        self.manager = UpdateManager(self.app_dir, self.data_dir)
+        self.manager.build = {"version": "4.8.2-beta", "commit": COMMIT_C}
+        self.downloaded = self.data_dir / "update" / "update.download"
+        self.downloaded.parent.mkdir()
+        self.downloaded.write_bytes(b"MZ" + b"x" * 1024 * 1024)
+        self.checksum = hashlib.sha256(self.downloaded.read_bytes()).hexdigest()
+        self.manager._mark_ready({"version": "4.8.3-beta", "commit": COMMIT_A, "sha256": self.checksum}, self.downloaded)
+        self.target = self.app_dir / "cat-chat.exe"
+
+    def write_result(self, attempt="attempt", status="error", **values):
+        from naiba.core.contracts import UPDATE_INSTALL_RESULT_FILE
+
+        payload = {
+            "attempt_id": attempt, "status": status, "target_commit": COMMIT_A,
+            "stage": "replace", "error": "executable locked", "finished_at": 1,
+        }
+        payload.update(values)
+        (self.downloaded.parent / UPDATE_INSTALL_RESULT_FILE).write_text(json.dumps(payload), encoding="utf-8-sig")
+
+    def test_replacer_start_failure_is_retryable_and_keeps_package(self):
+        callback = mock.Mock()
+        with mock.patch.object(self.manager, "_launch_replacer", side_effect=OSError("PowerShell unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "PowerShell unavailable"):
+                self.manager.apply_ready(callback)
+        callback.assert_not_called()
+        status = self.manager.status()
+        self.assertEqual(status["phase"], "error")
+        self.assertTrue(status["can_apply"])
+        self.assertIn("PowerShell unavailable", status["error"])
+        self.assertTrue(self.downloaded.is_file())
+        result = self.manager._read_install_result(self.manager._install_attempt)
+        self.assertEqual(result["stage"], "prepare")
+
+    def test_pending_write_failure_does_not_launch_or_leave_restarting(self):
+        with mock.patch.object(self.manager, "_write_pending", side_effect=PermissionError("read only")), \
+                mock.patch.object(self.manager, "_launch_replacer") as launch:
+            with self.assertRaisesRegex(RuntimeError, "read only"):
+                self.manager.apply_ready()
+        launch.assert_not_called()
+        self.assertEqual(self.manager.status()["phase"], "error")
+        self.assertTrue(self.manager.status()["can_apply"])
+
+    def test_script_error_is_visible_in_running_application(self):
+        self.manager._install_attempt = "attempt"
+        self.manager.phase = "restarting"
+        self.write_result()
+        status = self.manager.status()
+        self.assertEqual(status["phase"], "error")
+        self.assertIn("executable locked", status["error"])
+        self.assertTrue(status["can_apply"])
+
+    def test_unexpected_script_exit_without_result_is_reported(self):
+        self.manager._install_attempt = "attempt"
+        self.manager.phase = "restarting"
+        self.manager._replacer = mock.Mock()
+        self.manager._replacer.poll.return_value = 7
+        status = self.manager.status()
+        self.assertEqual(status["phase"], "error")
+        self.assertIn("退出码 7", status["error"])
+        self.assertEqual(self.manager._read_install_result("attempt")["stage"], "script")
+
+    def test_previous_attempt_result_does_not_override_new_attempt(self):
+        self.manager._install_attempt = "new-attempt"
+        self.manager.phase = "restarting"
+        self.write_result(attempt="old-attempt")
+        self.assertEqual(self.manager.status()["phase"], "restarting")
+        self.assertEqual(self.manager.status()["error"], "")
+
+    def test_failure_is_restored_on_next_application_start(self):
+        self.manager._install_attempt = "attempt"
+        self.manager._write_pending(self.manager.ready)
+        self.write_result()
+        revived = UpdateManager(self.app_dir, self.data_dir)
+        status = revived.status()
+        self.assertEqual(status["phase"], "error")
+        self.assertIn("executable locked", status["error"])
+        self.assertFalse(status["pending_verification"]["ok"])
+        self.assertTrue(status["can_apply"])
+        self.assertTrue(self.downloaded.is_file())
+
+    def test_startup_observation_keeps_pending_and_package_until_result(self):
+        self.manager._install_attempt = "attempt"
+        self.manager._write_pending(self.manager.ready)
+        self.write_result(status="starting", error="", finished_at=int(time.time()))
+        with mock.patch.object(UpdateManager, "_read_build_info", return_value={"version": "4.8.3-beta", "commit": COMMIT_A}):
+            revived = UpdateManager(self.app_dir, self.data_dir)
+        self.assertEqual(revived.status()["phase"], "restarting")
+        self.assertFalse(revived.status()["pending_verification"]["pending"])
+        self.assertTrue(self.downloaded.exists())
+        self.assertTrue((self.downloaded.parent / "pending-update.json").exists())
+        self.write_result(status="error", error="startup failed twice")
+        self.assertIn("startup failed twice", revived.status()["error"])
+        with mock.patch.object(UpdateManager, "_read_build_info", return_value={"version": "4.8.3-beta", "commit": COMMIT_A}):
+            reopened = UpdateManager(self.app_dir, self.data_dir)
+        self.assertEqual(reopened.status()["phase"], "error")
+        self.assertTrue(self.downloaded.exists())
+
+    def test_completed_observation_verifies_and_cleans_package(self):
+        self.manager._install_attempt = "attempt"
+        self.manager._write_pending(self.manager.ready)
+        self.write_result(status="starting", error="", finished_at=int(time.time()))
+        with mock.patch.object(UpdateManager, "_read_build_info", return_value={"version": "4.8.3-beta", "commit": COMMIT_A}):
+            revived = UpdateManager(self.app_dir, self.data_dir)
+        self.write_result(status="installed", error="")
+        status = revived.status()
+        self.assertEqual(status["phase"], "idle")
+        self.assertTrue(status["pending_verification"]["ok"])
+        self.assertFalse(self.downloaded.exists())
+        self.assertFalse((self.downloaded.parent / "pending-update.json").exists())
+
+    def test_startup_observation_timeout_is_retryable(self):
+        self.manager._install_attempt = "attempt"
+        self.manager._write_pending(self.manager.ready)
+        self.write_result(status="starting", error="", finished_at=int(time.time()) - 60)
+        revived = UpdateManager(self.app_dir, self.data_dir)
+        self.assertEqual(revived.status()["phase"], "error")
+        self.assertTrue(revived.status()["can_apply"])
+
+    def test_stale_error_does_not_turn_verified_install_into_failure(self):
+        self.manager._install_attempt = "new-attempt"
+        self.manager._write_pending(self.manager.ready)
+        self.write_result(attempt="old-attempt")
+        self.manager.build["commit"] = COMMIT_A
+        self.assertTrue(self.manager.verify_pending()["ok"])
+
+    def test_new_attempt_clears_previous_verification_message(self):
+        self.manager.pending_verification = {"pending": True, "ok": False}
+        with mock.patch.object(self.manager, "_launch_replacer", return_value=None):
+            status = self.manager.apply_ready()
+        self.assertFalse(status["pending_verification"]["pending"])
+        pending = json.loads((self.downloaded.parent / "pending-update.json").read_text(encoding="utf-8"))
+        self.assertEqual(pending["attempt_id"], self.manager._install_attempt)
+
+    @unittest.skipUnless(os.name == "nt", "Windows process identity")
+    def test_process_identity_reads_current_executable_and_creation_time(self):
+        from naiba.updater import _windows_process_identity
+
+        path, started_at = _windows_process_identity(os.getpid())
+        # Windows venv 启动器把业务交给基础解释器，映像不一定是 sys.executable。
+        expected = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+        self.assertEqual(os.path.normcase(path), os.path.normcase(str(expected)))
+        self.assertGreater(int(started_at), 0)
+        self.assertIsNone(_windows_process_identity(0))
+
+    def launch_arguments(self, child=(None, "200"), parent=(None, "100"), frozen=True, meipass="_MEItest"):
+        child = (str(self.target) if child[0] is None else child[0], child[1])
+        parent = (str(self.target) if parent[0] is None else parent[0], parent[1]) if parent else None
+        with mock.patch("naiba.updater._windows_process_identity", side_effect=[child, parent]), \
+                mock.patch("naiba.updater.subprocess.Popen") as launch, \
+                mock.patch.object(sys, "executable", str(self.target)), \
+                mock.patch.object(sys, "frozen", frozen, create=True), \
+                mock.patch.object(sys, "_MEIPASS", str(self.root / meipass), create=True), \
+                mock.patch("naiba.updater.os.getpid", return_value=123), \
+                mock.patch("naiba.updater.os.getppid", return_value=100):
+            self.manager._launch_replacer(self.downloaded)
+        args = launch.call_args.args[0]
+        return {args[i]: args[i + 1] for i in range(6, len(args), 2)}
+
+    def test_onefile_passes_verified_parent_and_child_creation_times(self):
+        args = self.launch_arguments()
+        self.assertEqual(args["-ProcessId"], "123")
+        self.assertEqual(args["-ProcessStartedAt"], "200")
+        self.assertEqual(args["-ParentProcessId"], "100")
+        self.assertEqual(args["-ParentStartedAt"], "100")
+        self.assertEqual(args["-Sha256"], self.checksum)
+
+    def test_unrelated_or_newer_parent_is_never_authorized_for_termination(self):
+        for parent in ((str(self.root / "shell.exe"), "100"), (None, "300"), None):
+            with self.subTest(parent=parent):
+                self.assertEqual(self.launch_arguments(parent=parent)["-ParentProcessId"], "0")
+
+    def test_source_and_onedir_do_not_target_a_parent(self):
+        for values in ({"frozen": False}, {"meipass": "_internal"}):
+            with self.subTest(values=values):
+                self.assertEqual(self.launch_arguments(**values)["-ParentProcessId"], "0")
+
+    def test_current_process_identity_failure_prevents_launch(self):
+        with mock.patch("naiba.updater._windows_process_identity", return_value=None), \
+                mock.patch("naiba.updater.subprocess.Popen") as launch:
+            with self.assertRaisesRegex(RuntimeError, "无法核实当前进程身份"):
+                self.manager._launch_replacer(self.downloaded)
+        launch.assert_not_called()
+
+    def test_script_replaces_atomically_and_does_not_repeat_backup(self):
+        self.assertEqual(APPLY_UPDATE_SCRIPT.count("-Destination $Backup"), 1)
+        self.assertLess(APPLY_UPDATE_SCRIPT.index("-Destination $Backup"), APPLY_UPDATE_SCRIPT.index("$deadline ="))
+        self.assertIn("[IO.File]::Replace($staged, $Target, [NullString]::Value)", APPLY_UPDATE_SCRIPT)
+        self.assertIn("$process.Handle", APPLY_UPDATE_SCRIPT)
+        self.assertIn("ToFileTimeUtc()", APPLY_UPDATE_SCRIPT)
+        self.assertIn("$process.Kill()", APPLY_UPDATE_SCRIPT)
 
 
 class UpdateProxyOverrideTests(unittest.TestCase):

@@ -233,6 +233,21 @@ class LabelerSkillRetryTests(unittest.TestCase):
         self.service.store.update_task(task_id, status="failed")
         return self.service.store.get_task(task_id)
 
+    def test_resume_does_not_mark_failed_txt_publication_done_from_annotation(self):
+        source = self.failed_task(write_txt=True)
+        task_id = source["id"]
+        item = self.service.db.list_items(task_id)[0]
+        annotation = {**item, "engine": "chat", "output_mode": "auto", "tags": ["cat"],
+                      "description": "一只猫", "approved_txt": "原始正文\r\n第二行"}
+        self.service.db.complete_item(task_id, item["item_id"], annotation=annotation, usage={},
+                                      config_fingerprint=item["config_fingerprint"])
+        self.service.db.fail_item(task_id, item["item_id"], error="disk full", category="publish_failed")
+        self.assertEqual(self.service.db.restore_completed_items_from_annotations(task_id), 0)
+        resumed = self.service.jobs.resume_task(task_id)
+        self.assertEqual(resumed["status"], "queued")
+        self.assertEqual(self.service.db.list_items(task_id)[0]["state"], "queued")
+        self.assertEqual(self.app.models.calls, [])
+
     def test_unchanged_skill_can_retry_with_identical_snapshot_and_fingerprint(self):
         source = self.failed_task()
         payload, status = self.service.api_retry(source["id"], {"mode": "failed_only"})

@@ -3,9 +3,9 @@
 落点固定为 ``data_dir/labeler/exports/``，前端用 ``/api/file?path=…&download=1`` 下载。
 - JSON：含置信度（原始结构）；
 - CSV：扁平一行一图，UTF-8 with BOM（Excel 直接打开不乱码）；
-- TXT：一行一图，``相对路径`` + caption（内容跟打标输出形式：标签 / 描述，
-  两者都有就拼成一段）；
-- captions：逐图 ``.txt`` 打包（只有 caption，不含图片；内容规则同 TXT）；
+- TXT：一行一图，``相对路径`` + caption，汇总时单独压平换行；
+- captions：逐图 ``.txt`` 打包（只有 caption，不含图片）；优先逐字导出已采纳
+  正文，NULL 历史记录保留旧标签/描述拼接规则；
 - lora：**LoRA 训练包**——按留存的原图字节逐张导出 ``000001.png`` + 同主干
   ``000001.txt`` 配对，附 manifest（原始名称/相对路径/导出名/SHA-256 映射）。
   任何记录缺原图、同一样本出现多条、原图字节对不上时**整包拒绝**，不生成半包。
@@ -26,6 +26,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import LABELER_APPROVED_TXT_KEY
 from naiba.core.shell_open import open_folder
 from naiba.labeler.originals import normalize_digest, original_path
 
@@ -123,12 +124,15 @@ def _strip_leading_tag(description: str, tag: str) -> str:
 
 
 def _caption_text(row: dict[str, Any]) -> str:
-    """逐图 txt 的内容：跟着打标时的输出形式走。
+    """逐图 txt 优先逐字返回已采纳正文；NULL 历史记录沿用旧拼接规则。
 
     - 标签形式：只有标签；描述/短语形式：只有描述（短语存在 description 里）；
     - 「标签 + 自然语言」两种都有时拼成「标签, 描述」——描述开头若与首个
       标签同词（触发词在两处各写了一次），把描述里那段前缀去掉再拼。
     """
+    approved_txt = row.get(LABELER_APPROVED_TXT_KEY)
+    if isinstance(approved_txt, str):
+        return approved_txt
     tag_list = [str(tag).strip() for tag in (row.get("tags") or []) if str(tag).strip()]
     description = str(row.get("description") or "").strip()
     mode = str(row.get("output_mode") or "")
@@ -140,7 +144,7 @@ def _caption_text(row: dict[str, Any]) -> str:
             description = _strip_leading_tag(description, tag_list[0])
         if description:
             segments.append(description)
-    # 一行一条 caption：换行会破坏「图片同名 txt」的一图一文件约定。
+    # NULL 历史记录保留原导出口径，包括压平描述里的换行。
     return re.sub(r"\s*\r?\n\s*", " ", ", ".join(segments)).strip()
 
 
@@ -190,6 +194,8 @@ def _record_label(row: dict[str, Any]) -> str:
 
 
 def _caption_source(row: dict[str, Any]) -> str:
+    if isinstance(row.get(LABELER_APPROVED_TXT_KEY), str):
+        return LABELER_APPROVED_TXT_KEY
     has_tags = any(str(tag or "").strip() for tag in (row.get("tags") or []))
     has_desc = bool(str(row.get("description") or "").strip())
     if has_tags and has_desc and str(row.get("output_mode") or "") == "both":
@@ -360,7 +366,8 @@ def render(records: list[dict[str, Any]], fmt: str, data_dir: Path | None = None
         return ("\ufeff" + buffer.getvalue()).encode("utf-8")
     lines: list[str] = []
     for row in records:
-        caption = _caption_text(row)
+        # 只有汇总 TXT 要求一行一图；逐图 TXT/ZIP/训练包保留交付正文换行。
+        caption = re.sub(r"\s*[\r\n]+\s*", " ", _caption_text(row)).strip()
         name = str(row.get("relative_path") or row.get("name") or "")
         lines.append(f"{name}, {caption}" if caption else name)
     return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")

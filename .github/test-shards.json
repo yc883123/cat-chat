@@ -97,6 +97,7 @@
   "test_job_parent_gate",
   "test_kvmem_config",
   "test_labeler",
+  "test_labeler_approved_export",
   "test_labeler_retry_settings",
   "test_labeler_review_ui",
   "test_labeler_skill_lifecycle",

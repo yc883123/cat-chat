@@ -213,6 +213,19 @@ class ComfyUIHistoryPage(TypedDict, total=False):
     missing_ids: list[str]  # Explicitly absent IDs in a bounded lookup request.
 
 
+# Replacer result is local-only; attempt_id binds it to pending-update.json.
+UPDATE_INSTALL_RESULT_FILE = "install-result.json"
+
+
+class UpdateInstallResult(TypedDict):
+    attempt_id: str
+    status: Literal["starting", "installed", "error"]
+    target_commit: str
+    stage: str
+    error: str
+    finished_at: int
+
+
 class CompactionResult(TypedDict, total=False):
     compacted: bool
     reason: str
@@ -237,7 +250,8 @@ LABELER_PROVIDER_LIMITS_PATCH_KEY = "provider_limits_patch"
 LABELER_CONCURRENCY_SETTINGS_KEY = "concurrency"
 # Internal-only task snapshot, never accepted as client-supplied rules.
 LABELER_SUPERVISION_RULES_KEY = "supervision_rules"
-# Exact TXT approved by the supervisor; None means no audited TXT exists.
+# Exact accepted TXT delivery, with or without supervision; None marks legacy
+# annotations that have no preserved delivery text.
 LABELER_APPROVED_TXT_KEY = "approved_txt"
 # Cached annotations retain the original model, but an unknown original slot
 # must not be confused with the worker that merely claimed the cache hit.

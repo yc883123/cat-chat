@@ -175,7 +175,12 @@ try {
   }
   $stage = 'staging'
   Copy-Item -LiteralPath $Downloaded -Destination $staged -Force
-  if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $Sha256) {
+  # Compute directly: a PowerShell 7 parent may pass a module path that hides 5.1 Get-FileHash.
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  $stream = [IO.File]::OpenRead($staged)
+  try { $stagedHash = [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '') }
+  finally { $stream.Dispose(); $hasher.Dispose() }
+  if ($stagedHash -ne $Sha256) {
     throw 'Staged update checksum mismatch.'
   }
   $stage = 'backup'

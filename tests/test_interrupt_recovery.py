@@ -489,9 +489,11 @@ class Sleeper {
             "-InstallSeconds", str(install_seconds), "-NoFailurePopup",
         ]
         launched_at = time.monotonic()
+        # Emulate a pwsh parent whose inherited module path cannot find Windows PS 5.1 Utility.
+        environment = {**os.environ, "PSModulePath": str(self.directory / "no-modules")}
         process = subprocess.Popen(
             command, cwd=self.directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace",
+            text=True, errors="replace", env=environment,
         )
         self.processes.append(process)
         if observed_parent is not None:
